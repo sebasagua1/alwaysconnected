@@ -19,6 +19,7 @@ import { CATEGORY_ICONS } from '@/lib/categoryIcons';
 import { EditEventSheet } from '@/components/map/EditEventSheet';
 import { useAuthStore } from '@/stores/authStore';
 import { supabase } from '@/integrations/supabase/client';
+import { getCurrentPosition } from '@/lib/geo';
 import { useToast } from '@/hooks/use-toast';
 import { ModerationMenu } from '@/components/moderation/ModerationMenu';
 import { rpcMessage } from '@/lib/rpcErrors';
@@ -317,7 +318,10 @@ export function EventBottomSheet({ event, onClose }: Props) {
   const handleCheckIn = () => {
     if (!user || checkingIn) return;
     setCheckingIn(true);
-    navigator.geolocation.getCurrentPosition(
+    // getCurrentPosition de lib/geo.ts, no el del navegador: en nativo pide el
+    // permiso a CoreLocation y el aviso sale con el nombre de la app en vez de
+    // con «localhost», que es el origen del webview.
+    getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 }).then(
       async (pos) => {
         const { data, error } = await supabase.rpc('check_in_to_event', {
           _event_id: event.id,
@@ -341,11 +345,10 @@ export function EventBottomSheet({ event, onClose }: Props) {
         }
         setCheckingIn(false);
       },
-      (err) => {
+      (err: GeolocationPositionError) => {
         toast({ title: t('map.locError'), description: err.message, variant: 'destructive' });
         setCheckingIn(false);
       },
-      { enableHighAccuracy: true, timeout: 10000 },
     );
   };
 

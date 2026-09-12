@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { checkPermission, isNativeGeo, watchPosition } from '@/lib/geo';
 
 export type GeoPermissionStatus = 'prompt' | 'granted' | 'denied' | 'unsupported';
 
@@ -19,8 +20,10 @@ interface Options {
 }
 
 /**
- * Continuously tracks the user's geolocation using navigator.geolocation.watchPosition.
- * Optimized for mobile: high-accuracy GPS, throttled updates via maximumAge.
+ * Sigue la ubicación de forma continua. En nativo va contra CoreLocation y en
+ * web contra `navigator.geolocation`; de esconder la diferencia se encarga
+ * lib/geo.ts. Pensado para móvil: alta precisión, con `maximumAge` limitando
+ * cuántas lecturas llegan.
  */
 export function useUserLocation(options: Options = {}) {
   const {
@@ -33,7 +36,6 @@ export function useUserLocation(options: Options = {}) {
   const [location, setLocation] = useState<UserLocation | null>(null);
   const [error, setError] = useState<GeolocationPositionError | null>(null);
   const [permission, setPermission] = useState<GeoPermissionStatus>('prompt');
-  const watchIdRef = useRef<number | null>(null);
   // El GPS de alta precisión no tiene por qué seguir encendido con la pantalla
   // tapada o la pestaña en segundo plano. En iOS el webview se suspende solo,
   // pero en la web una pestaña de fondo seguiría consumiendo indefinidamente.
@@ -57,22 +59,22 @@ export function useUserLocation(options: Options = {}) {
 
   // Sondeo del estado del permiso.
   //
-  // OJO con lo que este sondeo vale y lo que NO vale. Dentro del WKWebView de
-  // Capacitor, `navigator.permissions` responde por el origen de la página
-  // (capacitor://localhost), que no tiene nada que ver con la autorización
-  // nativa de CoreLocation que sí gobierna a `watchPosition`. Puede decir
-  // `denied` mientras el GPS está entregando posiciones sin problema.
+  // OJO con lo que este sondeo vale y lo que NO vale. En WEB responde
+  // `navigator.permissions`, y dentro de un webview eso contesta por el origen
+  // de la página (capacitor://localhost), que no tiene nada que ver con la
+  // autorización nativa de CoreLocation: puede decir `denied` con el GPS
+  // entregando posiciones.
   //
-  // Por eso este sondeo NUNCA declara denegado. Solo sirve para adelantar un
-  // `granted` y ahorrarse la espera. Quien decide que algo está denegado es
-  // el error PERMISSION_DENIED del propio geolocation, que es el único que
-  // habla con el sistema operativo.
+  // En NATIVO ya no se le pregunta a él, sino a CoreLocation a través del
+  // plugin (ver lib/geo.ts), que sí dice la verdad. Aun así se mantiene la
+  // misma regla en los dos casos: el sondeo NUNCA declara denegado, solo
+  // adelanta un `granted`. Quien declara denegado es el error
+  // PERMISSION_DENIED del propio watch, que es el que habla con el sistema.
   useEffect(() => {
-    if (!navigator.geolocation) {
+    if (!isNativeGeo && !navigator.geolocation) {
       setPermission('unsupported');
       return;
     }
-    if (!('permissions' in navigator) || !navigator.permissions?.query) return;
 
     let cancelado = false;
     const aplicar = (estado: string) => {
@@ -86,6 +88,15 @@ export function useUserLocation(options: Options = {}) {
       // inicial, así que no añade nada.
       if (estado === 'granted') setPermission('granted');
     };
+
+    if (isNativeGeo) {
+      checkPermission()
+        .then((estado) => { if (estado) aplicar(estado); })
+        .catch(() => {});
+      return () => { cancelado = true; };
+    }
+
+    if (!('permissions' in navigator) || !navigator.permissions?.query) return;
 
     navigator.permissions
       .query({ name: 'geolocation' })
@@ -101,15 +112,22 @@ export function useUserLocation(options: Options = {}) {
   }, []);
 
   useEffect(() => {
-    // Al ocultarse, la limpieza de este efecto llama a clearWatch; al volver,
-    // se vuelve a suscribir y la primera lectura llega en unos segundos.
+    // Al ocultarse, la limpieza de este efecto suelta el reloj; al volver, se
+    // vuelve a suscribir y la primera lectura llega en unos segundos.
     if (!enabled || !visible) return;
-    if (!navigator.geolocation) {
+    if (!isNativeGeo && !navigator.geolocation) {
       setPermission('unsupported');
       return;
     }
 
-    const id = navigator.geolocation.watchPosition(
+    // En nativo suscribirse es asíncrono —hay que pedir permiso antes—, así que
+    // la limpieza puede llegar antes que la suscripción. Eso lo resuelve
+    // watchPosition por dentro devolviendo siempre una función que suelta.
+    let soltar: (() => void) | null = null;
+    let soltado = false;
+
+    watchPosition(
+      { enableHighAccuracy, maximumAge, timeout },
       (pos) => {
         setError(null);
         decididoPorGeoRef.current = true;
@@ -130,15 +148,17 @@ export function useUserLocation(options: Options = {}) {
           setPermission('denied');
         }
       },
-      { enableHighAccuracy, maximumAge, timeout }
-    );
+    )
+      .then((fn) => {
+        if (soltado) { fn(); return; }
+        soltar = fn;
+      })
+      .catch(() => {});
 
-    watchIdRef.current = id;
     return () => {
-      if (watchIdRef.current != null) {
-        navigator.geolocation.clearWatch(watchIdRef.current);
-        watchIdRef.current = null;
-      }
+      soltado = true;
+      soltar?.();
+      soltar = null;
     };
   }, [enabled, visible, enableHighAccuracy, maximumAge, timeout]);
 
