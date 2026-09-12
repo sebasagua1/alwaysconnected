@@ -61,6 +61,14 @@
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>$(APP_BRAND_NAME) usa tu ubicación para mostrarte eventos cercanos en el campus y validar tu asistencia (check-in).</string>
+	<!-- La app NUNCA pide ubicación en segundo plano, y este aviso no llega a
+	     mostrarse. Está porque @capacitor/geolocation se apoya en
+	     ion-ios-geolocation, que SÍ puede reportar en segundo plano: el escáner
+	     de Apple ve esa referencia y exige la clave. Sin ella, cada subida
+	     responde con el aviso ITMS-90683. Mismo texto a propósito, que es lo
+	     que recomienda el propio plugin. -->
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>$(APP_BRAND_NAME) usa tu ubicación para mostrarte eventos cercanos en el campus y validar tu asistencia (check-in).</string>
 	<!-- El selector de foto de perfil es un <input type="file" accept="image/*">.
 	     WKWebView le ofrece "Tomar foto", y sin esta clave iOS cierra la app en
 	     el acto al tocarla. Ver EditProfileSheet.tsx. -->
