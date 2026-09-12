@@ -45,12 +45,6 @@ export const LANGUAGE_OPTIONS = [
 /** 1 a 12, para la rueda de semestre del alta y de editar perfil. */
 export const SEMESTER_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
 
-export const RESIDENCE_OPTIONS = [
-  { key: 'local', label: 'residence.local' },
-  { key: 'foraneo', label: 'residence.foraneo' },
-  { key: 'international', label: 'residence.international' },
-] as const;
-
 export const BADGE_DEFINITIONS = [
   { type: 'organizer' },
   { type: 'explorer' },

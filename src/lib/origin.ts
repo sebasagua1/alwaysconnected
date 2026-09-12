@@ -37,6 +37,24 @@ export const COUNTRY_CODES = [
 
 const isCountryCode = (v: string) => /^[A-Z]{2}$/.test(v);
 
+export type ResidenceType = 'local' | 'foraneo' | 'international';
+
+/**
+ * De dónde es alguien, deducido de su `origin`.
+ *
+ * `residence_type` y `origin` decían lo mismo con dos columnas, y podían
+ * contradecirse —residencia «local» con origen «Jalisco»—. Ahora solo se
+ * pregunta una vez y esto deriva la otra: es la misma distinción que ya hacía
+ * formatOrigin, puesta donde se pueda reutilizar y probar.
+ *
+ * No hay ambigüedad posible: un código de país son dos letras mayúsculas y
+ * ningún estado de México se llama así.
+ */
+export function residenceFromOrigin(origin: string | null | undefined): ResidenceType {
+  if (!origin) return 'local';
+  return isCountryCode(origin) ? 'international' : 'foraneo';
+}
+
 /** Nombre legible de un valor de profiles.origin, en el idioma que se pida. */
 export function formatOrigin(value: string | null | undefined, lang: string): string | null {
   if (!value) return null;

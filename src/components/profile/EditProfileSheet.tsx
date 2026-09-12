@@ -9,9 +9,9 @@ import { useAuthStore } from '@/stores/authStore';
 import { useToast } from '@/hooks/use-toast';
 import { LANGUAGE_OPTIONS, SEMESTER_OPTIONS } from '@/lib/constants';
 import { ChipSelector } from '@/components/ui/chip-selector';
-import { ResidencePicker } from '@/components/ui/residence-picker';
+import { PlacePicker } from '@/components/ui/place-picker';
+import { residenceFromOrigin } from '@/lib/origin';
 import { InterestPicker } from '@/components/ui/interest-picker';
-import { OriginPicker } from '@/components/ui/origin-picker';
 import { AvatarCropper } from '@/components/profile/AvatarCropper';
 import { WheelColumn, WHEEL_ITEM_HEIGHT } from '@/components/ui/wheel-column';
 import type { Database } from '@/integrations/supabase/types';
@@ -34,7 +34,9 @@ export function EditProfileSheet({ profile, onClose }: Props) {
   // seleccionada, así que quien nunca lo puso arranca en el primer semestre
   // en vez de en blanco.
   const [semester, setSemester] = useState(profile.semester?.toString() ?? '1');
-  const [residence, setResidence] = useState(profile.residence_type ?? '');
+  // Un solo campo, como en el alta. Aquí no hace falta el `undefined` del
+  // onboarding: el perfil ya existe, así que null es «soy de aquí» y no
+  // «sin contestar».
   const [origin, setOrigin] = useState<string | null>(profile.origin ?? null);
   const [interests, setInterests] = useState<string[]>(profile.interests ?? []);
   const [languages, setLanguages] = useState<string[]>(profile.languages ?? []);
@@ -128,8 +130,8 @@ export function EditProfileSheet({ profile, onClose }: Props) {
         name: name.trim(),
         major: major.trim() || null,
         semester: parseInt(semester) || null,
-        residence_type: residence || null,
-        origin: residence === 'local' ? null : origin,
+        residence_type: residenceFromOrigin(origin),
+        origin,
         interests,
         languages,
         avatar_url: avatarUrl,
@@ -247,25 +249,11 @@ export function EditProfileSheet({ profile, onClose }: Props) {
           </div>
         </div>
 
-        {/* Residence */}
+        {/* De dónde eres. Un solo control: el tipo de residencia se deriva. */}
         <div className="space-y-3">
-          <Label>{t('onboarding.residenceTitle')}</Label>
-          <ResidencePicker value={residence} onChange={setResidence} />
+          <Label>{t('origin.title')}</Label>
+          <PlacePicker value={origin} onChange={setOrigin} />
         </div>
-
-        {/* De dónde eres — solo si no vives aquí */}
-        {(residence === 'foraneo' || residence === 'international') && (
-          <div className="space-y-3">
-            <Label>
-              {t(residence === 'international' ? 'origin.countryTitle' : 'origin.stateTitle')}
-            </Label>
-            <OriginPicker
-              mode={residence === 'international' ? 'international' : 'foraneo'}
-              value={origin}
-              onChange={setOrigin}
-            />
-          </div>
-        )}
 
         {/* Interests */}
         <div className="space-y-3">

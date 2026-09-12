@@ -44,7 +44,9 @@ const llegarAlPasoLegal = () => {
   montar();
   fireEvent.change(screen.getByLabelText(/Nombre completo/), { target: { value: 'Ana' } });
   siguiente();
-  fireEvent.click(screen.getByRole('button', { name: 'Local' }));
+  // Un solo paso de procedencia: «Soy de aquí» guarda origin=null, y de ahi se
+  // deriva residence_type. Antes eran dos pantallas.
+  fireEvent.click(screen.getByRole('button', { name: 'Soy de aquí' }));
   siguiente();
   siguiente(); // intereses, opcionales
   siguiente(); // idiomas, opcionales

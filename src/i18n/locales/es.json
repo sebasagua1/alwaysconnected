@@ -55,8 +55,6 @@
     "majorPh": "ej. ITC, IMT, LAD",
     "semester": "Semestre",
     "semesterPh": "1-12",
-    "residenceTitle": "Residencia",
-    "residenceSubtitle": "¿De dónde eres?",
     "interestsTitle": "Intereses",
     "interestsSubtitle": "Elige lo que te interesa",
     "languagesTitle": "Idiomas",
@@ -497,12 +495,13 @@
     "outdoors": "Aire libre"
   },
   "origin": {
-    "stateTitle": "¿De qué estado eres?",
-    "countryTitle": "¿De qué país eres?",
     "subtitle": "Sirve para encontrar gente de tu tierra en el campus.",
-    "searchState": "Buscar estado",
-    "searchCountry": "Buscar país",
-    "noResults": "Sin resultados"
+    "noResults": "Sin resultados",
+    "title": "¿De dónde eres?",
+    "here": "Soy de aquí",
+    "search": "Buscar estado o país",
+    "statesGroup": "Estados de México",
+    "countriesGroup": "Países"
   },
   "reset": {
     "title": "Elige una contraseña nueva",

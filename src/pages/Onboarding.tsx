@@ -8,8 +8,7 @@ import { LANGUAGE_OPTIONS, SEMESTER_OPTIONS } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 import { ChipSelector } from '@/components/ui/chip-selector';
 import { InterestPicker } from '@/components/ui/interest-picker';
-import { OriginPicker } from '@/components/ui/origin-picker';
-import { ResidencePicker } from '@/components/ui/residence-picker';
+import { PlacePicker } from '@/components/ui/place-picker';
 import { WheelColumn, WHEEL_ITEM_HEIGHT } from '@/components/ui/wheel-column';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
@@ -18,6 +17,7 @@ import { ChevronRight, ChevronLeft, Search, Check } from 'lucide-react';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { pageTitle } from '@/lib/brand';
 import { PRIVACY_URL, TERMS_URL } from '@/lib/legal';
+import { residenceFromOrigin } from '@/lib/origin';
 
 interface Campus {
   id: string;
@@ -35,8 +35,10 @@ export default function Onboarding() {
   // Con rueda de scroll ya no hay "campo vacío": siempre hay una fila
   // seleccionada, así que arranca en el primer semestre en vez de en blanco.
   const [semester, setSemester] = useState('1');
-  const [residence, setResidence] = useState('');
-  const [origin, setOrigin] = useState<string | null>(null);
+  // `undefined` es «todavía no ha elegido»; `null` es «soy de aquí». Sin esa
+  // distinción no se puede exigir respuesta, porque la respuesta válida más
+  // común se guarda justamente como null.
+  const [origin, setOrigin] = useState<string | null | undefined>(undefined);
   const [interests, setInterests] = useState<string[]>([]);
   const [languages, setLanguages] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -109,14 +111,15 @@ export default function Onboarding() {
   const steps = useMemo(() => {
     const list: string[] = [];
     if (needsCampusSelection) list.push('campus');
-    list.push('basics', 'residence');
-    if (residence === 'foraneo' || residence === 'international') list.push('origin');
-    list.push('interests', 'languages');
+    // Un solo paso de procedencia. Antes eran dos —Local/Foráneo/Internacional
+    // y luego estado o país—, pero el primero no decía nada que el segundo no
+    // dijera ya: residence_type se deriva de origin al guardar.
+    list.push('basics', 'origin', 'interests', 'languages');
     // Siempre el último: es la puerta que hay que cruzar para que exista el
     // perfil, y ponerla al final significa que nadie la esquiva volviendo atrás.
     list.push('legal');
     return list;
-  }, [needsCampusSelection, residence]);
+  }, [needsCampusSelection]);
 
   const totalSteps = steps.length;
   const current = steps[Math.min(step, totalSteps - 1)];
@@ -154,9 +157,10 @@ export default function Onboarding() {
       name: name.trim() || null,
       major,
       semester: parseInt(semester) || null,
-      residence_type: residence,
-      // Solo tiene sentido para quien no es local.
-      origin: residence === 'local' ? null : origin,
+      // Se pregunta una vez y la otra columna se deriva: así no pueden
+      // contradecirse. `origin` es null para quien es de aquí.
+      residence_type: residenceFromOrigin(origin),
+      origin: origin ?? null,
       interests,
       languages,
       campus_id: selectedCampusId,
@@ -260,29 +264,14 @@ export default function Onboarding() {
       );
     }
 
-    if (current === 'residence') {
-      return (
-        <div className="space-y-6 flex-1">
-          <div>
-            <h2 className="text-2xl font-extrabold text-foreground mb-1">{t('onboarding.residenceTitle')}</h2>
-            <p className="text-muted-foreground text-sm">{t('onboarding.residenceSubtitle')}</p>
-          </div>
-          <ResidencePicker value={residence} onChange={setResidence} />
-        </div>
-      );
-    }
-
     if (current === 'origin') {
-      const mode = residence === 'international' ? 'international' : 'foraneo';
       return (
         <div className="space-y-6 flex-1">
           <div>
-            <h2 className="text-2xl font-extrabold text-foreground mb-1">
-              {t(mode === 'international' ? 'origin.countryTitle' : 'origin.stateTitle')}
-            </h2>
+            <h2 className="text-2xl font-extrabold text-foreground mb-1">{t('origin.title')}</h2>
             <p className="text-muted-foreground text-sm">{t('origin.subtitle')}</p>
           </div>
-          <OriginPicker mode={mode} value={origin} onChange={setOrigin} />
+          <PlacePicker value={origin} onChange={setOrigin} />
         </div>
       );
     }
@@ -418,8 +407,9 @@ export default function Onboarding() {
     if (current === 'campus') return !!selectedCampusId;
     // Ver `socialAccount`: con Apple el nombre puede no existir nunca.
     if (current === 'basics') return socialAccount || !!name;
-    if (current === 'residence') return !!residence;
-    if (current === 'origin') return !!origin;
+    // `!== undefined` y no `!!origin`: quien es de aquí vale null, que es
+    // falsy, y con `!!` se quedaba atascado sin poder seguir.
+    if (current === 'origin') return origin !== undefined;
     if (current === 'legal') return isAdult && acceptedTerms;
     return true;
   };

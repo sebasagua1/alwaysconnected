@@ -55,8 +55,6 @@
     "majorPh": "e.g. CS, ME, BA",
     "semester": "Semester",
     "semesterPh": "1-12",
-    "residenceTitle": "Residence",
-    "residenceSubtitle": "Where are you from?",
     "interestsTitle": "Interests",
     "interestsSubtitle": "Pick what you're into",
     "languagesTitle": "Languages",
@@ -497,12 +495,13 @@
     "outdoors": "Outdoors"
   },
   "origin": {
-    "stateTitle": "Which state are you from?",
-    "countryTitle": "Which country are you from?",
     "subtitle": "It helps you find people from home on campus.",
-    "searchState": "Search state",
-    "searchCountry": "Search country",
-    "noResults": "No results"
+    "noResults": "No results",
+    "title": "Where are you from?",
+    "here": "I'm from here",
+    "search": "Search state or country",
+    "statesGroup": "States of Mexico",
+    "countriesGroup": "Countries"
   },
   "reset": {
     "title": "Choose a new password",
