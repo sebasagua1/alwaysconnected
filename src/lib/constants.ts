@@ -34,8 +34,12 @@ export const INTEREST_GROUPS = [
 
 export const INTEREST_OPTIONS = INTEREST_GROUPS.flatMap(g => g.items as readonly string[]);
 
+// Cada idioma en su propio idioma (endónimo), que es como se listan los
+// idiomas en cualquier selector decente. El valor se guarda tal cual en
+// profiles.languages y se pinta en crudo: NO hay clave de traducción detrás,
+// así que cambiar uno de estos cambia también el dato guardado.
 export const LANGUAGE_OPTIONS = [
-  'Español', 'English', 'Français', 'Deutsch', 'Português', '中文', '日本語', 'Korean',
+  'Español', 'English', 'Français', 'Deutsch', 'Português', '中文', '日本語', '한국어',
 ] as const;
 
 /** 1 a 12, para la rueda de semestre del alta y de editar perfil. */
