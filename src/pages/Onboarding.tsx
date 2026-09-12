@@ -52,6 +52,33 @@ export default function Onboarding() {
   const [campusSearch, setCampusSearch] = useState('');
   const [needsCampusSelection, setNeedsCampusSelection] = useState(false);
 
+  // El nombre puede venir ya puesto: Apple y Google lo entregan al iniciar
+  // sesión y socialAuth.ts lo guarda en el perfil. Volver a pedirlo es lo que
+  // prohíbe la guideline 4 de Apple, así que el campo arranca relleno.
+  //
+  // Se siembra con la forma funcional para no pisar lo que ya se esté
+  // escribiendo: el perfil puede llegar después del primer render.
+  useEffect(() => {
+    if (profile?.name) setName((actual) => actual || profile.name!);
+  }, [profile?.name]);
+
+  // ¿La cuenta nació de un proveedor social? Decide si el nombre es obligatorio.
+  //
+  // Con Apple no basta con guardarlo la primera vez: el nombre se entrega UNA
+  // sola vez, al autorizar la app. Quien ya la autorizó antes —el revisor de
+  // App Store que probó la 1.0 (18), sin ir más lejos— vuelve a entrar sin él,
+  // y no hay ningún dato con el que rellenar el campo. Bloquear ahí es repetir
+  // exactamente la pantalla por la que rechazaron la app.
+  //
+  // Así que con proveedor social el nombre nunca frena: si llegó, se usa; si
+  // no, se sigue sin él. El perfil aguanta quedarse sin nombre — la columna es
+  // nullable y la UI ya cae a "Estudiante" en todas partes.
+  const socialAccount = useMemo(() => {
+    const meta = user?.app_metadata as { provider?: string; providers?: string[] } | undefined;
+    const usados = meta?.providers ?? (meta?.provider ? [meta.provider] : []);
+    return usados.some((p) => p === 'apple' || p === 'google');
+  }, [user]);
+
   // Quién pertenece a qué institución lo decide el SERVIDOR, en el trigger de
   // alta (handle_new_user), comparando el dominio del correo contra
   // institutions.email_domains. Aquí antes se hacía `email.endsWith('@tec.mx')`,
@@ -121,7 +148,10 @@ export default function Onboarding() {
     setLoading(true);
     const ahora = new Date().toISOString();
     const { error } = await supabase.from('profiles').update({
-      name,
+      // null y no '': ahora se puede terminar sin nombre (ver `socialAccount`),
+      // y toda la UI cae a "Estudiante" con `?? `, que a una cadena vacía no la
+      // atrapa. Guardar '' dejaría el nombre en blanco por toda la app.
+      name: name.trim() || null,
       major,
       semester: parseInt(semester) || null,
       residence_type: residence,
@@ -386,7 +416,8 @@ export default function Onboarding() {
 
   const canProceed = () => {
     if (current === 'campus') return !!selectedCampusId;
-    if (current === 'basics') return !!name;
+    // Ver `socialAccount`: con Apple el nombre puede no existir nunca.
+    if (current === 'basics') return socialAccount || !!name;
     if (current === 'residence') return !!residence;
     if (current === 'origin') return !!origin;
     if (current === 'legal') return isAdult && acceptedTerms;
