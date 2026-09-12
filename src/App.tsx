@@ -45,7 +45,10 @@ function AuthGate() {
 
     // Then check existing session
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
+      // No pisar con null lo que ya haya en el store: en un arranque en frío
+      // desde el enlace del correo, deepLinks.ts puede abrir la sesión mientras
+      // esta lectura está en vuelo, y llegar después para dejarla en nada.
+      if (session || !useAuthStore.getState().session) setSession(session);
       setLoading(false);
     });
 

@@ -15,6 +15,17 @@ import {
   signInWithGoogleNative,
 } from '@/lib/socialAuth';
 import { APP_NAME } from '@/lib/brand';
+import { AUTH_CALLBACK_URL } from '@/lib/deepLinks';
+
+// A dónde manda Supabase al pulsar el enlace del correo.
+//
+// En iOS tiene que volver A LA APP: con una URL https, Safari abre la web de
+// Vercel y la sesión se queda allí, en otro almacenamiento, mientras la app
+// sigue sin sesión. El esquema propio la despierta y deepLinks.ts canjea los
+// tokens. En web no hay esquema que valga: sigue siendo la URL del sitio,
+// porque dentro del webview el origen es capacitor://localhost y ese origen no
+// existe fuera.
+const EMAIL_REDIRECT_URL = isNative ? AUTH_CALLBACK_URL : SITE_URL;
 
 // Aquí había una lista de dominios permitidos y un interruptor para rechazar
 // el registro de quien no los usara. Se quita: cualquiera puede registrarse, y
@@ -70,11 +81,8 @@ export default function Auth() {
     if (forgot) {
       setLoading(true);
       try {
-        // redirectTo apunta a la web y no a window.location.origin: dentro del
-        // webview de Capacitor el origen es capacitor://localhost, y el enlace
-        // del correo se abre en el navegador del sistema, donde eso no existe.
         const { error } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: SITE_URL,
+          redirectTo: EMAIL_REDIRECT_URL,
         });
         if (error) throw error;
       } catch (err: unknown) {
@@ -96,10 +104,7 @@ export default function Auth() {
         const { error } = await supabase.auth.signUp({
           email,
           password,
-          // Mismo motivo que el redirectTo del "olvidé mi contraseña" de
-          // arriba: dentro del webview el origen es capacitor://localhost, y
-          // el enlace del correo se abre en el navegador del sistema.
-          options: { emailRedirectTo: SITE_URL },
+          options: { emailRedirectTo: EMAIL_REDIRECT_URL },
         });
         if (error) throw error;
         toast({ title: t('auth.checkEmail'), description: t('auth.verifyLink') });

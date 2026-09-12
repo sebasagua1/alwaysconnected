@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { routeFromPath, routeFromPushData, routeFromUrl } from '@/lib/deepLinks';
+import { AUTH_CALLBACK_URL, authParamsFromUrl, routeFromPath, routeFromPushData, routeFromUrl } from '@/lib/deepLinks';
 
 const UUID = '3f1c8a54-6b2e-4d19-9a70-5c8e1b2d4f60';
 
@@ -77,5 +77,42 @@ describe('routeFromPushData', () => {
     expect(routeFromPushData(undefined)).toBeNull();
     expect(routeFromPushData(null)).toBeNull();
     expect(routeFromPushData('cadena')).toBeNull();
+  });
+});
+
+describe('authParamsFromUrl', () => {
+  it('lee la sesión del fragmento (flujo implícito)', () => {
+    const params = authParamsFromUrl(
+      `${AUTH_CALLBACK_URL}#access_token=abc&refresh_token=def&type=signup`,
+    );
+    expect(params?.get('access_token')).toBe('abc');
+    expect(params?.get('refresh_token')).toBe('def');
+    expect(params?.get('type')).toBe('signup');
+  });
+
+  it('lee el código de la query (flujo PKCE)', () => {
+    expect(authParamsFromUrl(`${AUTH_CALLBACK_URL}?code=xyz`)?.get('code')).toBe('xyz');
+  });
+
+  it('reconoce el enlace caducado, que llega sin tokens', () => {
+    const params = authParamsFromUrl(
+      `${AUTH_CALLBACK_URL}#error=access_denied&error_description=Email+link+is+invalid+or+has+expired`,
+    );
+    expect(params?.get('error')).toBe('access_denied');
+    expect(params?.get('error_description')).toContain('expired');
+  });
+
+  it('marca la recuperación de contraseña, que necesita otra pantalla', () => {
+    const params = authParamsFromUrl(
+      `${AUTH_CALLBACK_URL}#access_token=abc&refresh_token=def&type=recovery`,
+    );
+    expect(params?.get('type')).toBe('recovery');
+  });
+
+  // Un enlace normal no debe pasar por el canje de sesión.
+  it('devuelve null para lo que no es un callback de auth', () => {
+    expect(authParamsFromUrl(`alwaysconnected://groups/${UUID}`)).toBeNull();
+    expect(authParamsFromUrl('alwaysconnected://events')).toBeNull();
+    expect(authParamsFromUrl('no es una url')).toBeNull();
   });
 });
