@@ -412,7 +412,10 @@
     "cannotInviteToDm": "Un mensaje directo es solo entre dos personas.",
     "groupNotFound": "Este grupo ya no existe.",
     "invalidTarget": "No se puede hacer con esta persona.",
-    "eventRateLimit": "Has creado demasiados eventos seguidos. Prueba de nuevo dentro de un rato."
+    "eventRateLimit": "Has creado demasiados eventos seguidos. Prueba de nuevo dentro de un rato.",
+    "messageDeleted": "Este mensaje fue eliminado",
+    "emptyMessage": "El mensaje no puede estar vacío",
+    "messageLocked": "Ese cambio no está permitido"
   },
   "legal": {
     "privacy": "Aviso de privacidad",
@@ -531,5 +534,23 @@
     "statsLoad": "No se pudieron cargar tus estadísticas",
     "attendeesLoad": "No se pudo cargar quién va",
     "blockedLoad": "No se pudo cargar tu lista de bloqueados"
+  },
+  "chat": {
+    "actions": "Opciones del mensaje",
+    "edit": "Editar",
+    "delete": "Eliminar",
+    "edited": "Editado",
+    "deleted": "Mensaje eliminado",
+    "editing": "Editando mensaje",
+    "cancelEdit": "Cancelar edición",
+    "save": "Guardar",
+    "deleteConfirmTitle": "¿Eliminar mensaje?",
+    "deleteConfirmDesc": "Todos en este chat verán «Mensaje eliminado» en su lugar.",
+    "editFailed": "No se pudo editar el mensaje",
+    "deleteFailed": "No se pudo eliminar el mensaje",
+    "notEditable": "Este mensaje ya no se puede cambiar",
+    "you": "Tú",
+    "yesterday": "Ayer",
+    "noMessagesShort": "Sin mensajes aún"
   }
 }

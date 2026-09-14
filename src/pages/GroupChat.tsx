@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useNotificationStore } from '@/stores/notificationStore';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, Send, Users, UserPlus, LogOut } from 'lucide-react';
+import { ArrowLeft, Send, Users, UserPlus, LogOut, Check, X, Pencil } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { UserAvatar } from '@/components/ui/user-avatar';
 import { Button } from '@/components/ui/button';
@@ -29,17 +29,27 @@ import { useToast } from '@/hooks/use-toast';
 import i18n from '@/i18n';
 import { rpcMessage } from '@/lib/rpcErrors';
 import { ModerationMenu } from '@/components/moderation/ModerationMenu';
+import { MessageActionsMenu } from '@/components/chat/MessageActionsMenu';
+import { applyMessageChange, canSaveEdit, type MessageChange } from '@/lib/chat';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 
 /** Mensajes por tanda. Suficiente para llenar la pantalla y poco que pintar. */
 const MESSAGE_PAGE = 40;
 
-interface Message {
+/** Lo que se pide de cada mensaje, en todas las consultas. */
+const MESSAGE_COLUMNS = 'id, content, created_at, sender_id, edited_at, deleted_at';
+
+type MessageRow = {
   id: string;
   content: string;
   created_at: string;
   sender_id: string;
+  edited_at: string | null;
+  deleted_at: string | null;
+};
+
+interface Message extends MessageRow {
   senderName: string;
 }
 
@@ -55,6 +65,11 @@ export default function GroupChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  /** Mensaje propio que se está editando, con su texto de antes. */
+  const [editing, setEditing] = useState<{ id: string; original: string } | null>(null);
+  /** Lo escrito antes de empezar a editar, para devolverlo al cancelar. */
+  const draftBeforeEditRef = useRef('');
+  const inputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -101,7 +116,7 @@ export default function GroupChat() {
   }, [groupId, user, t]);
 
   const enrichMessages = async (
-    msgs: { id: string; content: string; created_at: string; sender_id: string }[]
+    msgs: MessageRow[]
   ): Promise<Message[]> => {
     if (msgs.length === 0) return [];
     const cache = nameCacheRef.current;
@@ -136,7 +151,7 @@ export default function GroupChat() {
     (async () => {
       const { data, error } = await supabase
         .from('messages')
-        .select('id, content, created_at, sender_id')
+        .select(MESSAGE_COLUMNS)
         .eq('group_id', groupId)
         .order('created_at', { ascending: false })
         .limit(MESSAGE_PAGE);
@@ -170,7 +185,7 @@ export default function GroupChat() {
     try {
       const { data, error } = await supabase
         .from('messages')
-        .select('id, content, created_at, sender_id')
+        .select(MESSAGE_COLUMNS)
         .eq('group_id', groupId)
         .lt('created_at', messages[0].created_at)
         .order('created_at', { ascending: false })
@@ -229,10 +244,26 @@ export default function GroupChat() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `group_id=eq.${groupId}` },
         async (payload) => {
-          const raw = payload.new as { id: string; content: string; created_at: string; sender_id: string };
+          const raw = payload.new as MessageRow;
           const [enriched] = await enrichMessages([raw]);
           // Puede llegar un mensaje que ya pintamos como eco local al enviarlo.
           setMessages((prev) => (prev.some((m) => m.id === raw.id) ? prev : [...prev, enriched]));
+        }
+      )
+      // Ediciones y borrados, propios (desde otro dispositivo) o de otros.
+      // La RLS de SELECT sigue decidiendo qué filas llegan, igual que con
+      // los INSERT.
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'messages', filter: `group_id=eq.${groupId}` },
+        (payload) => {
+          const change = payload.new as MessageChange;
+          setMessages((prev) => applyMessageChange(prev, change));
+          // Si lo borraron mientras se editaba (desde otro dispositivo), la
+          // edición ya no tiene nada que guardar.
+          if (change.deleted_at) {
+            setEditing((cur) => (cur?.id === change.id ? null : cur));
+          }
         }
       )
       .subscribe();
@@ -333,7 +364,84 @@ export default function GroupChat() {
     navigate('/friends', { state: { tab: 'groups' } });
   };
 
+  const startEditing = (msg: Message) => {
+    draftBeforeEditRef.current = editing ? draftBeforeEditRef.current : text;
+    setEditing({ id: msg.id, original: msg.content });
+    setText(msg.content);
+    // Tras pintar el input con el texto: el foco abre el teclado en iOS.
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const cancelEditing = () => {
+    setEditing(null);
+    setText(draftBeforeEditRef.current);
+    draftBeforeEditRef.current = '';
+  };
+
+  /** El error de la base, en algo que se entienda. */
+  const changeErrorMessage = (error: { code?: string; message?: string }) =>
+    // PGRST116 = la actualización no devolvió ninguna fila: la RLS la dejó
+    // fuera (ya borrado, o ya no estás en el chat).
+    error.code === 'PGRST116' ? t('chat.notEditable') : rpcMessage(error.message, t);
+
+  const saveEdit = async () => {
+    if (!editing || sending) return;
+    const msg = messages.find((m) => m.id === editing.id);
+    if (!msg || !canSaveEdit(editing.original, text)) {
+      if (msg && text.trim() === editing.original.trim()) cancelEditing();
+      return;
+    }
+    const content = text.trim();
+    const before: MessageChange = { id: msg.id, content: msg.content, edited_at: msg.edited_at, deleted_at: msg.deleted_at };
+
+    // Optimista: se ve al instante; si el servidor dice que no, se deshace.
+    setSending(true);
+    setMessages((prev) => applyMessageChange(prev, { ...before, content, edited_at: new Date().toISOString() }));
+    setEditing(null);
+    setText(draftBeforeEditRef.current);
+    draftBeforeEditRef.current = '';
+
+    // Solo se manda el texto: edited_at lo pone el disparador de la base.
+    const { data, error } = await supabase
+      .from('messages')
+      .update({ content })
+      .eq('id', msg.id)
+      .select('id, content, edited_at, deleted_at')
+      .single();
+
+    if (error || !data) {
+      setMessages((prev) => applyMessageChange(prev, before));
+      toast({ title: t('chat.editFailed'), description: error ? changeErrorMessage(error) : undefined, variant: 'destructive' });
+    } else {
+      setMessages((prev) => applyMessageChange(prev, data));
+    }
+    setSending(false);
+  };
+
+  const deleteMessage = async (msg: Message) => {
+    const before: MessageChange = { id: msg.id, content: msg.content, edited_at: msg.edited_at, deleted_at: msg.deleted_at };
+    if (editing?.id === msg.id) cancelEditing();
+    setMessages((prev) => applyMessageChange(prev, { ...before, content: '', deleted_at: new Date().toISOString() }));
+
+    // Borrado lógico: la fila se queda. La base pone la fecha de verdad y
+    // vacía el texto; lo que mande el cliente en deleted_at da igual.
+    const { data, error } = await supabase
+      .from('messages')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', msg.id)
+      .select('id, content, edited_at, deleted_at')
+      .single();
+
+    if (error || !data) {
+      setMessages((prev) => applyMessageChange(prev, before));
+      toast({ title: t('chat.deleteFailed'), description: error ? changeErrorMessage(error) : undefined, variant: 'destructive' });
+    } else {
+      setMessages((prev) => applyMessageChange(prev, data));
+    }
+  };
+
   const sendMessage = async () => {
+    if (editing) { saveEdit(); return; }
     if (!text.trim() || !user || !groupId || sending) return;
     const content = text.trim();
     setSending(true);
@@ -342,7 +450,7 @@ export default function GroupChat() {
     const { data, error } = await supabase
       .from('messages')
       .insert({ group_id: groupId, sender_id: user.id, content })
-      .select('id, content, created_at, sender_id')
+      .select(MESSAGE_COLUMNS)
       .single();
 
     if (error) {
@@ -483,34 +591,59 @@ export default function GroupChat() {
         )}
         {messages.map((msg) => {
           const isMe = msg.sender_id === user?.id;
+          const isDeleted = Boolean(msg.deleted_at);
+          const isBeingEdited = editing?.id === msg.id;
           return (
             <div key={msg.id} className={cn('flex flex-col gap-0.5', isMe ? 'items-end' : 'items-start')}>
               {!isMe && (
                 <span className="text-xs text-muted-foreground px-1">{msg.senderName}</span>
               )}
               <div className="flex items-center gap-1 max-w-[85%]">
-                <div
-                  className={cn(
-                    'px-3.5 py-2 rounded-2xl text-sm break-words',
-                    isMe
-                      ? 'bg-primary text-primary-foreground rounded-br-sm order-1'
-                      : 'bg-muted text-foreground rounded-bl-sm'
-                  )}
-                >
-                  {msg.content}
-                </div>
-                {!isMe && (
-                  <ModerationMenu
-                    target={{ kind: 'message', id: msg.id }}
-                    label={msg.senderName}
-                    blockUserId={msg.sender_id}
-                    onBlocked={() => setMessages((prev) => prev.filter((m) => m.sender_id !== msg.sender_id))}
-                    className="p-1 shrink-0"
-                  />
+                {isDeleted ? (
+                  // Sin el texto (la base ya lo vació) y sin menú: no queda
+                  // nada que editar, borrar ni reportar.
+                  <div
+                    className={cn(
+                      'px-3.5 py-2 rounded-2xl text-sm italic border border-border text-muted-foreground',
+                      isMe ? 'rounded-br-sm' : 'rounded-bl-sm'
+                    )}
+                  >
+                    {t('chat.deleted')}
+                  </div>
+                ) : (
+                  <>
+                    <div
+                      className={cn(
+                        'px-3.5 py-2 rounded-2xl text-sm break-words',
+                        isMe
+                          ? 'bg-primary text-primary-foreground rounded-br-sm order-1'
+                          : 'bg-muted text-foreground rounded-bl-sm',
+                        isBeingEdited && 'ring-2 ring-ring ring-offset-2 ring-offset-background'
+                      )}
+                    >
+                      {msg.content}
+                    </div>
+                    {isMe ? (
+                      <MessageActionsMenu
+                        onEdit={() => startEditing(msg)}
+                        onDelete={() => deleteMessage(msg)}
+                        className="p-1 shrink-0"
+                      />
+                    ) : (
+                      <ModerationMenu
+                        target={{ kind: 'message', id: msg.id }}
+                        label={msg.senderName}
+                        blockUserId={msg.sender_id}
+                        onBlocked={() => setMessages((prev) => prev.filter((m) => m.sender_id !== msg.sender_id))}
+                        className="p-1 shrink-0"
+                      />
+                    )}
+                  </>
                 )}
               </div>
               <span className="text-xs text-muted-foreground px-1">
                 {format(new Date(msg.created_at), 'HH:mm')}
+                {msg.edited_at && !isDeleted && ` · ${t('chat.edited')}`}
               </span>
             </div>
           );
@@ -518,26 +651,44 @@ export default function GroupChat() {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input */}
-      <div className="flex gap-2 px-4 py-3 bg-background border-t border-border shrink-0">
-        <Input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-          }}
-          placeholder={t('groups.messagePh')}
-          className="h-11 rounded-xl"
-        />
-        <Button
-          onClick={sendMessage}
-          disabled={sending || !text.trim()}
-          size="icon"
-          aria-label={t('groups.send')}
-          className="h-11 w-11 rounded-xl shrink-0"
-        >
-          <Send className="w-4 h-4" />
-        </Button>
+      {/* Input. Al editar se reutiliza el mismo campo, con una franja encima
+          que dice qué se está editando y cómo salir. */}
+      <div className="bg-background border-t border-border shrink-0">
+        {editing && (
+          <div className="flex items-center gap-2 pl-4 pr-2 pt-2 text-xs font-semibold text-primary">
+            <Pencil className="w-3.5 h-3.5 shrink-0" />
+            <span className="flex-1 min-w-0 truncate">{t('chat.editing')}</span>
+            <button
+              onClick={cancelEditing}
+              aria-label={t('chat.cancelEdit')}
+              className="w-11 h-11 -my-2 inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+        <div className="flex gap-2 px-4 py-3">
+          <Input
+            ref={inputRef}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+              if (e.key === 'Escape' && editing) { e.preventDefault(); cancelEditing(); }
+            }}
+            placeholder={t('groups.messagePh')}
+            className="h-11 rounded-xl"
+          />
+          <Button
+            onClick={sendMessage}
+            disabled={sending || (editing ? !canSaveEdit(editing.original, text) : !text.trim())}
+            size="icon"
+            aria-label={editing ? t('chat.save') : t('groups.send')}
+            className="h-11 w-11 rounded-xl shrink-0"
+          >
+            {editing ? <Check className="w-4 h-4" /> : <Send className="w-4 h-4" />}
+          </Button>
+        </div>
       </div>
     </div>
   );

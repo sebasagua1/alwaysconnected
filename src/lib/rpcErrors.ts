@@ -14,6 +14,10 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   GROUP_NOT_FOUND: 'rpcErrors.groupNotFound',
   INVALID_TARGET: 'rpcErrors.invalidTarget',
   EVENT_RATE_LIMIT: 'rpcErrors.eventRateLimit',
+  // Los lanza el disparador guard_message_update al editar o borrar.
+  MESSAGE_DELETED: 'rpcErrors.messageDeleted',
+  EMPTY_MESSAGE: 'rpcErrors.emptyMessage',
+  MESSAGE_FIELD_LOCKED: 'rpcErrors.messageLocked',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {
