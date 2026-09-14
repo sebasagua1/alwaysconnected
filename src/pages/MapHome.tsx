@@ -104,6 +104,8 @@ export default function MapHome() {
   const pickMarkerRef = useRef<MapboxMarker | null>(null);
   const userMarkerRef = useRef<MapboxMarker | null>(null);
   const hasAutoCenteredRef = useRef(false);
+  /** Si la cámara acompaña al punto azul. Se apaga al mover el mapa a mano. */
+  const followUserRef = useRef(true);
   const deniedToastShownRef = useRef(false);
 
   const { location: userLocation, error: geoError, permission } = useUserLocation({
@@ -278,6 +280,14 @@ export default function MapHome() {
 
       // Note: we use our own watchPosition-based marker instead of GeolocateControl
 
+      // En cuanto la persona mueve el mapa con el dedo, se deja de seguir su
+      // ubicación. Sin esto, cada lectura del GPS la devolvía a su punto en
+      // cuanto lo sacaba de pantalla, que es justo lo que hace al explorar.
+      // Solo cuentan los gestos (llevan originalEvent): los flyTo del propio
+      // código también disparan movestart y no deben apagar el seguimiento.
+      map.on('movestart', (e) => {
+        if ((e as { originalEvent?: Event }).originalEvent) followUserRef.current = false;
+      });
 
       map.on('load', () => {
         setMapLoaded(true);
@@ -432,6 +442,8 @@ export default function MapHome() {
         el.addEventListener('click', (ev) => {
           ev.stopPropagation();
           const at = marker.getLngLat();
+          // Ir a un evento lejano tampoco debe deshacerse con el siguiente GPS.
+          followUserRef.current = false;
           mapRef.current?.flyTo({ center: [at.lng, at.lat], zoom: 17, duration: 600 });
           const fresh = useEventStore.getState().events.find((e) => e.id === id);
           if (fresh) setSelectedEvent(fresh);
@@ -724,11 +736,12 @@ export default function MapHome() {
         userMarkerRef.current.setLngLat(lngLat);
       }
 
-      // Auto-center on first fix; afterwards only easeTo softly if user is far off-screen
+      // Auto-center on first fix; afterwards only easeTo softly if user is far
+      // off-screen, and only while they haven't moved the map themselves.
       if (!hasAutoCenteredRef.current) {
         hasAutoCenteredRef.current = true;
         mapRef.current.flyTo({ center: lngLat, zoom: 16, duration: 900, essential: true });
-      } else {
+      } else if (followUserRef.current) {
         const bounds = mapRef.current.getBounds();
         if (bounds && !bounds.contains(lngLat)) {
           mapRef.current.easeTo({ center: lngLat, duration: 800 });
@@ -815,6 +828,7 @@ export default function MapHome() {
       toast({ title: t('map.waitingGps'), description: t('map.waitingGpsDesc') });
       return;
     }
+    followUserRef.current = true;
     mapRef.current.flyTo({
       center: [userLocation.lng, userLocation.lat],
       zoom: 16.5,
