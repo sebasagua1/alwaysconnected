@@ -43,7 +43,7 @@ Se usó IPEDS y no la API de College Scorecard porque la clave de demostración 
 3. Anotar `official_source_url`, `source_title`, `last_verified_at` y `notes`.
 4. Regenerar la migración con `import.mjs`.
 
-Estado al 2026-09-14: verifican `fsu.edu`, `purdue.edu`, `comunidad.unam.mx`, `alumnos.udg.mx` y `uanl.edu.mx`. `tec.mx` queda desactivado: ninguna página oficial encontrada confirma que se entrega a estudiantes vigentes. `exatec.tec.mx` es de egresados.
+Estado al 2026-09-14: verifican `tec.mx`, `fsu.edu`, `purdue.edu`, `comunidad.unam.mx`, `alumnos.udg.mx` y `uanl.edu.mx`. `tec.mx` se apoya en Conecta Tec (2021), que exige @tec.mx a estudiantes, profesores y colaboradores y deja fuera a los EXATEC; conviene buscar una fuente más reciente. `exatec.tec.mx` es de egresados.
 
 ## Configuración manual pendiente
 

@@ -132,11 +132,11 @@ describe('catálogo curado', () => {
     expect(b.source.ref).toBe('376001001221');
   });
 
-  it('solo verifican dominios confirmados; tec.mx y exatec.tec.mx no verifican', () => {
+  it('solo verifican dominios confirmados; tec.mx sí, exatec.tec.mx (egresados) no', () => {
     const enabled = domains.filter((d: { verification_enabled: boolean }) => d.verification_enabled);
     expect(enabled.every((d: { confidence: string; official_source_url?: string }) => d.confidence === 'confirmed' && d.official_source_url?.startsWith('https://'))).toBe(true);
     const by = Object.fromEntries(domains.map((d: { domain: string }) => [d.domain, d]));
-    expect(by['tec.mx'].verification_enabled).toBe(false);
+    expect(by['tec.mx']).toMatchObject({ verification_enabled: true, confidence: 'confirmed', audience: 'all_affiliates' });
     expect(by['exatec.tec.mx']).toMatchObject({ audience: 'alumni', verification_enabled: false });
     expect(by['my.fsu.edu'].verification_enabled).toBe(false);
     expect(by['fsu.edu'].verification_enabled).toBe(true);

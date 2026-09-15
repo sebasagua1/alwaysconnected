@@ -38,14 +38,14 @@
     {
       "domain": "tec.mx",
       "university_slug": "tec",
-      "audience": "unknown",
-      "confidence": "probable",
-      "verification_enabled": false,
-      "official_source_url": "https://profesorescatedra.tec.mx/en/configure-email-and-access",
-      "source_title": "Configure email and access (profesores de catedra)",
+      "audience": "all_affiliates",
+      "confidence": "confirmed",
+      "verification_enabled": true,
+      "official_source_url": "https://conecta.tec.mx/es/noticias/nacional/educacion/eres-del-tec-siguen-gratis-cursos-de-coursera-y-se-suman-los-de-edx",
+      "source_title": "¿Eres del Tec? Siguen gratis cursos de Coursera y se suman los de edX (Conecta Tec, 2021-03-23)",
       "last_verified_at": "2026-09-14",
       "student_id_pattern": "^a0[0-9]{7}$",
-      "notes": "Ninguna pagina oficial encontrada confirma que los estudiantes vigentes reciben @tec.mx (la de activacion de cuenta institucional ya no existe). Solo se confirma para profesores. Queda desactivado hasta tener evidencia; las 18 cuentas ya verificadas se conservan como legacy."
+      "notes": "Pagina oficial del Tec: estudiantes, profesores y colaboradores necesitan correo @tec.mx (o @tecsalud.mx, @itesm.mx); los EXATEC quedan fuera. Prueba afiliacion vigente, no distingue estudiante de personal. Tambien https://profesorescatedra.tec.mx/en/configure-email-and-access para profesores. Habilitado el 2026-09-14 a peticion del propietario; evidencia de 2021, revisar si aparece una fuente mas reciente."
     },
     {
       "domain": "exatec.tec.mx",
@@ -210,18 +210,122 @@
       "last_verified_at": "2026-09-14",
       "notes": "Paginas oficiales devolvieron 403; indicios de que los egresados conservan la cuenta. Desactivado."
     },
-    { "domain": "buap.mx", "university_slug": "buap", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "alumno.buap.mx", "university_slug": "buap", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "udlap.mx", "university_slug": "udlap", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "ibero.mx", "university_slug": "ibero", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "anahuac.mx", "university_slug": "anahuac", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "uaslp.mx", "university_slug": "uaslp", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "uaemex.mx", "university_slug": "uaemex", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "colmex.mx", "university_slug": "colmex", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "cide.edu", "university_slug": "cide", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "uam.mx", "university_slug": "uam", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "uaq.mx", "university_slug": "uaq", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "itam.mx", "university_slug": "itam", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
-    { "domain": "up.edu.mx", "university_slug": "up", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." }
+    {
+      "domain": "buap.mx",
+      "university_slug": "buap",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "alumno.buap.mx",
+      "university_slug": "buap",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "udlap.mx",
+      "university_slug": "udlap",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "ibero.mx",
+      "university_slug": "ibero",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "anahuac.mx",
+      "university_slug": "anahuac",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "uaslp.mx",
+      "university_slug": "uaslp",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "uaemex.mx",
+      "university_slug": "uaemex",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "colmex.mx",
+      "university_slug": "colmex",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "cide.edu",
+      "university_slug": "cide",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "uam.mx",
+      "university_slug": "uam",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "uaq.mx",
+      "university_slug": "uaq",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "itam.mx",
+      "university_slug": "itam",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    },
+    {
+      "domain": "up.edu.mx",
+      "university_slug": "up",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica."
+    }
   ]
 }

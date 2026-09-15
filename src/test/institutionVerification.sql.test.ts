@@ -151,7 +151,7 @@ describe('catálogo', () => {
   });
 
   it('un dominio sin confirmar, o de egresados, no se puede habilitar para verificar', async () => {
-    await expect(db.query(`UPDATE public.institution_email_domains SET verification_enabled = true WHERE domain = 'tec.mx'`)).rejects.toThrow(/verification_rule/);
+    await expect(db.query(`UPDATE public.institution_email_domains SET verification_enabled = true WHERE domain = 'itesm.mx'`)).rejects.toThrow(/verification_rule/);
     await expect(db.query(`UPDATE public.institution_email_domains SET verification_enabled = true WHERE domain = 'exatec.tec.mx'`)).rejects.toThrow(/verification_rule/);
     await expect(db.query(`INSERT INTO public.institution_email_domains (domain, university_id) VALUES ('private.icloud.com', $1)`, [PRODUCCION.universities.tec])).rejects.toThrow(/DOMAIN_IS_PERSONAL/);
     await expect(db.query(`INSERT INTO public.institution_email_domains (domain, university_id) VALUES ('ÜBER.edu', $1)`, [PRODUCCION.universities.tec])).rejects.toThrow(/domain_format/);
@@ -231,8 +231,21 @@ describe('alta y correo de acceso', () => {
     expect(await perfil(uid)).toMatchObject({ campus_id: unam, institution_verified: true });
   });
 
+  it('un @tec.mx confirmado elige campus y queda verificado, con su matrícula', async () => {
+    const uid = await cuenta('a01234567@tec.mx', { proveedor: 'google' });
+    expect(await perfil(uid)).toMatchObject({ campus_id: null, institution_verified: false });
+    expect(await afiliacion(uid)).toMatchObject({ status: 'unverified', status_reason: 'choose_campus' });
+    expect((await comoApp(uid, 'UPDATE public.profiles SET campus_id = $1 WHERE id = $2', [PRODUCCION.institutions.icesi, uid])).error).toMatch(/CAMPUS_NOT_ALLOWED/);
+    expect((await comoApp(uid, 'UPDATE public.profiles SET campus_id = $1 WHERE id = $2', [PRODUCCION.institutions['tec-guadalajara'], uid])).error).toBeNull();
+    expect(await perfil(uid)).toMatchObject({ campus_id: PRODUCCION.institutions['tec-guadalajara'], institution_verified: true, student_id: 'a01234567' });
+    // Un profesor (parte local sin formato de matrícula) verifica, pero sin matrícula.
+    const prof = await cuenta('juan.perez@tec.mx', { proveedor: 'google' });
+    await comoApp(prof, 'UPDATE public.profiles SET campus_id = $1 WHERE id = $2', [QRO, prof]);
+    expect(await perfil(prof)).toMatchObject({ institution_verified: true, student_id: null });
+  });
+
   it('dominio probable, de egresados, desactivado o parecido no verifica', async () => {
-    for (const email of ['a01234567@tec.mx', 'a01234567@exatec.tec.mx', 'x@my.fsu.edu', 'x@javeriana.edu.co', 'x@evil-fsu.edu', 'x@fsu.edu.co', 'x@fsu.edu.evil.com', 'x@purdue.edu.mx', 'x@notpurdue.edu']) {
+    for (const email of ['a01234567@exatec.tec.mx', 'x@itesm.mx', 'x@evil-tec.mx', 'x@tec.mx.evil.com', 'x@my.fsu.edu', 'x@javeriana.edu.co', 'x@evil-fsu.edu', 'x@fsu.edu.co', 'x@fsu.edu.evil.com', 'x@purdue.edu.mx', 'x@notpurdue.edu']) {
       const uid = await cuenta(email, { proveedor: 'google' });
       expect(await perfil(uid), email).toMatchObject({ institution_verified: false, campus_id: null });
     }
