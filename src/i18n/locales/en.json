@@ -235,7 +235,11 @@
     "decline": "Decline",
     "requestApproved": "Request approved",
     "requestDeclined": "Request declined",
-    "organizer": "host"
+    "organizer": "host",
+    "you": "You",
+    "noAttendeesYet": "No one has joined yet. Be the first.",
+    "showAllAttendees": "See {{count}} more people",
+    "seeAll": "See all"
   },
   "create": {
     "title": "New Event",
