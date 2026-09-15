@@ -69,7 +69,11 @@
     "legalAge": "Tengo 18 años o más",
     "legalAgeHint": "Always Connected es solo para mayores de edad.",
     "legalAcceptPrefix": "He leído y acepto los",
-    "legalAcceptHint": "Se abren en el navegador; no perderás lo que llevas escrito."
+    "legalAcceptHint": "Se abren en el navegador; no perderás lo que llevas escrito.",
+    "campusLoadError": "No pudimos cargar las universidades. Revisa tu conexión.",
+    "campusRetry": "Reintentar",
+    "campusVerifiedHint": "Tu correo es de {{university}}: elige tu campus.",
+    "campusLabel": "Campus {{campus}}"
   },
   "profile": {
     "title": "Perfil",
@@ -415,7 +419,10 @@
     "eventRateLimit": "Has creado demasiados eventos seguidos. Prueba de nuevo dentro de un rato.",
     "messageDeleted": "Este mensaje fue eliminado",
     "emptyMessage": "El mensaje no puede estar vacío",
-    "messageLocked": "Ese cambio no está permitido"
+    "messageLocked": "Ese cambio no está permitido",
+    "campusLocked": "Tu campus ya está asignado. Para cambiarlo, escribe a soporte.",
+    "campusNotAvailable": "Ese campus no está disponible.",
+    "campusNotAllowed": "Tu correo es de otra universidad. Elige uno de sus campus."
   },
   "legal": {
     "privacy": "Aviso de privacidad",
