@@ -426,7 +426,12 @@
     "messageLocked": "That change isn't allowed",
     "campusLocked": "Your campus is already set. To change it, contact support.",
     "campusNotAvailable": "That campus isn't available.",
-    "campusNotAllowed": "Your email belongs to another university. Choose one of its campuses."
+    "campusNotAllowed": "Your email belongs to another university. Choose one of its campuses.",
+    "repeatNotAllowed": "Only the organizer or attendees can repeat a plan.",
+    "notAnAttendee": "Only attendees can create a group from this event.",
+    "eventNotStarted": "You can create the group once the event has started.",
+    "inviteNotFound": "This invite is no longer available.",
+    "inviteAlreadyAnswered": "You already answered this invite."
   },
   "legal": {
     "privacy": "Privacy Policy",
@@ -563,5 +568,37 @@
     "you": "You",
     "yesterday": "Yesterday",
     "noMessagesShort": "No messages yet"
+  },
+  "afterEvent": {
+    "title": "What's next?",
+    "metSomeone": "Met someone?",
+    "add": "Add",
+    "sent": "Sent",
+    "friends": "Friends",
+    "addAria": "Add {{name}} as a friend",
+    "repeat": "Repeat the plan",
+    "repeatWhen": "{{when}} · same time",
+    "repeatNotify_one": "We'll let the person who went know",
+    "repeatNotify_other": "We'll let the {{count}} people who went know",
+    "group": "Start a group with everyone who went",
+    "groupHint": "They get an invite and join if they accept",
+    "groupCreated_one": "Group created. We invited 1 person.",
+    "groupCreated_other": "Group created. We invited {{count}} people.",
+    "groupCreatedNone": "Group created.",
+    "creatingGroup": "Creating group…",
+    "repeatBanner": "Repeating “{{title}}”. When you publish, we'll let everyone who went know.",
+    "justEnded": "Just ended",
+    "whatsNext": "What's next?"
+  },
+  "groupInvites": {
+    "title": "Group invites",
+    "from": "{{name}} invited you",
+    "fromEvent": "{{name}} invited you · from “{{event}}”",
+    "accept": "Join",
+    "decline": "No thanks",
+    "accepted": "You joined the group",
+    "declined": "Invite declined",
+    "acceptAria": "Join {{group}}",
+    "declineAria": "Decline the invite to {{group}}"
   }
 }

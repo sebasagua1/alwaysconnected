@@ -68,6 +68,8 @@ describe('routeFromPushData', () => {
     expect(routeFromPushData({ type: 'friend_request', requester_id: UUID })).toBe('/friends');
     expect(routeFromPushData({ type: 'join_request', event_id: UUID })).toBe('/events');
     expect(routeFromPushData({ type: 'approval', event_id: UUID })).toBe('/events');
+    expect(routeFromPushData({ type: 'group_invite', group_id: UUID })).toBe('/friends');
+    expect(routeFromPushData({ type: 'event_repeat', event_id: UUID })).toBe('/');
   });
 
   it('aguanta payloads incompletos o desconocidos', () => {

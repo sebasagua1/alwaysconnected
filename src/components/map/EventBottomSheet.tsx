@@ -24,6 +24,7 @@ import { useToast } from '@/hooks/use-toast';
 import { ModerationMenu } from '@/components/moderation/ModerationMenu';
 import { UserAvatar } from '@/components/ui/user-avatar';
 import { UserProfileSheet } from '@/components/profile/UserProfileSheet';
+import { PostEventActions } from '@/components/map/PostEventActions';
 import { rpcMessage } from '@/lib/rpcErrors';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
@@ -366,7 +367,9 @@ export function EventBottomSheet({ event, onClose }: Props) {
   return (
     <>
     <div className="absolute above-nav left-0 right-0 z-20 animate-slide-up">
-      <div className="mx-3 bg-card rounded-3xl shadow-lifted p-5 relative">
+      {/* Con "¿Qué sigue?" la ficha de un evento pasado es más alta que la
+          pantalla: sin tope, el título se salía por arriba. */}
+      <div className="mx-3 bg-card rounded-3xl shadow-lifted p-5 relative max-h-[calc(100dvh-8rem)] overflow-y-auto">
         <div className="drag-handle" />
 
         <div className="absolute top-3 right-3 flex items-center">
@@ -539,12 +542,17 @@ export function EventBottomSheet({ event, onClose }: Props) {
           )}
         </div>
 
+        {/* Terminó: qué hacer ahora, para quien organizó o fue. */}
+        {!checking && eventEnded && user && (isCreator || hasJoined) && (
+          <PostEventActions event={event} attendees={attendees} myId={user.id} onClose={onClose} />
+        )}
+
         <div className="flex gap-3">
           {checking ? (
             <Button disabled className="flex-1 h-12 rounded-xl font-bold">
               <Loader2 className="w-4 h-4 animate-spin" />
             </Button>
-          ) : isCreator ? (
+          ) : eventEnded ? null : isCreator ? (
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button
@@ -618,10 +626,11 @@ export function EventBottomSheet({ event, onClose }: Props) {
                 : needsApproval ? t('event.askToJoin') : t('event.join')}
             </Button>
           )}
+          {/* Terminado ya no hay nada que unirse, salirse ni cancelar. */}
           <Button
             variant="outline"
             onClick={onClose}
-            className="h-12 rounded-xl font-semibold px-6"
+            className={cn('h-12 rounded-xl font-semibold px-6', !checking && eventEnded && 'flex-1')}
           >
             {t('common.close')}
           </Button>

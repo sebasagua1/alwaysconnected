@@ -80,8 +80,13 @@ export function routeFromPushData(data: unknown): string | null {
   switch (d.type) {
     case 'message':
       return typeof d.group_id === 'string' ? routeFromPath(`/groups/${d.group_id}`) : null;
+    // Las invitaciones a grupos se responden arriba de la pestaña Amigos.
     case 'friend_request':
+    case 'group_invite':
       return '/friends';
+    // El plan repetido aparece en el mapa, como cualquier evento nuevo.
+    case 'event_repeat':
+      return '/';
     // Ambas se atienden desde "Mis eventos": ahí están los que organizas, con
     // sus solicitudes, y los que te han aprobado.
     case 'join_request':
