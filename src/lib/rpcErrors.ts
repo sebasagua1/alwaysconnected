@@ -14,6 +14,10 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   GROUP_NOT_FOUND: 'rpcErrors.groupNotFound',
   INVALID_TARGET: 'rpcErrors.invalidTarget',
   EVENT_RATE_LIMIT: 'rpcErrors.eventRateLimit',
+  // Los lanza set_profile_campus al elegir campus en el alta.
+  CAMPUS_LOCKED: 'rpcErrors.campusLocked',
+  CAMPUS_NOT_AVAILABLE: 'rpcErrors.campusNotAvailable',
+  CAMPUS_NOT_ALLOWED: 'rpcErrors.campusNotAllowed',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {

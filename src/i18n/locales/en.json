@@ -69,7 +69,11 @@
     "legalAge": "I am 18 or older",
     "legalAgeHint": "Always Connected is for adults only.",
     "legalAcceptPrefix": "I have read and accept the",
-    "legalAcceptHint": "They open in your browser; you won't lose what you've filled in."
+    "legalAcceptHint": "They open in your browser; you won't lose what you've filled in.",
+    "campusLoadError": "We couldn't load the universities. Check your connection.",
+    "campusRetry": "Try again",
+    "campusVerifiedHint": "Your email is from {{university}}: choose your campus.",
+    "campusLabel": "Campus {{campus}}"
   },
   "profile": {
     "title": "Profile",
@@ -412,7 +416,10 @@
     "cannotInviteToDm": "A direct message is just between two people.",
     "groupNotFound": "This group no longer exists.",
     "invalidTarget": "That's not possible with this person.",
-    "eventRateLimit": "You've created too many events in a row. Try again in a little while."
+    "eventRateLimit": "You've created too many events in a row. Try again in a little while.",
+    "campusLocked": "Your campus is already set. To change it, contact support.",
+    "campusNotAvailable": "That campus isn't available.",
+    "campusNotAllowed": "Your email belongs to another university. Choose one of its campuses."
   },
   "legal": {
     "privacy": "Privacy Policy",

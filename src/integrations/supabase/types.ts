@@ -627,6 +627,30 @@ export type Database = {
           major: string | null
         }[]
       }
+      campus_options: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          id: string
+          slug: string
+          name: string
+          campus_name: string | null
+          city: string | null
+          short_name: string | null
+          university_slug: string
+          university_name: string
+          university_short_name: string
+          country_code: string
+          email_verified: boolean
+        }[]
+      }
+      my_email_university: {
+        Args: Record<PropertyKey, never>
+        Returns: string | null
+      }
+      email_domain: {
+        Args: { _email: string }
+        Returns: string | null
+      }
       unread_by_group: {
         Args: Record<PropertyKey, never>
         Returns: { group_id: string; group_name: string; unread: number }[]
