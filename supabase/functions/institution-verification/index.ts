@@ -15,12 +15,18 @@
 // Confirmar el código no pasa por aquí: la app llama directamente a la RPC
 // confirm_institution_verification con su sesión.
 //
-// Secretos necesarios (Edge Functions → Secrets):
-//   RESEND_API_KEY            clave de https://resend.com (u otro proveedor, ver sendEmail)
-//   VERIFICATION_EMAIL_FROM   remitente con dominio verificado, p. ej. "Always Connected <verificacion@tudominio>"
-//   VERIFICATION_IP_SALT      cadena aleatoria para el hash de IP
-// Sin RESEND_API_KEY o VERIFICATION_EMAIL_FROM responde EMAIL_NOT_CONFIGURED y
-// no deja ningún desafío vivo.
+// Cómo se envía (Edge Functions → Secrets). Se usa el primero que esté completo:
+//   1. Resend, con dominio propio:
+//        RESEND_API_KEY, VERIFICATION_EMAIL_FROM ("Always Connected <codigos@tudominio>")
+//   2. SMTP de Gmail, provisional mientras no hay dominio (2026-09-15):
+//        SMTP_USER       la cuenta, p. ej. always.connected.support@gmail.com
+//        SMTP_PASSWORD   contraseña de APLICACIÓN de Google (no la de la cuenta)
+//        SMTP_HOST       opcional, smtp.gmail.com
+//        VERIFICATION_EMAIL_FROM opcional; en Gmail tiene que ser la misma cuenta
+//   Y siempre:
+//        VERIFICATION_IP_SALT  cadena aleatoria para el hash de IP
+// Sin ninguno completo responde EMAIL_NOT_CONFIGURED y no deja ningún desafío
+// vivo.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
@@ -30,6 +36,7 @@ import {
   isAppleRelayDomain,
   normalizeInstitutionalEmail,
 } from "../_shared/institutionalEmail.ts";
+import { smtpSend } from "../_shared/smtp.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -37,6 +44,9 @@ const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const APP_ORIGIN = Deno.env.get("APP_ORIGIN") ?? "*";
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY");
 const EMAIL_FROM = Deno.env.get("VERIFICATION_EMAIL_FROM");
+const SMTP_USER = Deno.env.get("SMTP_USER");
+const SMTP_PASSWORD = Deno.env.get("SMTP_PASSWORD");
+const SMTP_HOST = Deno.env.get("SMTP_HOST") ?? "smtp.gmail.com";
 const IP_SALT = Deno.env.get("VERIFICATION_IP_SALT") ?? "always-connected";
 const APP_NAME = "Always Connected";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -49,13 +59,27 @@ function resolveOrigin(req: Request): string {
   return origin === APP_ORIGIN || NATIVE_ORIGINS.includes(origin) ? origin : APP_ORIGIN;
 }
 
+const provider: "resend" | "smtp" | null =
+  RESEND_API_KEY && EMAIL_FROM ? "resend" : SMTP_USER && SMTP_PASSWORD ? "smtp" : null;
+
 async function sendEmail(to: string, subject: string, text: string, html: string): Promise<boolean> {
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, text, html }),
-  });
-  return res.ok;
+  if (provider === "resend") {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, text, html }),
+    });
+    return res.ok;
+  }
+  // Gmail reescribe un From ajeno a la cuenta, así que por defecto es la cuenta.
+  const conn = await Deno.connectTls({ hostname: SMTP_HOST, port: 465 });
+  await smtpSend(
+    conn,
+    { user: SMTP_USER!, password: SMTP_PASSWORD! },
+    { from: EMAIL_FROM ?? `${APP_NAME} <${SMTP_USER}>`, to, subject, text, html },
+    { heloName: "always-connected.supabase" },
+  );
+  return true;
 }
 
 serve(async (req) => {
@@ -95,7 +119,7 @@ serve(async (req) => {
   if (!normalized.ok) return json({ status: "INVALID_EMAIL" });
   if (isAppleRelayDomain(normalized.domain)) return json({ status: "PERSONAL_EMAIL" });
 
-  if (!RESEND_API_KEY || !EMAIL_FROM) {
+  if (!provider) {
     console.error("institution-verification: EMAIL_NOT_CONFIGURED");
     return json({ status: "EMAIL_NOT_CONFIGURED" });
   }
@@ -136,7 +160,9 @@ serve(async (req) => {
   let sent = false;
   try {
     sent = await sendEmail(normalized.email, mail.subject, mail.text, mail.html);
-  } catch {
+  } catch (e) {
+    // Solo el tipo y la etapa (SmtpError), nunca el correo ni la contraseña.
+    console.error("institution-verification: send error", provider, e instanceof Error ? e.message : "unknown");
     sent = false;
   }
   if (!sent) {
