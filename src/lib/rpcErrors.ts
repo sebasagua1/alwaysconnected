@@ -18,6 +18,10 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   MESSAGE_DELETED: 'rpcErrors.messageDeleted',
   EMPTY_MESSAGE: 'rpcErrors.emptyMessage',
   MESSAGE_FIELD_LOCKED: 'rpcErrors.messageLocked',
+  // Los lanza set_profile_campus al elegir campus en el alta.
+  CAMPUS_LOCKED: 'rpcErrors.campusLocked',
+  CAMPUS_NOT_AVAILABLE: 'rpcErrors.campusNotAvailable',
+  CAMPUS_NOT_ALLOWED: 'rpcErrors.campusNotAllowed',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {

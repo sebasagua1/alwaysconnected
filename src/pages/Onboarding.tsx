@@ -9,21 +9,17 @@ import { cn } from '@/lib/utils';
 import { ChipSelector } from '@/components/ui/chip-selector';
 import { InterestPicker } from '@/components/ui/interest-picker';
 import { OriginPicker } from '@/components/ui/origin-picker';
+import { InstitutionPicker } from '@/components/ui/institution-picker';
 import { ResidencePicker } from '@/components/ui/residence-picker';
 import { WheelColumn, WHEEL_ITEM_HEIGHT } from '@/components/ui/wheel-column';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
 import { useToast } from '@/hooks/use-toast';
-import { ChevronRight, ChevronLeft, Search, Check } from 'lucide-react';
+import { ChevronRight, ChevronLeft, Check } from 'lucide-react';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { pageTitle } from '@/lib/brand';
 import { PRIVACY_URL, TERMS_URL } from '@/lib/legal';
-
-interface Campus {
-  id: string;
-  name: string;
-  email_domain: string | null;
-}
+import { rpcMessage } from '@/lib/rpcErrors';
 
 export default function Onboarding() {
   const { user, profile, profileLoaded, fetchProfile } = useAuthStore();
@@ -47,9 +43,7 @@ export default function Onboarding() {
   const [acceptedTerms, setAcceptedTerms] = useState(false);
 
   // Campus state
-  const [campuses, setCampuses] = useState<Campus[]>([]);
   const [selectedCampusId, setSelectedCampusId] = useState<string | null>(null);
-  const [campusSearch, setCampusSearch] = useState('');
   const [needsCampusSelection, setNeedsCampusSelection] = useState(false);
 
   // El nombre puede venir ya puesto: Apple y Google lo entregan al iniciar
@@ -95,12 +89,11 @@ export default function Onboarding() {
       return;
     }
 
-    // Sin institución asignada: el correo no coincide con ninguna. Que elija,
-    // sabiendo que esa elección queda sin verificar.
+    // Sin institución asignada: o el correo no es de ninguna (elige entre
+    // todo el catálogo y queda sin verificar), o es de una universidad con
+    // varios campus, como el Tec (elige entre los suyos y queda verificado).
+    // Las opciones las carga InstitutionPicker; la base valida la elección.
     setNeedsCampusSelection(true);
-    supabase.from('campuses').select('*').then(({ data }) => {
-      if (data) setCampuses(data);
-    });
   }, [user, profileLoaded, profile?.campus_id]);
 
   // Lista explícita de pasos. Antes se hacía con aritmética sobre el índice
@@ -169,7 +162,8 @@ export default function Onboarding() {
     }).eq('id', user.id);
 
     if (error) {
-      toast({ title: t('common.error'), description: error.message, variant: 'destructive' });
+      // Los CAMPUS_* del guardia de la base traen texto propio.
+      toast({ title: t('common.error'), description: rpcMessage(error.message, t), variant: 'destructive' });
     } else {
       await fetchProfile();
     }
@@ -179,43 +173,13 @@ export default function Onboarding() {
   // Steps: campus selection (if needed) → basics → residence → interests → languages
   const getStepContent = () => {
     if (current === 'campus') {
-      const filtered = campuses.filter(c =>
-        c.name.toLowerCase().includes(campusSearch.toLowerCase())
-      );
       return (
         <div className="space-y-6 flex-1">
           <div>
             <h2 className="text-2xl font-extrabold text-foreground mb-1">{t('onboarding.campusTitle')}</h2>
             <p className="text-muted-foreground text-sm">{t('onboarding.campusSubtitle')}</p>
           </div>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder={t('onboarding.campusSearch')}
-              value={campusSearch}
-              onChange={e => setCampusSearch(e.target.value)}
-              className="h-12 rounded-xl text-base pl-10"
-            />
-          </div>
-          <div className="space-y-3 max-h-[300px] overflow-y-auto">
-            {filtered.map(campus => (
-              <button
-                key={campus.id}
-                onClick={() => setSelectedCampusId(campus.id)}
-                className={cn(
-                  'w-full p-4 rounded-xl text-left font-semibold transition-all border-2',
-                  selectedCampusId === campus.id
-                    ? 'border-primary bg-primary/5 text-foreground'
-                    : 'border-border bg-card text-foreground/80'
-                )}
-              >
-                {campus.name}
-              </button>
-            ))}
-            {filtered.length === 0 && (
-              <p className="text-muted-foreground text-sm text-center py-4">{t('onboarding.campusEmpty')}</p>
-            )}
-          </div>
+          <InstitutionPicker value={selectedCampusId} onChange={setSelectedCampusId} />
         </div>
       );
     }
