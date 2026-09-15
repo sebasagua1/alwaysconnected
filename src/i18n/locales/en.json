@@ -366,7 +366,16 @@
     "explorer": "Explorer",
     "study_buddy": "Study Buddy",
     "team_player": "Team Player",
-    "streak_7": "7-Day Streak"
+    "streak_7": "7-Day Streak",
+    "how": {
+      "organizer": "Create {{count}} events",
+      "explorer": "Join {{count}} events",
+      "study_buddy": "Check in to {{count}} study sessions",
+      "team_player": "Join {{count}} sports events",
+      "streak_7": "Join events on {{count}} different days"
+    },
+    "earned": "Earned!",
+    "progress": "{{current}} of {{target}}"
   },
   "map": {
     "title": "Campus Event Map",
