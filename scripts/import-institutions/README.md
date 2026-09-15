@@ -48,5 +48,9 @@ Estado al 2026-09-14: verifican `tec.mx`, `fsu.edu`, `purdue.edu`, `comunidad.un
 ## Configuración manual pendiente
 
 - **Supabase SQL Editor**: aplicar `20260917000000_verificacion-institucional.sql` y después `20260917010000_catalogo-instituciones-datos.sql`.
-- **Edge Function** `institution-verification`: desplegarla y definir los secretos `RESEND_API_KEY`, `VERIFICATION_EMAIL_FROM` (remitente con dominio verificado en el proveedor, con SPF y DKIM) y `VERIFICATION_IP_SALT`. Sin ellos la función responde `EMAIL_NOT_CONFIGURED` y no crea desafíos.
+- **Edge Function** `institution-verification`: desplegarla y definir los secretos de UNO de estos envíos (se usa el primero completo):
+  - **Resend** (con dominio propio): `RESEND_API_KEY` y `VERIFICATION_EMAIL_FROM` (remitente con dominio verificado, SPF y DKIM).
+  - **Gmail por SMTP** (provisional desde 2026-09-15, sin dominio): `SMTP_USER` (la cuenta) y `SMTP_PASSWORD` (contraseña de aplicación de Google, requiere verificación en dos pasos). Sale por el puerto 465; Gmail limita a unos 500 correos al día.
+  - Siempre: `VERIFICATION_IP_SALT`.
+  Sin un envío completo la función responde `EMAIL_NOT_CONFIGURED` y no crea desafíos.
 - Los códigos nunca se envían a direcciones de relay de Apple (se rechazan antes), así que no hace falta registrar el remitente en el servicio de relay privado de Apple para este flujo.
