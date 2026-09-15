@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import type { RepeatDraft } from '@/lib/repeatPlan';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
 import { Plus, LocateFixed, Layers, List, Map as MapIcon, Search, SlidersHorizontal, X as XIcon, type LucideIcon } from 'lucide-react';
@@ -86,6 +88,11 @@ export default function MapHome() {
   // lo que llegue por tiempo real.
   const selectedEvent = useEventStore(selectSelectedEvent);
   const [showCreate, setShowCreate] = useState(false);
+  // "Repetir el plan" llega desde la ficha de un evento pasado (Mis eventos)
+  // con el borrador en el state de la navegación.
+  const routerLocation = useLocation();
+  const navigate = useNavigate();
+  const [repeatDraft, setRepeatDraft] = useState<RepeatDraft | null>(null);
   // El aviso de primer uso. Se guarda en el perfil y no en localStorage para
   // que no reaparezca al cambiar de telefono.
   const { profile, fetchProfile } = useAuthStore();
@@ -654,6 +661,21 @@ export default function MapHome() {
    * que el boton no hacia nada. La ubicacion se pide ahora desde dentro del
    * formulario, donde se entiende para que es.
    */
+  useEffect(() => {
+    const repeat = (routerLocation.state as { repeat?: Omit<RepeatDraft, 'startsAt'> & { startsAt: string } } | null)?.repeat;
+    if (!repeat) return;
+    // Se consume una vez: sin limpiar el state, volver atrás o recargar
+    // abriría otra vez el formulario.
+    navigate('.', { replace: true, state: null });
+    if (pickMarkerRef.current) {
+      pickMarkerRef.current.remove();
+      pickMarkerRef.current = null;
+    }
+    setRepeatDraft({ ...repeat, startsAt: new Date(repeat.startsAt) });
+    setPickedLocation(repeat.location);
+    setShowCreate(true);
+  }, [routerLocation.state, navigate]);
+
   const handleOpenCreate = () => {
     if (pickMarkerRef.current) {
       pickMarkerRef.current.remove();
@@ -722,6 +744,7 @@ export default function MapHome() {
 
   const handleCloseCreate = () => {
     setShowCreate(false);
+    setRepeatDraft(null);
     setPickedLocation(null);
     if (pickMarkerRef.current) {
       pickMarkerRef.current.remove();
@@ -1115,6 +1138,7 @@ export default function MapHome() {
           onPickLocation={handleStartPicking}
           pickedLocation={pickedLocation}
           hidden={pickingLocation}
+          initial={repeatDraft}
         />
       )}
     </div>

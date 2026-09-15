@@ -142,6 +142,12 @@ export default function MyEvents() {
     activeTab === 'upcoming' ? !isPast(new Date(e.ends_at)) : isPast(new Date(e.ends_at))
   );
   const filtered = allFiltered.slice(0, visibleCount);
+  // Lo que terminó en las últimas 48 h, arriba de "Próximos": es cuando
+  // agregar a alguien o repetir el plan todavía apetece. En "Pasados" ya
+  // sale como cualquier otro.
+  const justEnded = events
+    .filter((e) => isPast(new Date(e.ends_at)) && Date.now() - new Date(e.ends_at).getTime() < 48 * 3600 * 1000)
+    .sort((a, b) => new Date(b.ends_at).getTime() - new Date(a.ends_at).getTime());
 
   return (
     <div className="min-h-screen pb-nav px-4 pt-safe">
@@ -187,6 +193,22 @@ export default function MyEvents() {
             <p className="text-muted-foreground text-sm">{t(activeTab === 'upcoming' ? 'myEvents.emptyUpcoming' : 'myEvents.emptyPast')}</p>
           </div>
         ) : null}
+        {!loading && activeTab === 'upcoming' && justEnded.map(event => (
+          <button
+            key={`ended-${event.id}`}
+            onClick={() => setSelected(event)}
+            className="w-full flex items-center gap-3 text-left rounded-2xl p-4 bg-primary/10 border border-primary/30 active:scale-[0.98] transition-transform"
+          >
+            <span className="flex-1 min-w-0">
+              <span className="block text-xs font-semibold text-primary">{t('afterEvent.justEnded')}</span>
+              <span className="block font-bold text-foreground truncate">{event.title}</span>
+            </span>
+            <span className="flex items-center gap-0.5 text-sm font-bold text-primary shrink-0">
+              {t('afterEvent.whatsNext')}
+              <ChevronRight className="w-4 h-4" aria-hidden="true" />
+            </span>
+          </button>
+        ))}
         {!loading && filtered.map(event => {
           const cat = EVENT_CATEGORIES.find(c => c.key === event.category);
           return (
@@ -244,7 +266,7 @@ export default function MyEvents() {
                   )}
                 </span>
                 <span className="flex items-center gap-0.5 text-xs font-semibold text-primary">
-                  {t('myEvents.viewDetails')}
+                  {isPast(new Date(event.ends_at)) ? t('afterEvent.whatsNext') : t('myEvents.viewDetails')}
                   <ChevronRight className="w-3.5 h-3.5" />
                 </span>
               </div>

@@ -25,6 +25,7 @@ import { UserProfileSheet } from '@/components/profile/UserProfileSheet';
 import type { Database } from '@/integrations/supabase/types';
 import { pageTitle } from '@/lib/brand';
 import { formatChatTime } from '@/lib/chat';
+import { GroupInvites } from '@/components/chat/GroupInvites';
 
 type FriendData = Pick<
   Database['public']['Views']['public_profiles']['Row'],
@@ -76,6 +77,7 @@ export default function Friends() {
   const initialTab: ActiveTab = (location.state as { tab?: ActiveTab } | null)?.tab ?? 'friends';
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
   const unreadMessages = useNotificationStore((n) => n.unreadMessages);
+  const groupInvites = useNotificationStore((n) => n.groupInvites);
   const [searchQuery, setSearchQuery] = useState('');
   const [friends, setFriends] = useState<Friend[]>([]);
   const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
@@ -497,9 +499,9 @@ export default function Friends() {
             {tab === 'friends' && t('friends.tabFriends')}
             {tab === 'groups' && t('friends.tabGroups')}
             {tab === 'leaderboard' && t('friends.tabLeaderboard')}
-            {tab === 'friends' && pendingRequests.length > 0 && (
+            {tab === 'friends' && pendingRequests.length + groupInvites > 0 && (
               <span className="absolute -top-1 -right-1 w-5 h-5 bg-destructive text-destructive-foreground rounded-full text-xs font-bold flex items-center justify-center">
-                {pendingRequests.length}
+                {pendingRequests.length + groupInvites}
               </span>
             )}
           </button>
@@ -559,6 +561,8 @@ export default function Friends() {
               ))}
             </div>
           )}
+
+          <GroupInvites />
 
           {pendingRequests.length > 0 && (
             <div className="space-y-2">
