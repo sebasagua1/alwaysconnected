@@ -47,3 +47,6 @@ pnpm-lock.yaml
 
 # Caché incremental de `tsc -b` (la usa npm run build)
 *.tsbuildinfo
+
+# Datasets oficiales descargados por scripts/import-institutions/fetch-sources.mjs
+scripts/import-institutions/raw/

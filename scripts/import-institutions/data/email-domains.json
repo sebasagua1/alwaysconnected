@@ -1,0 +1,227 @@
+{
+  "note": "Archivo curado aparte del catalogo: que una institucion exista no significa que su dominio de correo pruebe matricula vigente. Solo verifican los dominios confirmed + verification_enabled con fuente oficial. Revisado 2026-09-14.",
+  "domains": [
+    {
+      "domain": "fsu.edu",
+      "university_slug": "florida-state",
+      "audience": "all_affiliates",
+      "confidence": "confirmed",
+      "verification_enabled": true,
+      "official_source_url": "https://announcements.fsu.edu/article/student-email-upgrades-fsuedu-accounts-may-4",
+      "source_title": "Student email upgrades to @fsu.edu accounts May 4",
+      "last_verified_at": "2026-09-14",
+      "notes": "Estudiantes migrados a FSUID@fsu.edu, mismo sistema que personal. Prueba afiliacion vigente, no distingue estudiante de personal."
+    },
+    {
+      "domain": "my.fsu.edu",
+      "university_slug": "florida-state",
+      "audience": "unknown",
+      "confidence": "confirmed",
+      "verification_enabled": false,
+      "is_active": false,
+      "official_source_url": "https://its.fsu.edu/about-its/news/student-email-upgrade-complete",
+      "source_title": "Student email upgrade complete",
+      "last_verified_at": "2026-09-14",
+      "notes": "Dominio antiguo de estudiantes; buzones cerrados el 4 de mayo de 2022. No verifica."
+    },
+    {
+      "domain": "purdue.edu",
+      "university_slug": "purdue",
+      "audience": "all_affiliates",
+      "confidence": "confirmed",
+      "verification_enabled": true,
+      "official_source_url": "https://it.purdue.edu/services/email.php",
+      "source_title": "Email | Purdue University IT",
+      "last_verified_at": "2026-09-14",
+      "notes": "Se entrega a quienes mantienen afiliacion con Purdue. Prueba afiliacion, no necesariamente estudiante."
+    },
+    {
+      "domain": "tec.mx",
+      "university_slug": "tec",
+      "audience": "unknown",
+      "confidence": "probable",
+      "verification_enabled": false,
+      "official_source_url": "https://profesorescatedra.tec.mx/en/configure-email-and-access",
+      "source_title": "Configure email and access (profesores de catedra)",
+      "last_verified_at": "2026-09-14",
+      "student_id_pattern": "^a0[0-9]{7}$",
+      "notes": "Ninguna pagina oficial encontrada confirma que los estudiantes vigentes reciben @tec.mx (la de activacion de cuenta institucional ya no existe). Solo se confirma para profesores. Queda desactivado hasta tener evidencia; las 18 cuentas ya verificadas se conservan como legacy."
+    },
+    {
+      "domain": "exatec.tec.mx",
+      "university_slug": "tec",
+      "audience": "alumni",
+      "confidence": "confirmed",
+      "verification_enabled": false,
+      "official_source_url": "https://tec.mx/es/exatec/cuenta-de-acceso-mitec-egresados",
+      "source_title": "Cuenta de acceso a mitec egresados",
+      "last_verified_at": "2026-09-14",
+      "notes": "Cuenta de egresados. Nunca verifica matricula vigente."
+    },
+    {
+      "domain": "exatec.mx",
+      "university_slug": "tec",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior sin evidencia. No verifica."
+    },
+    {
+      "domain": "itesm.mx",
+      "university_slug": "tec",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Solo aparece en servidores y buzones de departamentos. No verifica."
+    },
+    {
+      "domain": "u.icesi.edu.co",
+      "university_slug": "icesi",
+      "audience": "unknown",
+      "confidence": "confirmed",
+      "verification_enabled": false,
+      "official_source_url": "https://www.icesi.edu.co/servicios/syri/ccc/correo-electronico-academico/",
+      "source_title": "Correo electronico academico - Servicios",
+      "last_verified_at": "2026-09-14",
+      "notes": "Correo academico para estudiantes activos, egresados y profesores hora catedra. Incluye egresados: no prueba matricula vigente. Desactivado."
+    },
+    {
+      "domain": "icesi.edu.co",
+      "university_slug": "icesi",
+      "audience": "faculty_staff",
+      "confidence": "confirmed",
+      "verification_enabled": false,
+      "official_source_url": "https://www.icesi.edu.co/servicios/syri/ccc/correo-colaboradores/",
+      "source_title": "Correo electronico colaboradores",
+      "last_verified_at": "2026-09-14",
+      "notes": "Personal y profesores de planta. No verifica estudiantes."
+    },
+    {
+      "domain": "javeriana.edu.co",
+      "university_slug": "javeriana",
+      "audience": "unknown",
+      "confidence": "probable",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Indicios de uso por estudiantes, pero ninguna pagina oficial legible lo declara. La sede Cali usa javerianacali.edu.co. Desactivado."
+    },
+    {
+      "domain": "comunidad.unam.mx",
+      "legacy_campus_slug": "unam",
+      "university_slug": "unam",
+      "audience": "all_affiliates",
+      "confidence": "confirmed",
+      "verification_enabled": true,
+      "official_source_url": "https://www.tic.unam.mx/servicios-de-tic/correo-electronico-institucional/",
+      "source_title": "Correo electronico institucional - Portal TIC UNAM",
+      "last_verified_at": "2026-09-14",
+      "notes": "Lo solicitan estudiantes y personal activos."
+    },
+    {
+      "domain": "unam.mx",
+      "university_slug": "unam",
+      "audience": "faculty_staff",
+      "confidence": "confirmed",
+      "verification_enabled": false,
+      "official_source_url": "https://www.tic.unam.mx/servicios-de-tic/correo-electronico-institucional/",
+      "source_title": "Correo electronico institucional - Portal TIC UNAM",
+      "last_verified_at": "2026-09-14",
+      "notes": "Solo responsables de TIC de dependencias. No es de estudiantes."
+    },
+    {
+      "domain": "alumnos.udg.mx",
+      "university_slug": "udg",
+      "audience": "student",
+      "confidence": "confirmed",
+      "verification_enabled": true,
+      "official_source_url": "https://cgta.udg.mx/correo-institucional",
+      "source_title": "Correo institucional | Coordinacion General de Tecnologias de la Administracion",
+      "last_verified_at": "2026-09-14",
+      "notes": "Cuenta Google Workspace for Education para estudiantes."
+    },
+    {
+      "domain": "udg.mx",
+      "university_slug": "udg",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Heredado del catalogo anterior sin evidencia de audiencia. No verifica."
+    },
+    {
+      "domain": "uanl.edu.mx",
+      "university_slug": "uanl",
+      "audience": "all_affiliates",
+      "confidence": "confirmed",
+      "verification_enabled": true,
+      "official_source_url": "https://dti.uanl.mx/correo-universitario/",
+      "source_title": "Correo Universitario - Direccion de Tecnologias y Desarrollo Digital UANL",
+      "last_verified_at": "2026-09-14",
+      "notes": "Exclusivo para estudiantes, profesores e investigadores activos."
+    },
+    {
+      "domain": "alumno.ipn.mx",
+      "university_slug": "ipn",
+      "audience": "student",
+      "confidence": "probable",
+      "verification_enabled": false,
+      "official_source_url": "https://www.ipn.mx/cenac/centro-de-atencion/preguntas-frecuentes.html",
+      "source_title": "Preguntas frecuentes de los servicios TIC | IPN Oficial",
+      "last_verified_at": "2026-09-14",
+      "notes": "Se mencionan tipos de cuenta @alumno, pero ninguna pagina legible lo liga explicitamente a estudiantes. Desactivado."
+    },
+    {
+      "domain": "ipn.mx",
+      "university_slug": "ipn",
+      "audience": "faculty_staff",
+      "confidence": "probable",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Por implicacion, personal y dependencias. No verifica."
+    },
+    {
+      "domain": "uniandes.edu.co",
+      "university_slug": "universidad-de-los-andes",
+      "audience": "unknown",
+      "confidence": "confirmed",
+      "verification_enabled": false,
+      "official_source_url": "https://tecnologia.uniandes.edu.co/terminos-y-condiciones-uso-de-cuentas-uniandes/",
+      "source_title": "Terminos y condiciones - Uso de Cuentas Uniandes",
+      "last_verified_at": "2026-09-14",
+      "notes": "Cuentas para estudiantes, profesores, administrativos y egresados. Incluye egresados: no prueba vinculo vigente. Desactivado."
+    },
+    {
+      "domain": "unal.edu.co",
+      "university_slug": "universidad-nacional-de-colombia",
+      "audience": "unknown",
+      "confidence": "probable",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Paginas oficiales no accesibles; indicios de que incluye egresados. Desactivado."
+    },
+    {
+      "domain": "udea.edu.co",
+      "university_slug": "universidad-de-antioquia",
+      "audience": "unknown",
+      "confidence": "probable",
+      "verification_enabled": false,
+      "last_verified_at": "2026-09-14",
+      "notes": "Paginas oficiales devolvieron 403; indicios de que los egresados conservan la cuenta. Desactivado."
+    },
+    { "domain": "buap.mx", "university_slug": "buap", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "alumno.buap.mx", "university_slug": "buap", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "udlap.mx", "university_slug": "udlap", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "ibero.mx", "university_slug": "ibero", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "anahuac.mx", "university_slug": "anahuac", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "uaslp.mx", "university_slug": "uaslp", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "uaemex.mx", "university_slug": "uaemex", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "colmex.mx", "university_slug": "colmex", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "cide.edu", "university_slug": "cide", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "uam.mx", "university_slug": "uam", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "uaq.mx", "university_slug": "uaq", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "itam.mx", "university_slug": "itam", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." },
+    { "domain": "up.edu.mx", "university_slug": "up", "audience": "unknown", "confidence": "unconfirmed", "verification_enabled": false, "last_verified_at": "2026-09-14", "notes": "Heredado del catalogo anterior (20260830) sin evidencia. No verifica." }
+  ]
+}

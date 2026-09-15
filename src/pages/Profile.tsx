@@ -29,6 +29,9 @@ import { cn } from '@/lib/utils';
 import { UserAvatar } from '@/components/ui/user-avatar';
 import { formatOrigin } from '@/lib/origin';
 import { pageTitle } from '@/lib/brand';
+import { VerificationCard } from '@/components/profile/VerificationCard';
+import { VerifyInstitutionSheet } from '@/components/profile/VerifyInstitutionSheet';
+import { formatAffiliation, type VerificationState } from '@/lib/institutions';
 
 export default function Profile() {
   const { profile, signOut, fetchProfile } = useAuthStore();
@@ -44,9 +47,22 @@ export default function Profile() {
   const [deleting, setDeleting] = useState(false);
   const { toast } = useToast();
   const originLabel = formatOrigin(profile?.origin, i18n.language || 'es');
+  const [verification, setVerification] = useState<VerificationState | null>(null);
+  const [verificationLoading, setVerificationLoading] = useState(true);
+  const [verifyOpen, setVerifyOpen] = useState(false);
+
+  // El estado de la verificación institucional. Si falla, la tarjeta cae a
+  // "Falta verificar": invitar de más no rompe nada; esconderla sí.
+  const loadVerification = async () => {
+    const { data, error } = await supabase.rpc('my_institution_verification');
+    if (error) console.error('my_institution_verification:', error.message);
+    setVerification(data?.[0] ?? null);
+    setVerificationLoading(false);
+  };
 
   useEffect(() => {
     fetchProfile();
+    loadVerification();
   }, [fetchProfile]);
 
   useEffect(() => {
@@ -189,6 +205,9 @@ export default function Profile() {
           />
           <div className="flex-1">
             <h2 className="text-lg font-extrabold text-foreground">{profile.name ?? t('profile.student')}</h2>
+            {verification && formatAffiliation(verification, t) && (
+              <p className="text-sm font-semibold text-foreground/80">{formatAffiliation(verification, t)}</p>
+            )}
             <p className="text-sm text-muted-foreground">{profile.major ?? t('profile.noMajor')}</p>
             <p className="text-xs text-muted-foreground">
               {profile.residence_type ? t('residence.' + profile.residence_type) : ''}
@@ -226,6 +245,11 @@ export default function Profile() {
           </div>
         )}
       </div>
+
+      <VerificationCard state={verification} loading={verificationLoading} onOpen={() => setVerifyOpen(true)} />
+      {verifyOpen && (
+        <VerifyInstitutionSheet onClose={() => setVerifyOpen(false)} onChanged={loadVerification} />
+      )}
 
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-3 mb-5">

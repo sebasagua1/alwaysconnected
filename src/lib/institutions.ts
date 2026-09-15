@@ -1,57 +1,29 @@
 /**
- * El catálogo de universidades y campus, tal como lo sirve la RPC
- * `campus_options` (ver 20260915000000_catalogo-universidades.sql).
+ * El catálogo de instituciones tal como lo sirve la RPC `search_institutions`
+ * (ver 20260917000000_verificacion-institucional.sql).
  *
- * Aquí solo va lo que se puede probar sin pantallas: cómo se agrupa y cómo se
- * busca. Qué opciones existen y cuáles puede elegir cada quien lo decide la
- * base, no este archivo.
+ * Aquí solo va lo que se puede probar sin pantallas: cómo se describe cada
+ * resultado. Qué opciones existen y cuáles puede elegir cada quien lo decide
+ * la base, no este archivo.
  */
+import type { TFunction } from 'i18next';
+import type { Database } from '@/integrations/supabase/types';
 
-export interface CampusOption {
-  id: string;
-  slug: string;
-  name: string;
-  campus_name: string | null;
-  city: string | null;
-  short_name: string | null;
-  university_slug: string;
-  university_name: string;
-  university_short_name: string;
-  country_code: string;
-  /** El correo de quien pregunta ya acredita la universidad. */
-  email_verified: boolean;
-}
+export type InstitutionResult = Database['public']['Functions']['search_institutions']['Returns'][number];
+export type VerificationState = Database['public']['Functions']['my_institution_verification']['Returns'][number];
 
-export interface CountryGroup {
-  code: string;
-  label: string;
-  options: CampusOption[];
-}
+export const INSTITUTION_TYPES = [
+  'university', 'technological_university', 'polytechnic_university', 'technological_institute',
+  'university_institution', 'technological_institution', 'technical_institution', 'college',
+  'community_college', 'school', 'other',
+] as const;
 
-/**
- * Orden de los países en el selector. México primero porque es donde nació la
- * comunidad; el resto, en el orden en que se sumaron. Un país que no esté aquí
- * sale al final, por nombre, en vez de desaparecer.
- */
-const COUNTRY_ORDER = ['MX', 'US', 'CO'];
+/** Países del catálogo, en el orden en que se ofrecen como filtro. */
+export const CATALOG_COUNTRIES = ['MX', 'CO', 'US'] as const;
 
 /** Sin acentos y en minúsculas: "queretaro" tiene que encontrar "Querétaro". */
 export const normalizeSearch = (s: string) =>
   s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
-
-/** Busca por nombre, abreviatura, ciudad o campus, y por la universidad. */
-export function matchesQuery(option: CampusOption, query: string): boolean {
-  const q = normalizeSearch(query);
-  if (!q) return true;
-  return [
-    option.name,
-    option.short_name,
-    option.campus_name,
-    option.city,
-    option.university_name,
-    option.university_short_name,
-  ].some((campo) => campo && normalizeSearch(campo).includes(q));
-}
 
 export function countryLabel(code: string, locale: string): string {
   try {
@@ -61,25 +33,42 @@ export function countryLabel(code: string, locale: string): string {
   }
 }
 
-export function groupByCountry(options: CampusOption[], locale: string): CountryGroup[] {
-  const grupos = new Map<string, CampusOption[]>();
-  for (const o of options) {
-    const lista = grupos.get(o.country_code) ?? [];
-    lista.push(o);
-    grupos.set(o.country_code, lista);
-  }
-  const rango = (c: string) => {
-    const i = COUNTRY_ORDER.indexOf(c);
-    return i === -1 ? COUNTRY_ORDER.length : i;
-  };
-  return [...grupos.entries()]
-    .map(([code, lista]) => ({
-      code,
-      label: countryLabel(code, locale),
-      // Dentro del país: por universidad y, dentro de ella, por campus.
-      options: lista.slice().sort((a, b) =>
-        a.university_name.localeCompare(b.university_name, locale)
-        || (a.campus_name ?? '').localeCompare(b.campus_name ?? '', locale)),
-    }))
-    .sort((a, b) => rango(a.code) - rango(b.code) || a.label.localeCompare(b.label, locale));
+/** "Universidad", "Community college", "Colegio"... Nunca llama universidad a una escuela. */
+export function institutionTypeLabel(type: string | null | undefined, t: TFunction): string {
+  const key = (INSTITUTION_TYPES as readonly string[]).includes(type ?? '') ? type : 'other';
+  return t(`institutionTypes.${key}`);
+}
+
+/**
+ * Las dos líneas de un resultado, para distinguir instituciones con nombres
+ * parecidos: arriba el nombre (y el campus si la institución tiene varios),
+ * abajo ciudad/estado, país y tipo.
+ */
+export function describeInstitution(r: InstitutionResult, t: TFunction, locale: string) {
+  const title = r.campus_name && r.campus_count > 1
+    ? `${r.university_name} — ${t('onboarding.campusLabel', { campus: r.campus_name })}`
+    : r.university_name;
+  const place = [r.campus_city ?? r.city, r.state_region].filter((p, i, a) => p && a.indexOf(p) === i).join(', ');
+  const subtitle = [place, countryLabel(r.country_code, locale), institutionTypeLabel(r.institution_type, t)]
+    .filter(Boolean)
+    .join(' · ');
+  return { title, subtitle };
+}
+
+/** La afiliación pública de un perfil: "Tecnológico de Monterrey · Campus Querétaro". */
+export function formatAffiliation(
+  p: { university_name?: string | null; campus_name?: string | null },
+  t: TFunction,
+): string | null {
+  if (!p.university_name) return null;
+  return p.campus_name ? `${p.university_name} · ${t('onboarding.campusLabel', { campus: p.campus_name })}` : p.university_name;
+}
+
+/** Lo que la tarjeta del perfil necesita decidir a partir del estado. */
+export function verificationCardMode(v: VerificationState | null): 'verified' | 'pending' | 'review' | 'unverified' {
+  if (!v) return 'unverified';
+  if (v.status === 'verified') return 'verified';
+  if (v.status === 'manual_review') return 'review';
+  if (v.status === 'pending_email' && v.pending_email_masked) return 'pending';
+  return 'unverified';
 }
