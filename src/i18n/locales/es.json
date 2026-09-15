@@ -407,6 +407,70 @@
       "skip": "Saltar",
       "done": "Listo",
       "progress": "Paso {{current}} de {{total}}"
+    },
+    "filters": {
+      "button": "Filtros",
+      "buttonActive": "Filtros, {{count}} activos",
+      "title": "Filtrar eventos",
+      "when": "Cuándo",
+      "whenAny": "Cuando sea",
+      "whenOptions": {
+        "now": "Ahora",
+        "next3h": "Próximas 3 h",
+        "today": "Hoy",
+        "tomorrow": "Mañana",
+        "weekend": "Fin de semana",
+        "week": "Próximos 7 días",
+        "range": "Elegir días"
+      },
+      "whenHints": {
+        "now": "En curso o empieza en menos de 1 hora",
+        "next3h": "Algo que pase de aquí a 3 horas"
+      },
+      "rangePick": "Toca el primer y el último día",
+      "rangeOne": "{{from}}",
+      "rangeMany": "{{from}} – {{to}}",
+      "dayPart": "Hora de inicio",
+      "dayParts": {
+        "morning": "Por la mañana",
+        "afternoon": "Por la tarde",
+        "evening": "Por la noche"
+      },
+      "dayPartHints": {
+        "morning": "5 a 12 h",
+        "afternoon": "12 a 19 h",
+        "evening": "Desde 19 h"
+      },
+      "duration": "Duración",
+      "durations": {
+        "short": "Hasta 1 h",
+        "medium": "1 a 2 h",
+        "long": "Más de 2 h"
+      },
+      "experience": "Tipo de experiencia",
+      "access": {
+        "direct": "Entrada directa",
+        "approval": "Con aprobación"
+      },
+      "size": {
+        "small": "Grupo pequeño",
+        "large": "Grupo grande"
+      },
+      "sizeHints": {
+        "small": "Hasta 5 personas",
+        "large": "6 personas o más"
+      },
+      "onlyWithSpots": "Solo con lugares disponibles",
+      "clear": "Quitar filtros",
+      "show_one": "Ver 1 evento",
+      "show_other": "Ver {{count}} eventos",
+      "showNone": "Ningún evento coincide",
+      "removeChip": "Quitar filtro {{label}}",
+      "mapNoMatch": "Ningún evento coincide con tus filtros",
+      "today": "Hoy",
+      "tomorrow": "Mañana",
+      "live": "En curso",
+      "startsIn": "Empieza en {{count}} min"
     }
   },
   "rpcErrors": {
