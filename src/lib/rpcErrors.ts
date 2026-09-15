@@ -22,6 +22,9 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   CAMPUS_LOCKED: 'rpcErrors.campusLocked',
   CAMPUS_NOT_AVAILABLE: 'rpcErrors.campusNotAvailable',
   CAMPUS_NOT_ALLOWED: 'rpcErrors.campusNotAllowed',
+  // request_institution.
+  REQUEST_RATE_LIMIT: 'rpcErrors.requestRateLimit',
+  INVALID_REQUEST: 'rpcErrors.invalidRequest',
   // Después del evento (20260919).
   REPEAT_NOT_ALLOWED: 'rpcErrors.repeatNotAllowed',
   NOT_AN_ATTENDEE: 'rpcErrors.notAnAttendee',

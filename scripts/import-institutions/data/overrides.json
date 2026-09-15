@@ -1,0 +1,827 @@
+{
+  "checked_at": "2026-09-14",
+  "acronyms": [
+    "UNAM",
+    "IPN",
+    "UAM",
+    "ITESO",
+    "ITAM",
+    "CIDE",
+    "UPAEP",
+    "UTEG",
+    "UNE",
+    "ICEL",
+    "UCAD",
+    "UCMA",
+    "IUEM",
+    "UEEM",
+    "CTM",
+    "UVM",
+    "ITESA",
+    "UTT",
+    "IPETH",
+    "UNIEM",
+    "CNCI",
+    "UDI",
+    "UDES",
+    "UDCA",
+    "UNAB",
+    "UCO",
+    "CES",
+    "EAN",
+    "EIA",
+    "ECCI",
+    "CUC",
+    "UTP",
+    "UPTC",
+    "UMB",
+    "UNAD",
+    "FUAC",
+    "UNAULA",
+    "UAIIN",
+    "CEIPA",
+    "CESA",
+    "INCCA",
+    "EAFIT",
+    "CESMAG",
+    "II",
+    "III",
+    "CUNY",
+    "SUNY",
+    "CSU",
+    "UC",
+    "A&M",
+    "AM",
+    "XXI",
+    "ISIMA",
+    "ITES",
+    "UGC"
+  ],
+  "existing": {
+    "note": "Inventario de produccion al 2026-09-14 (ids y slugs, sin datos personales). El importador falla si un slug de estos apunta a otro id.",
+    "universities": [
+      {
+        "slug": "tec",
+        "id": "2c931b2c-9449-4ba7-b701-2a57c2ae2f62",
+        "country_code": "MX",
+        "source_ref": "19MSU0029S"
+      },
+      {
+        "slug": "icesi",
+        "id": "24ba682b-945a-4355-865a-dc65ec118861",
+        "country_code": "CO",
+        "source_ref": "1828"
+      },
+      {
+        "slug": "javeriana",
+        "id": "9fa36a6f-f113-4788-90b2-5fc69430c851",
+        "country_code": "CO",
+        "source_ref": "1701"
+      },
+      {
+        "slug": "cesa",
+        "id": "5ef91efd-a109-48d3-8f68-2a9308ce8c5e",
+        "country_code": "CO",
+        "source_ref": "2704"
+      },
+      {
+        "slug": "purdue",
+        "id": "bcda7873-6322-4d24-8b49-428e6706ee7d",
+        "country_code": "US",
+        "source_ref": "243780"
+      },
+      {
+        "slug": "florida-state",
+        "id": "d8700f55-9fd3-42d1-a199-fba956e5d78d",
+        "country_code": "US",
+        "source_ref": "134097"
+      }
+    ],
+    "institutions": [
+      {
+        "slug": "tec-queretaro",
+        "id": "1a898a3a-53c0-4468-8dc6-b03bef169a6e",
+        "university_slug": "tec",
+        "campus_slug": "queretaro",
+        "campus_name": "Querétaro",
+        "name": "Tecnológico de Monterrey, Campus Querétaro",
+        "city": "Querétaro",
+        "source_ref": "22MSU0050I"
+      },
+      {
+        "slug": "tec-guadalajara",
+        "id": "9269e0c2-1704-4264-8e26-294c7fddbf8a",
+        "university_slug": "tec",
+        "campus_slug": "guadalajara",
+        "campus_name": "Guadalajara",
+        "name": "Tecnológico de Monterrey, Campus Guadalajara",
+        "city": "Zapopan",
+        "source_ref": "14MSU0050Z"
+      },
+      {
+        "slug": "tec-monterrey",
+        "id": "a77a918e-5b0b-45b2-9a01-acdd4d61d08a",
+        "university_slug": "tec",
+        "campus_slug": "monterrey",
+        "campus_name": "Monterrey",
+        "name": "Tecnológico de Monterrey, Campus Monterrey",
+        "city": "Monterrey",
+        "source_ref": "19MSU0029S"
+      },
+      {
+        "slug": "tec-ciudad-de-mexico",
+        "id": "1fe414c7-3136-4696-ac67-2b07a416e9cf",
+        "university_slug": "tec",
+        "campus_slug": "ciudad-de-mexico",
+        "campus_name": "Ciudad de México",
+        "name": "Tecnológico de Monterrey, Campus Ciudad de México",
+        "city": "Ciudad de México",
+        "source_ref": "09MSU0231Y"
+      },
+      {
+        "slug": "florida-state",
+        "id": "be062ad6-1a5d-4687-a71d-21c2ac7a8ad0",
+        "university_slug": "florida-state",
+        "campus_slug": "principal",
+        "campus_name": null,
+        "name": "Florida State University",
+        "city": "Tallahassee",
+        "source_ref": "134097"
+      },
+      {
+        "slug": "purdue",
+        "id": "3869753e-03d4-4ad9-ae96-2b7605117f4b",
+        "university_slug": "purdue",
+        "campus_slug": "principal",
+        "campus_name": null,
+        "name": "Purdue University",
+        "city": "West Lafayette",
+        "source_ref": "243780"
+      },
+      {
+        "slug": "icesi",
+        "id": "2d5e3036-eed0-4398-92db-f92cb5f4dd4e",
+        "university_slug": "icesi",
+        "campus_slug": "principal",
+        "campus_name": null,
+        "name": "Universidad Icesi",
+        "city": "Cali",
+        "source_ref": "1828"
+      },
+      {
+        "slug": "javeriana",
+        "id": "91eb1307-a047-436b-ba78-8c6eca58c4fe",
+        "university_slug": "javeriana",
+        "campus_slug": "principal",
+        "campus_name": null,
+        "name": "Pontificia Universidad Javeriana",
+        "city": "Bogotá",
+        "source_ref": "1701"
+      },
+      {
+        "slug": "cesa",
+        "id": "62cd4de7-26c3-49e4-b4f4-7b5e3efd0617",
+        "university_slug": "cesa",
+        "campus_slug": "principal",
+        "campus_name": null,
+        "name": "CESA — Colegio de Estudios Superiores de Administración",
+        "city": "Bogotá",
+        "source_ref": "2704"
+      },
+      {
+        "slug": "unam",
+        "id": "9aa57d8a-732e-4293-aa8a-bab741523796",
+        "attach_to": "MX:unam",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Nacional Autónoma de México",
+        "city": null,
+        "source_ref": "09MSU0019E"
+      },
+      {
+        "slug": "ipn",
+        "id": "a7463fb5-c938-4743-87cf-51f43edae71b",
+        "attach_to": "MX:ipn",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Instituto Politécnico Nacional",
+        "city": null,
+        "source_ref": "09MSU0027N"
+      },
+      {
+        "slug": "udg",
+        "id": "c32b35f0-6177-4488-bb3c-cfa2e0985164",
+        "attach_to": "MX:udg",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad de Guadalajara",
+        "city": null,
+        "source_ref": "14MSU0010Z"
+      },
+      {
+        "slug": "uanl",
+        "id": "d54d915b-c7a1-4e6d-a2b5-bb7ff3a6f603",
+        "attach_to": "MX:uanl",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Autónoma de Nuevo León",
+        "city": null,
+        "source_ref": "19MSU0011T"
+      },
+      {
+        "slug": "buap",
+        "id": "31744f31-49df-466f-bab4-f4527afde0f5",
+        "attach_to": "MX:buap",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Benemérita Universidad Autónoma de Puebla",
+        "city": null,
+        "source_ref": "21MSU0014E"
+      },
+      {
+        "slug": "uam",
+        "id": "e843d37b-5c82-42c0-b853-654807a41042",
+        "attach_to": "MX:uam",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Autónoma Metropolitana",
+        "city": null,
+        "source_ref": "09MSU0084E"
+      },
+      {
+        "slug": "uaemex",
+        "id": "948cbbe0-8a83-4e6c-a4b6-e0aeb1d7f090",
+        "attach_to": "MX:uaemex",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Autónoma del Estado de México",
+        "city": null,
+        "source_ref": "15MSU0012W"
+      },
+      {
+        "slug": "uaslp",
+        "id": "713927e5-430e-4325-af3f-0333d410b5d1",
+        "attach_to": "MX:uaslp",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Autónoma de San Luis Potosí",
+        "city": null,
+        "source_ref": "24MSU0011E"
+      },
+      {
+        "slug": "uaq",
+        "id": "eaa4cd40-0566-42a6-ac91-e652b1137151",
+        "attach_to": "MX:uaq",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Autónoma de Querétaro",
+        "city": null,
+        "source_ref": "22MSU0016B"
+      },
+      {
+        "slug": "ibero",
+        "id": "46a080c1-c6d2-4ee9-ba04-db520d6ef99e",
+        "attach_to": "MX:ibero",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Iberoamericana",
+        "city": null,
+        "source_ref": "09MSU0035W"
+      },
+      {
+        "slug": "itam",
+        "id": "f5d3ed89-6d29-4fbe-9470-44cd6ce0db26",
+        "attach_to": "MX:itam",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Instituto Tecnológico Autónomo de México",
+        "city": null,
+        "source_ref": "09MSU0124P"
+      },
+      {
+        "slug": "anahuac",
+        "id": "60786e59-f502-4f49-824c-7509b8e2a400",
+        "attach_to": "MX:anahuac",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Anáhuac",
+        "city": null,
+        "source_ref": "15MSU0038D"
+      },
+      {
+        "slug": "udlap",
+        "id": "35a6dfa2-32e4-4286-ac5b-22241ecf3065",
+        "attach_to": "MX:udlap",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad de las Américas Puebla",
+        "city": null,
+        "source_ref": "21MSU0649O"
+      },
+      {
+        "slug": "up",
+        "id": "026f4553-90bf-46b6-b17f-5784dbff1b7f",
+        "attach_to": "MX:up",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Universidad Panamericana",
+        "city": null,
+        "source_ref": "09MSU2515R"
+      },
+      {
+        "slug": "colmex",
+        "id": "9be8685c-ae88-4a73-ba4f-14b835d9b66b",
+        "attach_to": "MX:colmex",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "El Colegio de México",
+        "city": null,
+        "source_ref": "09MSU0132Y"
+      },
+      {
+        "slug": "cide",
+        "id": "e592d5a8-f8e9-41e9-b285-68c5f5f858e1",
+        "attach_to": "MX:cide",
+        "campus_slug": null,
+        "campus_name": null,
+        "name": "Centro de Investigación y Docencia Económicas",
+        "city": null,
+        "source_ref": "09MSU3470S"
+      }
+    ]
+  },
+  "mx": {
+    "exclude": "NORMAL|PEDAGOGICA NACIONAL|U\\.P\\.N\\.|^UNIDAD \\d|ACTUALIZACI[OÓ]N DEL MAGISTERIO|FORMACI[OÓ]N Y ACTUALIZACI[OÓ]N|\\bIPN\\b|UNIDAD PROFESIONAL INTERDISCIPLINARIA|ENFERMER[IÍ]A|BELLAS ARTES|ANTROPOLOG[IÍ]A E HISTORIA|DEL EJ[EÉ]RCITO|UNIVERSIDAD NAVAL|ESCUELA MILITAR|CIENCIAS DE LA EDUCACI[OÓ]N|PEDAG[OÓ]GICA DE|PEDAG[OÓ]GICA DEL ESTADO|CENTRO DE ENSEÑANZA TECNICA INDUSTRIAL",
+    "campus_min_students": 500,
+    "max_campuses": 25,
+    "groups": [
+      {
+        "key": "tec",
+        "match": "(^ITESM\\b|INSTITUTO TECNOLOGICO (Y )?DE ESTUDIOS SUPERIORES DE MONTERREY)"
+      },
+      {
+        "key": "uam",
+        "match": "^UNIVERSIDAD AUTONOMA METROPOLITANA"
+      }
+    ],
+    "group_names": {
+      "tec": "TECNOLOGICO DE MONTERREY",
+      "uam": "UNIVERSIDAD AUTONOMA METROPOLITANA"
+    },
+    "force": [
+      "tec",
+      "universidad nacional autonoma de mexico",
+      "instituto politecnico nacional",
+      "universidad de guadalajara",
+      "universidad autonoma de nuevo leon",
+      "benemerita universidad autonoma de puebla",
+      "uam",
+      "universidad autonoma del estado de mexico",
+      "universidad autonoma de san luis potosi",
+      "universidad autonoma de queretaro",
+      "universidad iberoamericana",
+      "instituto tecnologico autonomo de mexico",
+      "universidad anahuac",
+      "fundacion universidad de las americas puebla",
+      "universidad panamericana",
+      "el colegio de mexico",
+      "centro de investigacion y docencia economicas"
+    ]
+  },
+  "co": {
+    "exclude": "ESCUELA MILITAR|ESCUELA NAVAL|SUBOFICIALES|INFANTERIA DE MARINA|DIRECCION NACIONAL DE ESCUELAS",
+    "force": [
+      "2704"
+    ]
+  },
+  "us": {
+    "force": [
+      "243780",
+      "134097"
+    ],
+    "name_replace": [
+      [
+        "-Main Campus$",
+        ""
+      ],
+      [
+        " Campus Immersion$",
+        ""
+      ],
+      [
+        "^Texas A & M University",
+        "Texas A&M University"
+      ],
+      [
+        "-Norman Campus$",
+        ""
+      ],
+      [
+        "-Seattle Campus$",
+        ""
+      ]
+    ]
+  },
+  "names": {
+    "MX": {
+      "tec": {
+        "name": "Tecnológico de Monterrey",
+        "short_name": "Tec",
+        "institution_type": "university",
+        "aliases": [
+          "ITESM",
+          "Instituto Tecnológico y de Estudios Superiores de Monterrey"
+        ],
+        "website_url": "https://tec.mx"
+      },
+      "universidad nacional autonoma de mexico": {
+        "slug": "unam",
+        "short_name": "UNAM",
+        "website_url": "https://www.unam.mx"
+      },
+      "instituto politecnico nacional": {
+        "slug": "ipn",
+        "short_name": "IPN",
+        "institution_type": "university",
+        "website_url": "https://www.ipn.mx"
+      },
+      "universidad de guadalajara": {
+        "slug": "udg",
+        "short_name": "UdeG",
+        "website_url": "https://www.udg.mx"
+      },
+      "universidad autonoma de nuevo leon": {
+        "slug": "uanl",
+        "short_name": "UANL",
+        "website_url": "https://www.uanl.mx"
+      },
+      "benemerita universidad autonoma de puebla": {
+        "slug": "buap",
+        "short_name": "BUAP"
+      },
+      "uam": {
+        "slug": "uam",
+        "short_name": "UAM"
+      },
+      "universidad autonoma del estado de mexico": {
+        "slug": "uaemex",
+        "short_name": "UAEMéx"
+      },
+      "universidad autonoma de san luis potosi": {
+        "slug": "uaslp",
+        "short_name": "UASLP"
+      },
+      "universidad autonoma de queretaro": {
+        "slug": "uaq",
+        "short_name": "UAQ"
+      },
+      "universidad iberoamericana": {
+        "slug": "ibero",
+        "short_name": "Ibero"
+      },
+      "instituto tecnologico autonomo de mexico": {
+        "slug": "itam",
+        "short_name": "ITAM",
+        "institution_type": "university"
+      },
+      "universidad anahuac": {
+        "slug": "anahuac",
+        "short_name": "Anáhuac"
+      },
+      "fundacion universidad de las americas puebla": {
+        "slug": "udlap",
+        "name": "Universidad de las Américas Puebla",
+        "short_name": "UDLAP"
+      },
+      "universidad panamericana": {
+        "slug": "up",
+        "short_name": "UP"
+      },
+      "el colegio de mexico": {
+        "slug": "colmex",
+        "name": "El Colegio de México",
+        "short_name": "Colmex",
+        "institution_type": "university_institution"
+      },
+      "centro de investigacion y docencia economicas": {
+        "slug": "cide",
+        "short_name": "CIDE",
+        "institution_type": "university_institution"
+      },
+      "universidad autonoma de baja california": {
+        "short_name": "UABC"
+      },
+      "universidad autonoma de sinaloa": {
+        "short_name": "UAS"
+      },
+      "universidad veracruzana": {
+        "short_name": "UV"
+      },
+      "universidad michoacana de san nicolas de hidalgo": {
+        "short_name": "UMSNH"
+      },
+      "universidad autonoma de tamaulipas": {
+        "short_name": "UAT"
+      },
+      "universidad autonoma de ciudad juarez": {
+        "short_name": "UACJ"
+      },
+      "universidad de sonora": {
+        "short_name": "Unison"
+      },
+      "universidad autonoma de guerrero": {
+        "short_name": "UAGro"
+      },
+      "universidad autonoma del estado de hidalgo": {
+        "short_name": "UAEH"
+      },
+      "universidad de guanajuato": {
+        "short_name": "UG"
+      },
+      "universidad autonoma de zacatecas": {
+        "short_name": "UAZ"
+      },
+      "universidad autonoma de coahuila": {
+        "short_name": "UAdeC"
+      },
+      "universidad autonoma de chiapas": {
+        "short_name": "UNACH"
+      },
+      "universidad juarez autonoma de tabasco": {
+        "short_name": "UJAT"
+      },
+      "universidad autonoma del estado de morelos": {
+        "short_name": "UAEM"
+      },
+      "universidad autonoma de chihuahua": {
+        "short_name": "UACH"
+      },
+      "universidad autonoma de la ciudad de mexico": {
+        "short_name": "UACM"
+      },
+      "instituto tecnologico de sonora": {
+        "short_name": "ITSON",
+        "institution_type": "university"
+      },
+      "universidad autonoma benito juarez de oaxaca": {
+        "short_name": "UABJO"
+      },
+      "universidad autonoma de yucatan": {
+        "short_name": "UADY"
+      },
+      "universidad autonoma de aguascalientes": {
+        "short_name": "UAA"
+      },
+      "universidad autonoma de tlaxcala": {
+        "short_name": "UATx"
+      },
+      "universidad juarez del estado de durango": {
+        "short_name": "UJED"
+      },
+      "universidad autonoma de nayarit": {
+        "short_name": "UAN"
+      },
+      "universidad de colima": {
+        "short_name": "UdeC"
+      },
+      "universidad de monterrey": {
+        "short_name": "UDEM"
+      },
+      "universidad popular autonoma del estado de puebla": {
+        "short_name": "UPAEP"
+      },
+      "iteso": {
+        "name": "ITESO, Universidad Jesuita de Guadalajara",
+        "short_name": "ITESO",
+        "institution_type": "university"
+      },
+      "universidad del valle de mexico": {
+        "short_name": "UVM"
+      },
+      "universidad tecnologica de mexico": {
+        "short_name": "UNITEC",
+        "institution_type": "university"
+      },
+      "universidad autonoma de guadalajara": {
+        "short_name": "UAG"
+      },
+      "universidad la salle": {
+        "short_name": "La Salle"
+      },
+      "ites rene descartes": {
+        "name": "ITES René Descartes",
+        "institution_type": "university_institution"
+      },
+      "instituto tecnologico culiacan": {
+        "name": "Instituto Tecnológico de Culiacán"
+      },
+      "instituto tecnologico morelia": {
+        "name": "Instituto Tecnológico de Morelia"
+      },
+      "tecnologico nacional de mexico": {
+        "name": "Instituto Tecnológico de Querétaro",
+        "aliases": [
+          "TecNM Campus Querétaro",
+          "Tecnológico Nacional de México, Campus Querétaro"
+        ]
+      }
+    },
+    "CO": {
+      "1701": {
+        "name": "Pontificia Universidad Javeriana",
+        "short_name": "Javeriana"
+      },
+      "1828": {
+        "name": "Universidad Icesi",
+        "short_name": "Icesi"
+      },
+      "2704": {
+        "name": "Colegio de Estudios Superiores de Administración",
+        "short_name": "CESA"
+      },
+      "1101": {
+        "short_name": "UNAL"
+      },
+      "1813": {
+        "short_name": "Uniandes"
+      },
+      "1201": {
+        "short_name": "UdeA"
+      },
+      "1203": {
+        "short_name": "Univalle"
+      },
+      "1713": {
+        "short_name": "Uninorte"
+      },
+      "1714": {
+        "name": "Universidad del Rosario",
+        "aliases": [
+          "Colegio Mayor de Nuestra Señora del Rosario"
+        ],
+        "short_name": "URosario"
+      },
+      "1712": {
+        "name": "Universidad EAFIT",
+        "short_name": "EAFIT"
+      },
+      "1711": {
+        "short_name": "Unisabana"
+      },
+      "1710": {
+        "short_name": "UPB"
+      },
+      "1204": {
+        "short_name": "UIS"
+      },
+      "1707": {
+        "name": "Universidad de Bogotá Jorge Tadeo Lozano",
+        "short_name": "Utadeo"
+      },
+      "1706": {
+        "short_name": "Externado"
+      },
+      "1301": {
+        "name": "Universidad Distrital Francisco José de Caldas",
+        "short_name": "UDistrital"
+      },
+      "1117": {
+        "name": "Universidad Militar Nueva Granada",
+        "short_name": "UMNG"
+      },
+      "1830": {
+        "short_name": "UAO"
+      },
+      "1805": {
+        "short_name": "USC"
+      },
+      "1704": {
+        "short_name": "USTA"
+      },
+      "1803": {
+        "name": "Universidad de La Salle",
+        "short_name": "La Salle"
+      },
+      "2811": {
+        "name": "Escuela Colombiana de Ingeniería Julio Garavito",
+        "short_name": "Escuela de Ingeniería"
+      },
+      "2727": {
+        "name": "Fundación Universitaria CEIPA",
+        "short_name": "CEIPA"
+      },
+      "1118": {
+        "name": "Universidad Tecnológica del Chocó Diego Luis Córdoba",
+        "short_name": "UTCH"
+      },
+      "1121": {
+        "name": "Universidad Colegio Mayor de Cundinamarca"
+      },
+      "2102": {
+        "name": "Universidad Nacional Abierta y a Distancia",
+        "short_name": "UNAD"
+      },
+      "1734": {
+        "name": "Universidad de Boyacá",
+        "short_name": "Uniboyacá"
+      },
+      "2810": {
+        "name": "Universidad de la Costa",
+        "short_name": "CUC"
+      },
+      "1815": {
+        "name": "Universidad Piloto de Colombia"
+      },
+      "1804": {
+        "name": "Universidad Autónoma del Caribe",
+        "short_name": "Uniautónoma"
+      },
+      "1213": {
+        "name": "Universidad del Magdalena",
+        "short_name": "Unimagdalena"
+      },
+      "1833": {
+        "name": "Universidad del Sinú Elías Bechara Zainum",
+        "short_name": "Unisinú"
+      },
+      "2744": {
+        "name": "Universidad CESMAG",
+        "short_name": "Unicesmag"
+      },
+      "3710": {
+        "name": "Fundación Universitaria Antonio de Arévalo",
+        "short_name": "Unitecnar"
+      }
+    },
+    "US": {
+      "243780": {
+        "name": "Purdue University",
+        "short_name": "Purdue"
+      },
+      "134097": {
+        "name": "Florida State University",
+        "short_name": "FSU"
+      }
+    }
+  },
+  "manual": [
+    {
+      "country_code": "CO",
+      "slug": "colegio-bolivar",
+      "name": "Colegio Bolívar",
+      "short_name": null,
+      "institution_type": "school",
+      "control": "private",
+      "state_region": "Valle del Cauca",
+      "city": "Cali",
+      "website_url": "https://www.colegiobolivar.edu.co",
+      "aliases": [
+        "Colegio Bolivar Cali"
+      ],
+      "source": {
+        "name": "MEN-ESTABLECIMIENTOS",
+        "ref": "376001001221",
+        "url": "https://www.datos.gov.co/d/upkm-vdjb",
+        "title": "Ministerio de Educación Nacional — Establecimientos educativos de Colombia (código DANE 376001001221, COL BOLIVAR, Cali); sitio oficial https://www.colegiobolivar.edu.co/"
+      },
+      "campuses": [
+        {
+          "campus_name": null,
+          "city": "Cali",
+          "state_region": "Valle del Cauca",
+          "source_ref": "376001001221"
+        }
+      ]
+    }
+  ],
+  "proper_nouns": [
+    [
+      " la Salle",
+      " La Salle"
+    ],
+    [
+      " el Bosque",
+      " El Bosque"
+    ],
+    [
+      " la Gran Colombia",
+      " La Gran Colombia"
+    ],
+    [
+      " los Cabos",
+      " Los Cabos"
+    ],
+    [
+      " los Mochis",
+      " Los Mochis"
+    ],
+    [
+      " la Laguna",
+      " La Laguna"
+    ],
+    [
+      " la Paz",
+      " La Paz"
+    ]
+  ]
+}

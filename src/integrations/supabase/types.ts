@@ -493,6 +493,10 @@ export type Database = {
     Views: {
       public_profiles: {
         Row: {
+          university_name: string | null
+          university_short_name: string | null
+          institution_type: string | null
+          campus_name: string | null
           origin: string | null
           avatar_url: string | null
           campus_id: string | null
@@ -683,6 +687,69 @@ export type Database = {
           avatar_url: string | null
           major: string | null
         }[]
+      }
+      search_institutions: {
+        Args: {
+          _query?: string | null
+          _country_code?: string | null
+          _type?: string | null
+          _limit?: number
+          _offset?: number
+          _lat?: number | null
+          _lng?: number | null
+        }
+        Returns: {
+          campus_id: string
+          campus_name: string | null
+          campus_city: string | null
+          university_id: string
+          university_name: string
+          short_name: string | null
+          institution_type: string
+          country_code: string
+          state_region: string | null
+          city: string | null
+          campus_count: number
+          verification_available: boolean
+          email_verified: boolean
+        }[]
+      }
+      my_institution_verification: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          status: "unverified" | "pending_email" | "verified" | "expired" | "revoked" | "manual_review"
+          status_reason: string | null
+          university_id: string | null
+          university_name: string | null
+          institution_type: string | null
+          campus_id: string | null
+          campus_name: string | null
+          email_masked: string | null
+          verification_method: string | null
+          verified_at: string | null
+          pending_email_masked: string | null
+          pending_expires_at: string | null
+          pending_resend_after: string | null
+          pending_attempts_left: number | null
+          verification_available: boolean
+        }[]
+      }
+      confirm_institution_verification: {
+        Args: { _code: string }
+        Returns: { status: string; attempts_left: number }[]
+      }
+      request_institution: {
+        Args: {
+          _kind: "add_institution" | "manual_verification"
+          _institution_name?: string | null
+          _country_code?: string | null
+          _city?: string | null
+          _website_url?: string | null
+          _notes?: string | null
+          _university_id?: string | null
+          _campus_id?: string | null
+        }
+        Returns: string
       }
       campus_options: {
         Args: Record<PropertyKey, never>

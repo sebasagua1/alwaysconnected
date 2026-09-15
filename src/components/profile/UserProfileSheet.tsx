@@ -4,6 +4,7 @@ import { X, BadgeCheck } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { UserAvatar } from '@/components/ui/user-avatar';
 import { formatOrigin } from '@/lib/origin';
+import { formatAffiliation, institutionTypeLabel } from '@/lib/institutions';
 
 /**
  * Ficha de otra persona.
@@ -30,6 +31,9 @@ type PublicProfile = {
   reputation: number | null;
   origin: string | null;
   institution_verified: boolean | null;
+  university_name: string | null;
+  campus_name: string | null;
+  institution_type: string | null;
 };
 
 interface Props {
@@ -51,7 +55,7 @@ export function UserProfileSheet({ userId, footer, onClose }: Props) {
     (async () => {
       const { data, error } = await supabase
         .from('public_profiles')
-        .select('id, name, avatar_url, major, semester, residence_type, interests, languages, points, reputation, origin, institution_verified')
+        .select('id, name, avatar_url, major, semester, residence_type, interests, languages, points, reputation, origin, institution_verified, university_name, campus_name, institution_type')
         .eq('id', userId)
         .maybeSingle();
 
@@ -114,6 +118,12 @@ export function UserProfileSheet({ userId, footer, onClose }: Props) {
                     />
                   )}
                 </div>
+                {formatAffiliation(profile, t) && (
+                  <p className="text-sm font-semibold text-foreground/80">
+                    {formatAffiliation(profile, t)}
+                    <span className="font-normal text-muted-foreground"> · {institutionTypeLabel(profile.institution_type, t)}</span>
+                  </p>
+                )}
                 <p className="text-sm text-muted-foreground truncate">
                   {profile.major ?? t('profile.noMajor')}
                 </p>
