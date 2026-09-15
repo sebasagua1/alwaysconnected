@@ -613,6 +613,15 @@ export type Database = {
         Args: Record<PropertyKey, never>
         Returns: { event_id: string; pending: number }[]
       }
+      event_attendees: {
+        Args: { _event_id: string }
+        Returns: {
+          user_id: string
+          name: string | null
+          avatar_url: string | null
+          is_creator: boolean
+        }[]
+      }
       friends_page: {
         Args: { _limit?: number; _offset?: number }
         Returns: {

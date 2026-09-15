@@ -235,7 +235,9 @@
     "decline": "Rechazar",
     "requestApproved": "Solicitud aprobada",
     "requestDeclined": "Solicitud rechazada",
-    "organizer": "organiza"
+    "organizer": "organiza",
+    "you": "Tú",
+    "noAttendeesYet": "Aún no se ha unido nadie. Sé la primera persona."
   },
   "create": {
     "title": "Nuevo evento",
