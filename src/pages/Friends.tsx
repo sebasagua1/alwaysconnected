@@ -24,21 +24,38 @@ import { UserAvatar } from '@/components/ui/user-avatar';
 import { UserProfileSheet } from '@/components/profile/UserProfileSheet';
 import type { Database } from '@/integrations/supabase/types';
 import { pageTitle } from '@/lib/brand';
+import { formatChatTime } from '@/lib/chat';
 
 type FriendData = Pick<
   Database['public']['Views']['public_profiles']['Row'],
   'id' | 'name' | 'avatar_url' | 'major'
 >;
 
+/** El último mensaje visible de una conversación, para ordenar y previsualizar. */
+type ChatActivity = {
+  last_message_at: string | null;
+  last_content: string | null;
+  last_sender_id: string | null;
+};
+
+type Friend = FriendData & ChatActivity;
+
 type PendingRequest = {
   friendshipId: string;
   profile: FriendData;
 };
 
-type Group = {
+type Group = ChatActivity & {
   id: string;
   name: string;
 };
+
+/**
+ * Lo que se puede tocar para abrir algo: foco visible con teclado y un
+ * hundimiento al pulsar, que en iOS no hay hover que avise de que responde.
+ */
+const TAPPABLE =
+  'rounded-lg transition-opacity active:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card';
 
 type LeaderEntry = {
   id: string | null;
@@ -60,7 +77,7 @@ export default function Friends() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
   const unreadMessages = useNotificationStore((n) => n.unreadMessages);
   const [searchQuery, setSearchQuery] = useState('');
-  const [friends, setFriends] = useState<FriendData[]>([]);
+  const [friends, setFriends] = useState<Friend[]>([]);
   const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
   const [searchResults, setSearchResults] = useState<FriendData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -116,8 +133,17 @@ export default function Friends() {
       }
 
       const rows = data ?? [];
-      const perfiles = rows.map(({ id, name, avatar_url, major }) => ({ id, name, avatar_url, major }));
-      if (page === 0) setFriends(perfiles); else setFriends((prev) => [...prev, ...perfiles]);
+      // Llegan ya ordenados por la conversación más reciente (friends_page).
+      const perfiles = rows.map(({ id, name, avatar_url, major, last_message_at, last_content, last_sender_id }) => ({
+        id, name, avatar_url, major, last_message_at, last_content, last_sender_id,
+      }));
+      if (page === 0) setFriends(perfiles);
+      // Se descartan los repetidos por id: si entre una página y la siguiente
+      // llegó un mensaje, el orden se movió y alguien puede venir dos veces.
+      else setFriends((prev) => {
+        const vistos = new Set(prev.map((f) => f.id));
+        return [...prev, ...perfiles.filter((f) => !vistos.has(f.id))];
+      });
       setFriendsHasMore(rows.length === FRIENDS_PAGE_SIZE);
       // El total viaja en cada fila. Una página vacía más allá del final no
       // dice nada del total, así que solo se pisa si hay filas o si es la
@@ -152,21 +178,24 @@ export default function Friends() {
     if (!user) return;
     setGroupsLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('group_members')
-        .select('groups(id, name)')
-        .eq('user_id', user.id);
+      // chat_summaries trae mis chats con su último mensaje, ya ordenados por
+      // actividad; los DM salen en la pestaña de amigos, no aquí.
+      const { data, error } = await supabase.rpc('chat_summaries');
       if (error) {
         toast({ title: i18n.t('errors.groupsLoad'), variant: 'destructive' });
         return;
       }
-      if (data) {
-        setGroups(
-          data
-            .map((row) => row.groups as Group | null)
-            .filter((g): g is Group => g !== null && !g.name.startsWith('__dm_'))
-        );
-      }
+      setGroups(
+        (data ?? [])
+          .filter((g) => !g.group_name.startsWith('__dm_'))
+          .map((g) => ({
+            id: g.group_id,
+            name: g.group_name,
+            last_message_at: g.last_message_at,
+            last_content: g.last_content,
+            last_sender_id: g.last_sender_id,
+          }))
+      );
     } finally {
       setGroupsLoading(false);
     }
@@ -236,6 +265,63 @@ export default function Friends() {
   // AppShell, así que ese número subiendo es la señal de que hay algo nuevo.
   useEffect(() => { fetchUnread(); }, [fetchUnread, unreadMessages]);
 
+  /**
+   * Reordenar sin perder lo ya cargado.
+   *
+   * Vuelve a pedir, desde el principio, tantos amigos como hay en pantalla:
+   * así la conversación que acaba de moverse sube a su sitio aunque viniera
+   * de una página posterior, y no se repite nadie.
+   */
+  const friendsCountRef = useRef(0);
+  friendsCountRef.current = friends.length;
+  const refreshFriendsOrder = useCallback(async () => {
+    if (!user) return;
+    const limit = Math.min(Math.max(friendsCountRef.current, FRIENDS_PAGE_SIZE), 100);
+    const { data, error } = await supabase.rpc('friends_page', { _limit: limit, _offset: 0 });
+    // Sin toast: la lista de antes sigue siendo válida, solo peor ordenada.
+    if (error || !data) return;
+    setFriends(data.map(({ id, name, avatar_url, major, last_message_at, last_content, last_sender_id }) => ({
+      id, name, avatar_url, major, last_message_at, last_content, last_sender_id,
+    })));
+    setFriendsPage(Math.max(Math.ceil(data.length / FRIENDS_PAGE_SIZE) - 1, 0));
+    setFriendsHasMore(data.length > 0 && Number(data[0].total) > data.length);
+    if (data.length > 0) setFriendsTotal(Number(data[0].total));
+  }, [user]);
+
+  // Un mensaje nuevo, editado o borrado en cualquiera de mis chats. La RLS de
+  // SELECT de messages decide qué filas llegan, así que solo avisan los chats
+  // de los que soy miembro. Se agrupan: una ráfaga de mensajes es una recarga.
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  useEffect(() => {
+    if (!user) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (activeTabRef.current === 'friends') refreshFriendsOrder();
+        if (activeTabRef.current === 'groups') fetchGroups();
+        // Enviar uno propio no mueve el contador global, pero un borrado sí
+        // puede bajar los globos: se piden a mano.
+        fetchUnread();
+      }, 400);
+    };
+    const channel = supabase
+      .channel('friends-chat-activity')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, schedule)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, schedule)
+      .subscribe();
+    return () => {
+      if (timer) clearTimeout(timer);
+      supabase.removeChannel(channel);
+    };
+  }, [user, refreshFriendsOrder, fetchGroups, fetchUnread]);
+
+  /** «Tú: hola» o «hola», sin saltos de línea, para la línea de previsualización. */
+  const previewOf = (c: ChatActivity) =>
+    `${c.last_sender_id === user?.id ? `${t('chat.you')}: ` : ''}${(c.last_content ?? '').replace(/\s+/g, ' ')}`;
+  const timeOf = (iso: string) => formatChatTime(iso, i18n.language || 'es', t('chat.yesterday'));
+
   // El DM lo crea create_dm() en el servidor: atómico (grupo + las dos
   // membresías) e idempotente, así que ambas partes acaban en el mismo grupo.
   // Desde el cliente no se puede insertar la membresía de otra persona.
@@ -270,7 +356,8 @@ export default function Friends() {
       return;
     }
     setPendingRequests((prev) => prev.filter((r) => r.friendshipId !== req.friendshipId));
-    setFriends((prev) => [...prev, req.profile]);
+    // Recién aceptado no hay chat todavía: va con los que no tienen, al final.
+    setFriends((prev) => [...prev, { ...req.profile, last_message_at: null, last_content: null, last_sender_id: null }]);
     toast({ title: t('friends.requestAccepted') });
   };
 
@@ -355,7 +442,7 @@ export default function Friends() {
       }
       // La membresía del creador la añade el trigger trg_group_created_add_creator;
       // el cliente ya no puede escribir en group_members.
-      setGroups((prev) => [...prev, group]);
+      setGroups((prev) => [...prev, { ...group, last_message_at: null, last_content: null, last_sender_id: null }]);
       setNewGroupName('');
       setShowCreateGroup(false);
       toast({ title: t('groups.created') });
@@ -480,18 +567,23 @@ export default function Friends() {
               </h2>
               {pendingRequests.map((req) => (
                 <div key={req.friendshipId} className="flex items-center justify-between bg-card rounded-xl p-3 shadow-soft">
-                  <div className="flex items-center gap-3">
+                  {/* Ver a quien pide amistad antes de decidir. */}
+                  <button
+                    onClick={() => setViewingUserId(req.profile.id ?? null)}
+                    aria-label={t('friends.viewProfile', { name: req.profile.name ?? '' })}
+                    className={cn('flex items-center gap-3 flex-1 min-w-0 mr-3 text-left', TAPPABLE)}
+                  >
                     <UserAvatar
                       url={req.profile.avatar_url}
                       name={req.profile.name}
                       className="w-10 h-10 bg-primary/10"
                       textClassName="text-sm text-primary"
                     />
-                    <div>
-                      <p className="font-semibold text-sm text-foreground">{req.profile.name}</p>
-                      <p className="text-xs text-muted-foreground">{req.profile.major}</p>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-sm text-foreground truncate">{req.profile.name}</p>
+                      <p className="text-xs text-muted-foreground truncate">{req.profile.major}</p>
                     </div>
-                  </div>
+                  </button>
                   {/* 44px y separados: son dos acciones opuestas, pegadas y
                       sin vuelta atrás — rechazar por error borra la solicitud. */}
                   <div className="flex gap-3">
@@ -541,7 +633,7 @@ export default function Friends() {
                   <button
                     onClick={() => setViewingUserId(f.id ?? null)}
                     aria-label={t('friends.viewProfile', { name: f.name ?? '' })}
-                    className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                    className={cn('flex items-center gap-3 flex-1 min-w-0 text-left', TAPPABLE)}
                   >
                     <UserAvatar
                       url={f.avatar_url}
@@ -549,9 +641,18 @@ export default function Friends() {
                       className="w-10 h-10 bg-primary/10"
                       textClassName="text-sm text-primary"
                     />
-                    <div className="min-w-0">
-                      <p className="font-semibold text-sm text-foreground truncate">{f.name}</p>
-                      <p className="text-xs text-muted-foreground truncate">{f.major}</p>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline gap-2">
+                        <p className="font-semibold text-sm text-foreground truncate flex-1">{f.name}</p>
+                        {f.last_message_at && (
+                          <span className="text-[11px] text-muted-foreground shrink-0">{timeOf(f.last_message_at)}</span>
+                        )}
+                      </div>
+                      {/* Con conversación, lo último que se dijo; sin ella, la
+                          carrera, como hasta ahora. */}
+                      <p className="text-xs text-muted-foreground truncate">
+                        {f.last_message_at ? previewOf(f) : f.major}
+                      </p>
                     </div>
                   </button>
                   <div className="flex items-center">
@@ -619,12 +720,22 @@ export default function Friends() {
                 <button
                   key={g.id}
                   onClick={() => navigate(`/groups/${g.id}`, { state: { from: 'groups' } })}
-                  className="w-full flex items-center gap-3 bg-card rounded-xl p-3 shadow-soft text-left"
+                  className={cn('w-full flex items-center gap-3 bg-card p-3 shadow-soft text-left', TAPPABLE, 'rounded-xl')}
                 >
-                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-sm font-bold text-primary">
+                  <div className="w-10 h-10 shrink-0 rounded-full bg-primary/10 flex items-center justify-center text-sm font-bold text-primary">
                     {g.name[0]}
                   </div>
-                  <span className="font-semibold text-sm text-foreground flex-1">{g.name}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-semibold text-sm text-foreground truncate flex-1">{g.name}</span>
+                      {g.last_message_at && (
+                        <span className="text-[11px] text-muted-foreground shrink-0">{timeOf(g.last_message_at)}</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground truncate">
+                      {g.last_message_at ? previewOf(g) : t('chat.noMessagesShort')}
+                    </p>
+                  </div>
                   {unreadByGroup[g.id] > 0 && (
                     <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-destructive text-destructive-foreground text-xs font-bold flex items-center justify-center">
                       {unreadByGroup[g.id]}
@@ -662,10 +773,15 @@ export default function Friends() {
             </div>
           ) : (
             leaderboard.map((entry, i) => (
-              <div
+              <button
                 key={entry.id ?? i}
+                onClick={() => setViewingUserId(entry.id)}
+                disabled={!entry.id}
+                aria-label={t('friends.viewProfile', { name: entry.name ?? '' })}
                 className={cn(
-                  'flex items-center gap-3 bg-card rounded-xl p-3 shadow-soft',
+                  'w-full flex items-center gap-3 bg-card p-3 shadow-soft text-left',
+                  TAPPABLE,
+                  'rounded-xl',
                   i < 3 && 'border border-primary/20'
                 )}
               >
@@ -694,7 +810,7 @@ export default function Friends() {
                 <span className="text-sm font-bold text-primary shrink-0">
                   {entry.reputation} {t('leaderboard.pts')}
                 </span>
-              </div>
+              </button>
             ))
           )}
           {!leaderLoading && leaderHasMore && (
@@ -746,6 +862,31 @@ export default function Friends() {
           userId={viewingUserId}
           onClose={() => setViewingUserId(null)}
           footer={(() => {
+            // Uno mismo (desde Top): nada que hacer consigo.
+            if (viewingUserId === user?.id) return undefined;
+            // Quien me pidió amistad: decidir desde su ficha.
+            const request = pendingRequests.find((r) => r.profile.id === viewingUserId);
+            if (request) {
+              return (
+                <div className="flex gap-3">
+                  <Button
+                    variant="outline"
+                    className="flex-1 rounded-xl"
+                    onClick={() => { setViewingUserId(null); declineRequest(request); }}
+                  >
+                    <XIcon className="w-4 h-4" />
+                    {t('friends.decline')}
+                  </Button>
+                  <Button
+                    className="flex-1 rounded-xl"
+                    onClick={() => { setViewingUserId(null); acceptRequest(request); }}
+                  >
+                    <Check className="w-4 h-4" />
+                    {t('friends.accept')}
+                  </Button>
+                </div>
+              );
+            }
             const friend = friends.find((f) => f.id === viewingUserId);
             return friend ? (
               <Button

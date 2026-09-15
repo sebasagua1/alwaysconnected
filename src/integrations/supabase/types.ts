@@ -274,6 +274,8 @@ export type Database = {
         Row: {
           content: string
           created_at: string
+          deleted_at: string | null
+          edited_at: string | null
           event_id: string | null
           expires_at: string | null
           group_id: string | null
@@ -283,6 +285,8 @@ export type Database = {
         Insert: {
           content: string
           created_at?: string
+          deleted_at?: string | null
+          edited_at?: string | null
           event_id?: string | null
           expires_at?: string | null
           group_id?: string | null
@@ -292,6 +296,8 @@ export type Database = {
         Update: {
           content?: string
           created_at?: string
+          deleted_at?: string | null
+          edited_at?: string | null
           event_id?: string | null
           expires_at?: string | null
           group_id?: string | null
@@ -615,6 +621,20 @@ export type Database = {
           avatar_url: string | null
           major: string | null
           total: number
+          dm_group_id: string | null
+          last_message_at: string | null
+          last_content: string | null
+          last_sender_id: string | null
+        }[]
+      }
+      chat_summaries: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          group_id: string
+          group_name: string
+          last_message_at: string | null
+          last_content: string | null
+          last_sender_id: string | null
         }[]
       }
       friend_requests_incoming: {
