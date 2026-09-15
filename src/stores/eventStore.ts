@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { DEFAULT_ADVANCED_FILTERS, type AdvancedFilters } from '@/lib/eventFilter';
 
 export interface MapEvent {
   id: string;
@@ -29,17 +30,26 @@ interface EventState {
    */
   selectedEventId: string | null;
   filterCategory: string | null;
+  /**
+   * Cuándo, duración y tipo. En el store y no en la pantalla del mapa para
+   * que sobrevivan a ir a otra pestaña y volver.
+   */
+  advancedFilters: AdvancedFilters;
   setEvents: (events: MapEvent[]) => void;
   upsertEvent: (event: MapEvent) => void;
   removeEvent: (id: string) => void;
   setSelectedEvent: (event: MapEvent | null) => void;
   setFilterCategory: (cat: string | null) => void;
+  setAdvancedFilters: (patch: Partial<AdvancedFilters>) => void;
+  /** Vuelve a enseñarlo todo: categoría y filtros avanzados. */
+  resetFilters: () => void;
 }
 
 export const useEventStore = create<EventState>((set) => ({
   events: [],
   selectedEventId: null,
   filterCategory: null,
+  advancedFilters: DEFAULT_ADVANCED_FILTERS,
   setEvents: (events) => set({ events }),
   /**
    * Mete el evento si es nuevo y lo reemplaza EN SU SITIO si ya estaba.
@@ -66,6 +76,8 @@ export const useEventStore = create<EventState>((set) => ({
   // guarda es solo su id.
   setSelectedEvent: (event) => set({ selectedEventId: event?.id ?? null }),
   setFilterCategory: (filterCategory) => set({ filterCategory }),
+  setAdvancedFilters: (patch) => set((s) => ({ advancedFilters: { ...s.advancedFilters, ...patch } })),
+  resetFilters: () => set({ filterCategory: null, advancedFilters: DEFAULT_ADVANCED_FILTERS }),
 }));
 
 /**

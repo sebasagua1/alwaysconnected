@@ -407,6 +407,70 @@
       "skip": "Skip",
       "done": "Done",
       "progress": "Step {{current}} of {{total}}"
+    },
+    "filters": {
+      "button": "Filters",
+      "buttonActive": "Filters, {{count}} active",
+      "title": "Filter events",
+      "when": "When",
+      "whenAny": "Any time",
+      "whenOptions": {
+        "now": "Now",
+        "next3h": "Next 3 h",
+        "today": "Today",
+        "tomorrow": "Tomorrow",
+        "weekend": "Weekend",
+        "week": "Next 7 days",
+        "range": "Pick dates"
+      },
+      "whenHints": {
+        "now": "Happening now or starting within 1 hour",
+        "next3h": "Anything happening in the next 3 hours"
+      },
+      "rangePick": "Tap the first and last day",
+      "rangeOne": "{{from}}",
+      "rangeMany": "{{from}} – {{to}}",
+      "dayPart": "Start time",
+      "dayParts": {
+        "morning": "Morning",
+        "afternoon": "Afternoon",
+        "evening": "Evening"
+      },
+      "dayPartHints": {
+        "morning": "5 AM–12 PM",
+        "afternoon": "12–7 PM",
+        "evening": "From 7 PM"
+      },
+      "duration": "Duration",
+      "durations": {
+        "short": "Up to 1 h",
+        "medium": "1 to 2 h",
+        "long": "Over 2 h"
+      },
+      "experience": "Type of experience",
+      "access": {
+        "direct": "Join instantly",
+        "approval": "Needs approval"
+      },
+      "size": {
+        "small": "Small group",
+        "large": "Large group"
+      },
+      "sizeHints": {
+        "small": "Up to 5 people",
+        "large": "6 people or more"
+      },
+      "onlyWithSpots": "Only with spots left",
+      "clear": "Clear filters",
+      "show_one": "Show 1 event",
+      "show_other": "Show {{count}} events",
+      "showNone": "No events match",
+      "removeChip": "Remove filter {{label}}",
+      "mapNoMatch": "No events match your filters",
+      "today": "Today",
+      "tomorrow": "Tomorrow",
+      "live": "Happening now",
+      "startsIn": "Starts in {{count}} min"
     }
   },
   "rpcErrors": {
