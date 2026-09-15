@@ -239,7 +239,11 @@
     "decline": "Rechazar",
     "requestApproved": "Solicitud aprobada",
     "requestDeclined": "Solicitud rechazada",
-    "organizer": "organiza"
+    "organizer": "organiza",
+    "you": "Tú",
+    "noAttendeesYet": "Aún no se ha unido nadie. Sé la primera persona.",
+    "showAllAttendees": "Ver a las {{count}} personas más",
+    "seeAll": "Ver todos"
   },
   "create": {
     "title": "Nuevo evento",
@@ -370,7 +374,16 @@
     "explorer": "Explorador",
     "study_buddy": "Compañero de estudio",
     "team_player": "Jugador en equipo",
-    "streak_7": "Racha de 7 días"
+    "streak_7": "Racha de 7 días",
+    "how": {
+      "organizer": "Crea {{count}} eventos",
+      "explorer": "Únete a {{count}} eventos",
+      "study_buddy": "Haz check-in en {{count}} sesiones de estudio",
+      "team_player": "Únete a {{count}} eventos de deportes",
+      "streak_7": "Únete a eventos en {{count}} días distintos"
+    },
+    "earned": "¡Conseguida!",
+    "progress": "{{current}} de {{target}}"
   },
   "map": {
     "title": "Mapa de eventos del campus",
@@ -411,6 +424,70 @@
       "skip": "Saltar",
       "done": "Listo",
       "progress": "Paso {{current}} de {{total}}"
+    },
+    "filters": {
+      "button": "Filtros",
+      "buttonActive": "Filtros, {{count}} activos",
+      "title": "Filtrar eventos",
+      "when": "Cuándo",
+      "whenAny": "Cuando sea",
+      "whenOptions": {
+        "now": "Ahora",
+        "next3h": "Próximas 3 h",
+        "today": "Hoy",
+        "tomorrow": "Mañana",
+        "weekend": "Fin de semana",
+        "week": "Próximos 7 días",
+        "range": "Elegir días"
+      },
+      "whenHints": {
+        "now": "En curso o empieza en menos de 1 hora",
+        "next3h": "Algo que pase de aquí a 3 horas"
+      },
+      "rangePick": "Toca el primer y el último día",
+      "rangeOne": "{{from}}",
+      "rangeMany": "{{from}} – {{to}}",
+      "dayPart": "Hora de inicio",
+      "dayParts": {
+        "morning": "Por la mañana",
+        "afternoon": "Por la tarde",
+        "evening": "Por la noche"
+      },
+      "dayPartHints": {
+        "morning": "5 a 12 h",
+        "afternoon": "12 a 19 h",
+        "evening": "Desde 19 h"
+      },
+      "duration": "Duración",
+      "durations": {
+        "short": "Hasta 1 h",
+        "medium": "1 a 2 h",
+        "long": "Más de 2 h"
+      },
+      "experience": "Tipo de experiencia",
+      "access": {
+        "direct": "Entrada directa",
+        "approval": "Con aprobación"
+      },
+      "size": {
+        "small": "Grupo pequeño",
+        "large": "Grupo grande"
+      },
+      "sizeHints": {
+        "small": "Hasta 5 personas",
+        "large": "6 personas o más"
+      },
+      "onlyWithSpots": "Solo con lugares disponibles",
+      "clear": "Quitar filtros",
+      "show_one": "Ver 1 evento",
+      "show_other": "Ver {{count}} eventos",
+      "showNone": "Ningún evento coincide",
+      "removeChip": "Quitar filtro {{label}}",
+      "mapNoMatch": "Ningún evento coincide con tus filtros",
+      "today": "Hoy",
+      "tomorrow": "Mañana",
+      "live": "En curso",
+      "startsIn": "Empieza en {{count}} min"
     }
   },
   "rpcErrors": {
@@ -428,7 +505,12 @@
     "campusNotAvailable": "Ese campus no está disponible.",
     "campusNotAllowed": "Tu correo es de otra universidad. Elige uno de sus campus.",
     "requestRateLimit": "Enviaste varias solicitudes hoy. Inténtalo mañana.",
-    "invalidRequest": "Revisa los datos de la solicitud."
+    "invalidRequest": "Revisa los datos de la solicitud.",
+    "repeatNotAllowed": "Solo puede repetir un plan quien lo organizó o fue.",
+    "notAnAttendee": "Solo quien fue al evento puede crear un grupo con él.",
+    "eventNotStarted": "El grupo se puede crear cuando el evento ya empezó.",
+    "inviteNotFound": "Esta invitación ya no está disponible.",
+    "inviteAlreadyAnswered": "Ya respondiste esta invitación."
   },
   "legal": {
     "privacy": "Aviso de privacidad",
@@ -643,5 +725,37 @@
       "noPending": "No hay un código activo. Pide uno nuevo.",
       "manualReview": "No pudimos completar la verificación automática. La revisaremos manualmente."
     }
+  },
+  "afterEvent": {
+    "title": "¿Qué sigue?",
+    "metSomeone": "¿Conociste a alguien?",
+    "add": "Agregar",
+    "sent": "Enviada",
+    "friends": "Amigos",
+    "addAria": "Agregar a {{name}} como amigo",
+    "repeat": "Repetir el plan",
+    "repeatWhen": "{{when}} · misma hora",
+    "repeatNotify_one": "Avisaremos a la persona que fue",
+    "repeatNotify_other": "Avisaremos a las {{count}} personas que fueron",
+    "group": "Crear un grupo con quienes fueron",
+    "groupHint": "Les llega una invitación y entran si aceptan",
+    "groupCreated_one": "Grupo creado. Invitamos a 1 persona.",
+    "groupCreated_other": "Grupo creado. Invitamos a {{count}} personas.",
+    "groupCreatedNone": "Grupo creado.",
+    "creatingGroup": "Creando grupo…",
+    "repeatBanner": "Repites «{{title}}». Al publicarlo avisaremos a quienes fueron.",
+    "justEnded": "Acaba de terminar",
+    "whatsNext": "¿Qué sigue?"
+  },
+  "groupInvites": {
+    "title": "Invitaciones a grupos",
+    "from": "{{name}} te invitó",
+    "fromEvent": "{{name}} te invitó · de «{{event}}»",
+    "accept": "Unirme",
+    "decline": "No, gracias",
+    "accepted": "Te uniste al grupo",
+    "declined": "Invitación rechazada",
+    "acceptAria": "Unirme a {{group}}",
+    "declineAria": "Rechazar la invitación a {{group}}"
   }
 }

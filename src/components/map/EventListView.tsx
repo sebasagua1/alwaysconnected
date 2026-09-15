@@ -6,24 +6,46 @@ import { EVENT_CATEGORIES } from '@/lib/constants';
 import { CATEGORY_ICONS } from '@/lib/categoryIcons';
 import { cn } from '@/lib/utils';
 import type { MapEvent } from '@/stores/eventStore';
-import { filterEvents } from '@/lib/eventFilter';
+import { filterEvents, dayGroupKey, startsSoon, fromDateKey, type EventFilter } from '@/lib/eventFilter';
 
 interface Props {
   events: MapEvent[];
-  filterCategory: string | null;
-  searchQuery?: string;
+  filter: EventFilter;
+  /** La hora con la que se filtra; la pasa el mapa para que ambos coincidan. */
+  now?: Date;
   onSelect: (event: MapEvent) => void;
   onCreate: () => void;
   onClearFilters: () => void;
 }
 
-export function EventListView({ events, filterCategory, searchQuery = '', onSelect, onCreate, onClearFilters }: Props) {
+export function EventListView({ events, filter, now = new Date(), onSelect, onCreate, onClearFilters }: Props) {
   const { t, i18n } = useTranslation();
   const dateLocale = i18n.language?.startsWith('en') ? enUS : esLocale;
 
   // Mismo criterio que los marcadores del mapa, y a propósito el mismo código:
   // por duplicado, mapa y lista acababan enseñando cosas distintas.
-  const visible = filterEvents(events, { category: filterCategory, query: searchQuery });
+  const visible = filterEvents(events, filter, now);
+
+  // Una cabecera por día ("Hoy", "Mañana", "jue 17 sep"): con la lista de
+  // aquí a fin de mes seguida, encontrar qué hay el jueves era contar tarjetas.
+  // La lista ya llega ordenada por inicio, así que basta con cortar.
+  const groups: Array<{ key: string; items: MapEvent[] }> = [];
+  for (const e of visible) {
+    const key = dayGroupKey(e, now);
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) last.items.push(e);
+    else groups.push({ key, items: [e] });
+  }
+  const groupLabel = (key: string) => {
+    if (key === 'today') return t('map.filters.today');
+    if (key === 'tomorrow') return t('map.filters.tomorrow');
+    const d = fromDateKey(key);
+    if (!d) return key;
+    // "Jueves 17 de septiembre", no "Jueves 17 Septiembre": text-transform
+    // capitalize ponía mayúscula también al mes.
+    const label = format(d, dateLocale === enUS ? 'EEEE, MMMM d' : "EEEE d 'de' MMMM", { locale: dateLocale });
+    return label.charAt(0).toUpperCase() + label.slice(1);
+  };
 
   // Dos vacios distintos, y decirlo importa: "crea el primero" cuando en
   // realidad hay treinta eventos y solo esta mal el filtro es mentira, y deja
@@ -62,91 +84,113 @@ export function EventListView({ events, filterCategory, searchQuery = '', onSele
   }
 
   return (
-    <div className="space-y-3 pb-6">
-      {visible.map(event => {
-        const cat = EVENT_CATEGORIES.find(c => c.key === event.category);
-        const spotsLeft = event.max_spots - event.current_spots;
-        const Icon = cat ? CATEGORY_ICONS[cat.key] : null;
+    <div className="pb-6">
+      {groups.map((group) => (
+        <section key={group.key} aria-labelledby={`day-${group.key}`} className="mb-5">
+          <h2 id={`day-${group.key}`} className="text-sm font-bold text-foreground mb-2 px-1">
+            {groupLabel(group.key)}
+          </h2>
+          <div className="space-y-3">
+            {group.items.map((event) => {
+              const cat = EVENT_CATEGORIES.find((c) => c.key === event.category);
+              const spotsLeft = event.max_spots - event.current_spots;
+              const Icon = cat ? CATEGORY_ICONS[cat.key] : null;
+              const soon = startsSoon(event, now);
 
-        return (
-          <button
-            key={event.id}
-            onClick={() => onSelect(event)}
-            className="w-full bg-card rounded-2xl shadow-soft overflow-hidden text-left active:scale-[0.98] transition-transform"
-          >
-            {/* Category color bar */}
-            <div className="h-1.5 w-full" style={{ background: cat?.color ?? 'hsl(var(--muted))' }} />
+              return (
+                <button
+                  key={event.id}
+                  onClick={() => onSelect(event)}
+                  className="w-full bg-card rounded-2xl shadow-soft overflow-hidden text-left active:scale-[0.98] transition-transform"
+                >
+                  {/* Category color bar */}
+                  <div className="h-1.5 w-full" style={{ background: cat?.color ?? 'hsl(var(--muted))' }} />
 
-            <div className="p-4">
-              {/* Category chip */}
-              <div
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold text-white mb-2"
-                style={{ background: cat?.color ?? 'hsl(var(--muted))' }}
-              >
-                {Icon && <Icon className="w-3 h-3" />}
-                <span>{cat ? t('categories.' + cat.key) : event.category}</span>
-              </div>
+                  <div className="p-4">
+                    {/* Category chip */}
+                    <div
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold text-white mb-2"
+                      style={{ background: cat?.color ?? 'hsl(var(--muted))' }}
+                    >
+                      {Icon && <Icon className="w-3 h-3" />}
+                      <span>{cat ? t('categories.' + cat.key) : event.category}</span>
+                    </div>
 
-              <h3 className="font-bold text-foreground text-base leading-tight mb-2">{event.title}</h3>
+                    <h3 className="font-bold text-foreground text-base leading-tight mb-2">{event.title}</h3>
 
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Clock className="w-3.5 h-3.5 flex-shrink-0" />
-                  <span>{format(new Date(event.starts_at), 'EEE d MMM · HH:mm', { locale: dateLocale })}</span>
-                </div>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Clock className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span>{format(new Date(event.starts_at), 'EEE d MMM · HH:mm', { locale: dateLocale })}</span>
+                        {soon && (
+                          <span className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary font-bold">
+                            {soon.kind === 'live' && (
+                              <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                            )}
+                            {soon.kind === 'live'
+                              ? t('map.filters.live')
+                              : t('map.filters.startsIn', {
+                                  count: soon.minutes,
+                                })}
+                          </span>
+                        )}
+                      </div>
 
-                {event.address && (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
-                    <span className="truncate">{event.address}</span>
-                  </div>
-                )}
+                      {event.address && (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="truncate">{event.address}</span>
+                        </div>
+                      )}
 
-                <div className="flex items-center justify-between mt-2">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Users className="w-3.5 h-3.5" />
-                    <span>
-                      {spotsLeft <= 0
-                        ? t('event.full')
-                        : spotsLeft === 1
-                          ? t('event.spotLeftOne')
-                          : t('event.spotLeftOther', { count: spotsLeft })}
-                    </span>
-                  </div>
-                  {/* "Casi lleno" no puede ser solo el color: quien no
+                      <div className="flex items-center justify-between mt-2">
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <Users className="w-3.5 h-3.5" />
+                          <span>
+                            {spotsLeft <= 0
+                              ? t('event.full')
+                              : spotsLeft === 1
+                              ? t('event.spotLeftOne')
+                              : t('event.spotLeftOther', { count: spotsLeft })}
+                          </span>
+                        </div>
+                        {/* "Casi lleno" no puede ser solo el color: quien no
                       distingue verde de ámbar veía el mismo 3/10 en los dos
                       casos. La llama lo dice con una forma y el sr-only con
                       una palabra, para el lector de pantalla. */}
-                  <span
-                    className={cn(
-                      'inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full',
-                      spotsLeft <= 0
-                        ? 'bg-destructive/10 text-destructive'
-                        : spotsLeft <= 3
-                          ? 'bg-warning/10 text-warning'
-                          : 'bg-success/10 text-success'
-                    )}
-                  >
-                    {spotsLeft <= 0 ? (
-                      t('event.full')
-                    ) : (
-                      <>
-                        {spotsLeft <= 3 && (
-                          <>
-                            <Flame className="w-3 h-3" aria-hidden="true" />
-                            <span className="sr-only">{t('event.almostFull')}</span>
-                          </>
-                        )}
-                        {`${event.current_spots}/${event.max_spots}`}
-                      </>
-                    )}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </button>
-        );
-      })}
+                        <span
+                          className={cn(
+                            'inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full',
+                            spotsLeft <= 0
+                              ? 'bg-destructive/10 text-destructive'
+                              : spotsLeft <= 3
+                              ? 'bg-warning/10 text-warning'
+                              : 'bg-success/10 text-success'
+                          )}
+                        >
+                          {spotsLeft <= 0 ? (
+                            t('event.full')
+                          ) : (
+                            <>
+                              {spotsLeft <= 3 && (
+                                <>
+                                  <Flame className="w-3 h-3" aria-hidden="true" />
+                                  <span className="sr-only">{t('event.almostFull')}</span>
+                                </>
+                              )}
+                              {`${event.current_spots}/${event.max_spots}`}
+                            </>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }

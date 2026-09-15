@@ -51,7 +51,7 @@ describe('PrivacySelector', () => {
 });
 
 describe('EventListView: los dos vacíos', () => {
-  const props = { filterCategory: null, searchQuery: '', onSelect: vi.fn() };
+  const props = { filter: { category: null, query: '' }, onSelect: vi.fn() };
 
   it('sin NINGÚN evento: invita a crear el primero', () => {
     const onCreate = vi.fn();
@@ -67,7 +67,7 @@ describe('EventListView: los dos vacíos', () => {
     render(
       <EventListView
         {...props}
-        filterCategory="sports"
+        filter={{ category: 'sports', query: '' }}
         events={[evento({ category: 'study' })]}
         onCreate={vi.fn()}
         onClearFilters={onClear}
@@ -86,7 +86,7 @@ describe('EventListView: los dos vacíos', () => {
     render(
       <EventListView
         {...props}
-        searchQuery="zzzz"
+        filter={{ category: null, query: 'zzzz' }}
         events={[evento()]}
         onCreate={vi.fn()}
         onClearFilters={vi.fn()}
@@ -99,6 +99,29 @@ describe('EventListView: los dos vacíos', () => {
     render(<EventListView {...props} events={[evento()]} onCreate={vi.fn()} onClearFilters={vi.fn()} />);
     expect(screen.getByText('Estudio de cálculo')).toBeInTheDocument();
     expect(screen.queryByText('Todavía no hay nada por aquí')).not.toBeInTheDocument();
+  });
+
+  it('agrupa por día y marca lo que está en curso o empieza pronto', () => {
+    const now = new Date(2026, 8, 15, 10, 0);
+    const at = (d: number, h: number, m = 0) => new Date(2026, 8, d, h, m).toISOString();
+    render(
+      <EventListView
+        {...props}
+        now={now}
+        events={[
+          evento({ id: 'a', title: 'Pádel', starts_at: at(15, 9, 30), ends_at: at(15, 11) }),
+          evento({ id: 'b', title: 'Café', starts_at: at(15, 10, 25), ends_at: at(15, 11) }),
+          evento({ id: 'c', title: 'Comida', starts_at: at(16, 13), ends_at: at(16, 14) }),
+          evento({ id: 'd', title: 'Estudio', starts_at: at(23, 14, 5), ends_at: at(23, 16) }),
+        ]}
+        onCreate={vi.fn()}
+        onClearFilters={vi.fn()}
+      />
+    );
+    const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(['Hoy', 'Mañana', 'Miércoles 23 de septiembre']);
+    expect(screen.getByText('En curso')).toBeInTheDocument();
+    expect(screen.getByText('Empieza en 25 min')).toBeInTheDocument();
   });
 });
 

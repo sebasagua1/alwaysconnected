@@ -145,6 +145,7 @@ export type Database = {
           max_spots: number
           privacy: string
           recurrence_rule: string | null
+          repeated_from: string | null
           starts_at: string
           title: string
         }
@@ -165,6 +166,7 @@ export type Database = {
           max_spots?: number
           privacy?: string
           recurrence_rule?: string | null
+          repeated_from?: string | null
           starts_at: string
           title: string
         }
@@ -185,6 +187,7 @@ export type Database = {
           max_spots?: number
           privacy?: string
           recurrence_rule?: string | null
+          repeated_from?: string | null
           starts_at?: string
           title?: string
         }
@@ -253,6 +256,7 @@ export type Database = {
           id: string
           name: string
           photo_url: string | null
+          source_event_id: string | null
         }
         Insert: {
           created_at?: string
@@ -260,6 +264,7 @@ export type Database = {
           id?: string
           name: string
           photo_url?: string | null
+          source_event_id?: string | null
         }
         Update: {
           created_at?: string
@@ -267,6 +272,7 @@ export type Database = {
           id?: string
           name?: string
           photo_url?: string | null
+          source_event_id?: string | null
         }
         Relationships: []
       }
@@ -611,11 +617,42 @@ export type Database = {
           friend_requests: number
           unread_messages: number
           approvals: number
+          group_invites: number
         }[]
+      }
+      create_group_from_event: {
+        Args: { _event_id: string; _name?: string }
+        Returns: string
+      }
+      my_group_invites: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          invite_id: string
+          group_id: string
+          group_name: string
+          inviter_id: string
+          inviter_name: string | null
+          inviter_avatar: string | null
+          event_title: string | null
+          created_at: string
+        }[]
+      }
+      respond_group_invite: {
+        Args: { _invite_id: string; _accept: boolean }
+        Returns: string | null
       }
       pending_requests_by_event: {
         Args: Record<PropertyKey, never>
         Returns: { event_id: string; pending: number }[]
+      }
+      event_attendees: {
+        Args: { _event_id: string }
+        Returns: {
+          user_id: string
+          name: string | null
+          avatar_url: string | null
+          is_creator: boolean
+        }[]
       }
       friends_page: {
         Args: { _limit?: number; _offset?: number }

@@ -25,6 +25,12 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   // request_institution.
   REQUEST_RATE_LIMIT: 'rpcErrors.requestRateLimit',
   INVALID_REQUEST: 'rpcErrors.invalidRequest',
+  // Después del evento (20260919).
+  REPEAT_NOT_ALLOWED: 'rpcErrors.repeatNotAllowed',
+  NOT_AN_ATTENDEE: 'rpcErrors.notAnAttendee',
+  EVENT_NOT_STARTED: 'rpcErrors.eventNotStarted',
+  INVITE_NOT_FOUND: 'rpcErrors.inviteNotFound',
+  INVITE_ALREADY_ANSWERED: 'rpcErrors.inviteAlreadyAnswered',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {

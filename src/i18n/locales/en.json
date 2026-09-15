@@ -239,7 +239,11 @@
     "decline": "Decline",
     "requestApproved": "Request approved",
     "requestDeclined": "Request declined",
-    "organizer": "host"
+    "organizer": "host",
+    "you": "You",
+    "noAttendeesYet": "No one has joined yet. Be the first.",
+    "showAllAttendees": "See {{count}} more people",
+    "seeAll": "See all"
   },
   "create": {
     "title": "New Event",
@@ -370,7 +374,16 @@
     "explorer": "Explorer",
     "study_buddy": "Study Buddy",
     "team_player": "Team Player",
-    "streak_7": "7-Day Streak"
+    "streak_7": "7-Day Streak",
+    "how": {
+      "organizer": "Create {{count}} events",
+      "explorer": "Join {{count}} events",
+      "study_buddy": "Check in to {{count}} study sessions",
+      "team_player": "Join {{count}} sports events",
+      "streak_7": "Join events on {{count}} different days"
+    },
+    "earned": "Earned!",
+    "progress": "{{current}} of {{target}}"
   },
   "map": {
     "title": "Campus Event Map",
@@ -411,6 +424,70 @@
       "skip": "Skip",
       "done": "Done",
       "progress": "Step {{current}} of {{total}}"
+    },
+    "filters": {
+      "button": "Filters",
+      "buttonActive": "Filters, {{count}} active",
+      "title": "Filter events",
+      "when": "When",
+      "whenAny": "Any time",
+      "whenOptions": {
+        "now": "Now",
+        "next3h": "Next 3 h",
+        "today": "Today",
+        "tomorrow": "Tomorrow",
+        "weekend": "Weekend",
+        "week": "Next 7 days",
+        "range": "Pick dates"
+      },
+      "whenHints": {
+        "now": "Happening now or starting within 1 hour",
+        "next3h": "Anything happening in the next 3 hours"
+      },
+      "rangePick": "Tap the first and last day",
+      "rangeOne": "{{from}}",
+      "rangeMany": "{{from}} – {{to}}",
+      "dayPart": "Start time",
+      "dayParts": {
+        "morning": "Morning",
+        "afternoon": "Afternoon",
+        "evening": "Evening"
+      },
+      "dayPartHints": {
+        "morning": "5 AM–12 PM",
+        "afternoon": "12–7 PM",
+        "evening": "From 7 PM"
+      },
+      "duration": "Duration",
+      "durations": {
+        "short": "Up to 1 h",
+        "medium": "1 to 2 h",
+        "long": "Over 2 h"
+      },
+      "experience": "Type of experience",
+      "access": {
+        "direct": "Join instantly",
+        "approval": "Needs approval"
+      },
+      "size": {
+        "small": "Small group",
+        "large": "Large group"
+      },
+      "sizeHints": {
+        "small": "Up to 5 people",
+        "large": "6 people or more"
+      },
+      "onlyWithSpots": "Only with spots left",
+      "clear": "Clear filters",
+      "show_one": "Show 1 event",
+      "show_other": "Show {{count}} events",
+      "showNone": "No events match",
+      "removeChip": "Remove filter {{label}}",
+      "mapNoMatch": "No events match your filters",
+      "today": "Today",
+      "tomorrow": "Tomorrow",
+      "live": "Happening now",
+      "startsIn": "Starts in {{count}} min"
     }
   },
   "rpcErrors": {
@@ -428,7 +505,12 @@
     "campusNotAvailable": "That campus isn't available.",
     "campusNotAllowed": "Your email belongs to another university. Choose one of its campuses.",
     "requestRateLimit": "You sent several requests today. Try again tomorrow.",
-    "invalidRequest": "Check the request details."
+    "invalidRequest": "Check the request details.",
+    "repeatNotAllowed": "Only the organizer or attendees can repeat a plan.",
+    "notAnAttendee": "Only attendees can create a group from this event.",
+    "eventNotStarted": "You can create the group once the event has started.",
+    "inviteNotFound": "This invite is no longer available.",
+    "inviteAlreadyAnswered": "You already answered this invite."
   },
   "legal": {
     "privacy": "Privacy Policy",
@@ -643,5 +725,37 @@
       "noPending": "There's no active code. Request a new one.",
       "manualReview": "We couldn't complete automatic verification. We'll review it manually."
     }
+  },
+  "afterEvent": {
+    "title": "What's next?",
+    "metSomeone": "Met someone?",
+    "add": "Add",
+    "sent": "Sent",
+    "friends": "Friends",
+    "addAria": "Add {{name}} as a friend",
+    "repeat": "Repeat the plan",
+    "repeatWhen": "{{when}} · same time",
+    "repeatNotify_one": "We'll let the person who went know",
+    "repeatNotify_other": "We'll let the {{count}} people who went know",
+    "group": "Start a group with everyone who went",
+    "groupHint": "They get an invite and join if they accept",
+    "groupCreated_one": "Group created. We invited 1 person.",
+    "groupCreated_other": "Group created. We invited {{count}} people.",
+    "groupCreatedNone": "Group created.",
+    "creatingGroup": "Creating group…",
+    "repeatBanner": "Repeating “{{title}}”. When you publish, we'll let everyone who went know.",
+    "justEnded": "Just ended",
+    "whatsNext": "What's next?"
+  },
+  "groupInvites": {
+    "title": "Group invites",
+    "from": "{{name}} invited you",
+    "fromEvent": "{{name}} invited you · from “{{event}}”",
+    "accept": "Join",
+    "decline": "No thanks",
+    "accepted": "You joined the group",
+    "declined": "Invite declined",
+    "acceptAria": "Join {{group}}",
+    "declineAria": "Decline the invite to {{group}}"
   }
 }

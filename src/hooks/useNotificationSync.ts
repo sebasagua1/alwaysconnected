@@ -28,6 +28,8 @@ export function useNotificationSync() {
       friendRequests: Number(row.friend_requests ?? 0),
       unreadMessages: Number(row.unread_messages ?? 0),
       approvals: Number(row.approvals ?? 0),
+      // La base vieja no la devuelve: se queda en 0 hasta aplicar 20260919.
+      groupInvites: Number((row as { group_invites?: number }).group_invites ?? 0),
     });
   }, [user, setCounts]);
 

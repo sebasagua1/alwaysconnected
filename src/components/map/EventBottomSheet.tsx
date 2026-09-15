@@ -22,10 +22,16 @@ import { supabase } from '@/integrations/supabase/client';
 import { getCurrentPosition } from '@/lib/geo';
 import { useToast } from '@/hooks/use-toast';
 import { ModerationMenu } from '@/components/moderation/ModerationMenu';
+import { UserAvatar } from '@/components/ui/user-avatar';
+import { UserProfileSheet } from '@/components/profile/UserProfileSheet';
+import { PostEventActions } from '@/components/map/PostEventActions';
 import { rpcMessage } from '@/lib/rpcErrors';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 import { es as esLocale, enUS } from 'date-fns/locale';
+
+/** Caras que se enseñan antes del "+N", contando a quien organiza. */
+export const ATTENDEES_PREVIEW = 5;
 
 interface Props {
   event: MapEvent;
@@ -51,7 +57,11 @@ export function EventBottomSheet({ event, onClose }: Props) {
   const [checking, setChecking] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [checkingIn, setCheckingIn] = useState(false);
-  const [attendees, setAttendees] = useState<Array<{ id: string | null; name: string | null }>>([]);
+  const [attendees, setAttendees] = useState<Array<{ user_id: string; name: string | null; avatar_url: string | null; is_creator: boolean }>>([]);
+  const [viewingUserId, setViewingUserId] = useState<string | null>(null);
+  // Se enseñan las primeras caras y un "+N": con veinte avatares la ficha
+  // dejaba de ser una ficha. Tocar el "+N" despliega el resto.
+  const [showAllAttendees, setShowAllAttendees] = useState(false);
   const [loadingAttendees, setLoadingAttendees] = useState(false);
   // Se incrementa tras apuntarse o salirse para releer la lista de quién va.
   const [attendeesVersion, setAttendeesVersion] = useState(0);
@@ -63,10 +73,6 @@ export function EventBottomSheet({ event, onClose }: Props) {
   const [hoverRating, setHoverRating] = useState<number | null>(null);
   const [submittingRating, setSubmittingRating] = useState(false);
   const isCreator = user?.id === event.creator_id;
-
-  // Quien está apuntado también ve quién va: es la mitad de la razón por la
-  // que alguien se apunta. Antes solo lo veía el organizador.
-  const canSeeAttendees = isCreator || hasJoined;
 
   const [isOngoing, setIsOngoing] = useState(() => {
     const now = Date.now();
@@ -89,46 +95,33 @@ export function EventBottomSheet({ event, onClose }: Props) {
     setLocalCurrentSpots(event.current_spots);
   }, [event.current_spots]);
 
+  // Quién va, para cualquiera que pueda ver el evento: es la mitad de la
+  // razón por la que alguien se une. Antes solo lo veían quien organiza y
+  // quien ya estaba dentro. event_attendees() devuelve nombre y foto y nada
+  // más, sin pendientes ni bloqueados, y con quien organiza primero.
+  //
+  // Se relee cuando cambia el aforo por tiempo real, para que la lista no se
+  // quede atrás del "3 lugares disponibles" de arriba.
+  useEffect(() => { setShowAllAttendees(false); }, [event.id]);
+
   useEffect(() => {
-    // La RLS deja leer la lista a quien creó el evento y a quien está
-    // apuntado; para el resto devolvería 0 filas, así que ni se pide.
-    if (!canSeeAttendees) return;
     let cancelled = false;
     const fetchAttendees = async () => {
       setLoadingAttendees(true);
-      const { data: participants, error: errParticipantes } = await supabase
-        .from('event_participants')
-        .select('user_id')
-        .eq('event_id', event.id)
-        .eq('status', 'joined');
+      const { data, error } = await supabase.rpc('event_attendees', { _event_id: event.id });
       if (cancelled) return;
-      // Sin esto, un fallo dejaba la lista con el organizador y nadie más:
-      // idéntica a un evento al que de verdad no se ha apuntado nadie.
-      if (errParticipantes) {
+      setLoadingAttendees(false);
+      // Sin esto, un fallo dejaba la lista vacía: idéntica a un evento al que
+      // de verdad no se ha unido nadie.
+      if (error) {
         toast({ title: t('errors.attendeesLoad'), variant: 'destructive' });
-        setLoadingAttendees(false);
         return;
       }
-
-      // Quien organiza no tiene fila en event_participants —  nada la crea al
-      // montar el evento— así que salía una lista de asistentes sin la persona
-      // que convoca. Se añade a mano y va primera.
-      const ids = [...new Set([event.creator_id, ...(participants?.map(p => p.user_id) ?? [])])];
-      const { data: profiles } = await supabase
-        .from('public_profiles')
-        .select('id, name')
-        .in('id', ids);
-      if (!cancelled) {
-        const sorted = [...(profiles ?? [])].sort((a, b) =>
-          a.id === event.creator_id ? -1 : b.id === event.creator_id ? 1 : 0
-        );
-        setAttendees(sorted);
-        setLoadingAttendees(false);
-      }
+      setAttendees(data ?? []);
     };
     fetchAttendees();
     return () => { cancelled = true; };
-  }, [canSeeAttendees, event.id, event.creator_id, attendeesVersion, t, toast]);
+  }, [event.id, event.current_spots, attendeesVersion, t, toast]);
 
   // Solicitudes pendientes — solo las ve y resuelve el organizador.
   useEffect(() => {
@@ -374,7 +367,9 @@ export function EventBottomSheet({ event, onClose }: Props) {
   return (
     <>
     <div className="absolute above-nav left-0 right-0 z-20 animate-slide-up">
-      <div className="mx-3 bg-card rounded-3xl shadow-lifted p-5 relative">
+      {/* Con "¿Qué sigue?" la ficha de un evento pasado es más alta que la
+          pantalla: sin tope, el título se salía por arriba. */}
+      <div className="mx-3 bg-card rounded-3xl shadow-lifted p-5 relative max-h-[calc(100dvh-8rem)] overflow-y-auto">
         <div className="drag-handle" />
 
         <div className="absolute top-3 right-3 flex items-center">
@@ -430,13 +425,6 @@ export function EventBottomSheet({ event, onClose }: Props) {
           <p className="text-sm text-muted-foreground mb-4 line-clamp-2">{event.description}</p>
         )}
 
-        {localCurrentSpots > 0 && (
-          <div className="mb-4 text-xs text-muted-foreground">
-            {localCurrentSpots === 1
-              ? t('event.joinedPersonOne', { count: localCurrentSpots })
-              : t('event.joinedPersonOther', { count: localCurrentSpots })}
-          </div>
-        )}
 
         {/* Solicitudes pendientes — solo el organizador */}
         {!checking && isCreator && (loadingRequests || requests.length > 0) && (
@@ -476,59 +464,87 @@ export function EventBottomSheet({ event, onClose }: Props) {
           </div>
         )}
 
-        {/* Quién va — visible para el organizador y para quien esté apuntado */}
-        {!checking && canSeeAttendees && (
-          <div className="mb-4 border border-border rounded-xl p-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <p className="text-[13px] font-semibold text-muted-foreground">
-                {isCreator ? t('event.organizedByYou') : t('event.whoIsGoing')}
-              </p>
-              {isCreator && (
-                <button
-                  onClick={() => setEditOpen(true)}
-                  aria-label={t('edit.title')}
-                  className="inline-flex items-center gap-1 min-h-[44px] text-xs text-primary font-semibold"
-                >
-                  <Pencil className="w-3 h-3" />
-                  {t('edit.title')}
-                </button>
-              )}
-            </div>
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Users className="w-3.5 h-3.5" />
+        {/* Quién va — para cualquiera que vea el evento */}
+        <div className="mb-4 border border-border rounded-xl p-3 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[13px] font-semibold text-foreground">
+              {isCreator ? t('event.organizedByYou') : t('event.whoIsGoing')}
               {/* Sin contar a quien organiza: si no, esta cifra contradice al
-                  aforo ("1/6") y al "1 persona unida" de arriba, que cuentan
-                  solo a quien se apuntó. En la lista sigue saliendo, con su
-                  etiqueta. */}
-              <span>
-                {t('event.attendees', {
-                  count: attendees.filter(a => a.id !== event.creator_id).length,
-                })}
-              </span>
-            </div>
-            {loadingAttendees ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
-            ) : attendees.length === 0 ? (
-              <p className="text-xs text-muted-foreground">{t('event.noAttendees')}</p>
-            ) : (
-              <div className="flex flex-wrap gap-1">
-                {attendees.map(a => (
-                  <span
-                    key={a.id ?? ''}
-                    className={cn(
-                      'text-xs rounded-full px-2 py-0.5 font-medium',
-                      a.id === event.creator_id
-                        ? 'bg-primary/10 text-primary'
-                        : 'bg-muted text-muted-foreground'
-                    )}
-                  >
-                    {a.name ?? '?'}
-                    {a.id === event.creator_id && ` · ${t('event.organizer')}`}
-                  </span>
-                ))}
-              </div>
+                  aforo ("1/6"), que cuenta solo a quien se unió. */}
+              {localCurrentSpots > 0 && (
+                <span className="font-normal text-muted-foreground">
+                  {' · '}
+                  {localCurrentSpots === 1
+                    ? t('event.joinedPersonOne', { count: localCurrentSpots })
+                    : t('event.joinedPersonOther', { count: localCurrentSpots })}
+                </span>
+              )}
+            </p>
+            {isCreator && (
+              <button
+                onClick={() => setEditOpen(true)}
+                aria-label={t('edit.title')}
+                className="inline-flex items-center gap-1 min-h-[44px] text-xs text-primary font-semibold shrink-0"
+              >
+                <Pencil className="w-3 h-3" />
+                {t('edit.title')}
+              </button>
             )}
           </div>
+          {loadingAttendees && attendees.length === 0 ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
+          ) : (
+            <>
+              <ul className="flex gap-3 overflow-x-auto no-scrollbar -mx-1 px-1 pb-1">
+                {(showAllAttendees ? attendees : attendees.slice(0, ATTENDEES_PREVIEW)).map(a => (
+                  <li key={a.user_id} className="shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setViewingUserId(a.user_id)}
+                      aria-label={a.is_creator ? `${a.name ?? t('profile.student')}, ${t('event.organizer')}` : a.name ?? t('profile.student')}
+                      className="w-16 flex flex-col items-center gap-1 text-center"
+                    >
+                      <UserAvatar
+                        url={a.avatar_url}
+                        name={a.name}
+                        className={cn('w-12 h-12 bg-muted', a.is_creator && 'ring-2 ring-primary ring-offset-2 ring-offset-card')}
+                        textClassName="text-base font-bold text-muted-foreground"
+                      />
+                      <span className="w-full text-[11px] font-medium text-foreground truncate">
+                        {a.user_id === user?.id ? t('event.you') : a.name?.split(' ')[0] ?? '?'}
+                      </span>
+                      {a.is_creator && (
+                        <span className="-mt-1 text-[10px] font-semibold text-primary">{t('event.organizer')}</span>
+                      )}
+                    </button>
+                  </li>
+                ))}
+                {!showAllAttendees && attendees.length > ATTENDEES_PREVIEW && (
+                  <li className="shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setShowAllAttendees(true)}
+                      aria-label={t('event.showAllAttendees', { count: attendees.length - ATTENDEES_PREVIEW })}
+                      className="w-16 flex flex-col items-center gap-1 text-center"
+                    >
+                      <span className="w-12 h-12 rounded-full bg-primary/10 text-primary text-sm font-bold flex items-center justify-center">
+                        +{attendees.length - ATTENDEES_PREVIEW}
+                      </span>
+                      <span className="w-full text-[11px] font-medium text-muted-foreground truncate">{t('event.seeAll')}</span>
+                    </button>
+                  </li>
+                )}
+              </ul>
+              {attendees.filter(a => !a.is_creator).length === 0 && (
+                <p className="text-xs text-muted-foreground">{t('event.noAttendeesYet')}</p>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Terminó: qué hacer ahora, para quien organizó o fue. */}
+        {!checking && eventEnded && user && (isCreator || hasJoined) && (
+          <PostEventActions event={event} attendees={attendees} myId={user.id} onClose={onClose} />
         )}
 
         <div className="flex gap-3">
@@ -536,7 +552,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
             <Button disabled className="flex-1 h-12 rounded-xl font-bold">
               <Loader2 className="w-4 h-4 animate-spin" />
             </Button>
-          ) : isCreator ? (
+          ) : eventEnded ? null : isCreator ? (
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button
@@ -610,10 +626,11 @@ export function EventBottomSheet({ event, onClose }: Props) {
                 : needsApproval ? t('event.askToJoin') : t('event.join')}
             </Button>
           )}
+          {/* Terminado ya no hay nada que unirse, salirse ni cancelar. */}
           <Button
             variant="outline"
             onClick={onClose}
-            className="h-12 rounded-xl font-semibold px-6"
+            className={cn('h-12 rounded-xl font-semibold px-6', !checking && eventEnded && 'flex-1')}
           >
             {t('common.close')}
           </Button>
@@ -685,6 +702,11 @@ export function EventBottomSheet({ event, onClose }: Props) {
         onClose={() => setEditOpen(false)}
         onSaved={onClose}
       />
+    )}
+
+    {/* Tocar a alguien de "Quién va" abre su ficha, encima de la hoja. */}
+    {viewingUserId && (
+      <UserProfileSheet userId={viewingUserId} onClose={() => setViewingUserId(null)} />
     )}
     </>
   );

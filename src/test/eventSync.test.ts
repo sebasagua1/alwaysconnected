@@ -38,6 +38,7 @@ const row = (over: Partial<EventRow> = {}): EventRow => ({
   is_active: true,
   is_recurring: false,
   recurrence_rule: null,
+  repeated_from: null,
   institution_id: 'i1',
   created_at: '2026-08-01T00:00:00+00:00',
   ...over,

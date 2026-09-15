@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { useTranslation } from 'react-i18next';
-import { X, Minus, Plus as PlusIcon, MapPin, CalendarIcon } from 'lucide-react';
+import { X, Minus, Plus as PlusIcon, MapPin, CalendarIcon, Repeat } from 'lucide-react';
 import { PrivacySelector } from '@/components/ui/privacy-selector';
 import { CATEGORY_ICONS } from '@/lib/categoryIcons';
 import { format } from 'date-fns';
@@ -18,6 +18,7 @@ import { rpcMessage } from '@/lib/rpcErrors';
 import { reverseGeocode } from '@/lib/geocode';
 import { useAuthStore } from '@/stores/authStore';
 import { useToast } from '@/hooks/use-toast';
+import type { RepeatDraft } from '@/lib/repeatPlan';
 
 const eventSchema = z.object({
   title: z.string().trim().min(3).max(80),
@@ -44,29 +45,36 @@ interface Props {
    * este componente, y desmontarlo lo borra.
    */
   hidden?: boolean;
+  /**
+   * "Repetir el plan": el formulario sale relleno con el evento anterior y
+   * la misma hora de la semana siguiente. Todo se puede cambiar antes de
+   * publicar; al publicar se avisa a quienes fueron (lo hace el servidor).
+   */
+  initial?: RepeatDraft | null;
 }
 
-export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidden = false }: Props) {
+export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidden = false, initial = null }: Props) {
   const { user } = useAuthStore();
   const { toast } = useToast();
   const { t, i18n } = useTranslation();
   const dateLocale = i18n.language?.startsWith('en') ? enUS : esLocale;
-  const [title, setTitle] = useState('');
-  const [category, setCategory] = useState('study');
-  const [date, setDate] = useState<Date>();
+  const [title, setTitle] = useState(initial?.title ?? '');
+  const [category, setCategory] = useState(initial?.category ?? 'study');
+  const [date, setDate] = useState<Date | undefined>(initial?.startsAt);
   const [whenOpen, setWhenOpen] = useState(false);
-  const [time, setTime] = useState('');
-  const [address, setAddress] = useState('');
-  const [maxSpots, setMaxSpots] = useState(10);
-  const [description, setDescription] = useState('');
-  const [privacy, setPrivacy] = useState('open');
-  const [durationMins, setDurationMins] = useState(120);
+  const [time, setTime] = useState(initial ? toTimeValue(initial.startsAt) : '');
+  const [address, setAddress] = useState(initial?.address ?? '');
+  const [maxSpots, setMaxSpots] = useState(initial?.maxSpots ?? 10);
+  const [description, setDescription] = useState(initial?.description ?? '');
+  const [privacy, setPrivacy] = useState(initial?.privacy ?? 'open');
+  const [durationMins, setDurationMins] = useState(initial?.durationMins ?? 120);
   const [loading, setLoading] = useState(false);
   const [placeName, setPlaceName] = useState<string | null>(null);
   const [lookingUp, setLookingUp] = useState(false);
   // Si la persona ya escribio el nombre del sitio a mano, el geocoding no se
   // lo pisa: lo suyo manda sobre lo que adivine Mapbox.
-  const addressTouched = useRef(false);
+  // Al repetir, el nombre del sitio anterior cuenta como escrito a mano.
+  const addressTouched = useRef(!!initial?.address);
 
   // El pin -> un nombre que alguien reconozca. Las coordenadas siguen yendo
   // a la base igual; esto es solo lo que se ve.
@@ -150,6 +158,7 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
       current_spots: 0,
       lng: v.lng,
       lat: v.lat,
+      repeated_from: initial?.repeatedFrom ?? null,
     });
 
     if (error) {
@@ -194,6 +203,12 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
           </div>
 
           <div className="space-y-5">
+            {initial && (
+              <p className="flex items-start gap-2 rounded-xl bg-primary/10 text-primary text-sm font-medium p-3">
+                <Repeat className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+                {t('afterEvent.repeatBanner', { title: initial.title })}
+              </p>
+            )}
             {/* Title */}
             <Input
               placeholder={t('create.titlePh')}
