@@ -370,7 +370,16 @@
     "explorer": "Explorador",
     "study_buddy": "Compañero de estudio",
     "team_player": "Jugador en equipo",
-    "streak_7": "Racha de 7 días"
+    "streak_7": "Racha de 7 días",
+    "how": {
+      "organizer": "Crea {{count}} eventos",
+      "explorer": "Únete a {{count}} eventos",
+      "study_buddy": "Haz check-in en {{count}} sesiones de estudio",
+      "team_player": "Únete a {{count}} eventos de deportes",
+      "streak_7": "Únete a eventos en {{count}} días distintos"
+    },
+    "earned": "¡Conseguida!",
+    "progress": "{{current}} de {{target}}"
   },
   "map": {
     "title": "Mapa de eventos del campus",
