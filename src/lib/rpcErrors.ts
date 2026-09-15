@@ -22,6 +22,14 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   CAMPUS_LOCKED: 'rpcErrors.campusLocked',
   CAMPUS_NOT_AVAILABLE: 'rpcErrors.campusNotAvailable',
   CAMPUS_NOT_ALLOWED: 'rpcErrors.campusNotAllowed',
+  // Los lanza guard_friendship_write al pedir o aceptar amistad.
+  FRIEND_SELF: 'rpcErrors.friendSelf',
+  FRIEND_NOT_AVAILABLE: 'rpcErrors.friendNotAvailable',
+  FRIEND_REQUEST_EXISTS: 'friends.alreadySent',
+  FRIEND_REQUEST_INCOMING: 'rpcErrors.friendRequestIncoming',
+  ALREADY_FRIENDS: 'rpcErrors.alreadyFriends',
+  FRIEND_RATE_LIMIT: 'rpcErrors.friendRateLimit',
+  FRIENDSHIP_FIELD_LOCKED: 'rpcErrors.friendshipLocked',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {

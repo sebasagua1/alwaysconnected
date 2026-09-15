@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Search, UserPlus, Users, MessageCircle, Check, X as XIcon, Plus, Trophy, Medal } from 'lucide-react';
+import { UserPlus, Users, MessageCircle, Check, X as XIcon, Plus, Trophy, Medal } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -25,6 +25,7 @@ import { UserProfileSheet } from '@/components/profile/UserProfileSheet';
 import type { Database } from '@/integrations/supabase/types';
 import { pageTitle } from '@/lib/brand';
 import { formatChatTime } from '@/lib/chat';
+import { FindPeople } from '@/components/friends/FindPeople';
 
 type FriendData = Pick<
   Database['public']['Views']['public_profiles']['Row'],
@@ -76,10 +77,8 @@ export default function Friends() {
   const initialTab: ActiveTab = (location.state as { tab?: ActiveTab } | null)?.tab ?? 'friends';
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
   const unreadMessages = useNotificationStore((n) => n.unreadMessages);
-  const [searchQuery, setSearchQuery] = useState('');
   const [friends, setFriends] = useState<Friend[]>([]);
   const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
-  const [searchResults, setSearchResults] = useState<FriendData[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Groups state
@@ -374,41 +373,6 @@ export default function Friends() {
     toast({ title: t('friends.requestDeclined') });
   };
 
-  // Busca según se escribe, sin esperar a que se pulse nada.
-  //
-  // El número de secuencia es porque el debounce no basta solo: dos consultas
-  // pueden quedar en vuelo a la vez si la red va lenta, y sin esto la más
-  // vieja podía responder la última y pisar los resultados de lo que se
-  // acababa de escribir.
-  const searchSeqRef = useRef(0);
-  useEffect(() => {
-    if (!user) return;
-    const query = searchQuery.trim();
-    if (!query) {
-      setSearchResults([]);
-      return;
-    }
-    const seq = ++searchSeqRef.current;
-    const timer = setTimeout(async () => {
-      const safeQuery = query.replace(/[%_\\]/g, '\\$&');
-      const { data, error } = await supabase
-        .from('public_profiles')
-        .select('id, name, avatar_url, major')
-        .ilike('name', `%${safeQuery}%`)
-        .neq('id', user.id)
-        .limit(10);
-      if (seq !== searchSeqRef.current) return;
-      // El más engañoso de todos: una búsqueda fallida se veía igual que una
-      // sin resultados, o sea "esa persona no está en Always Connected".
-      if (error) {
-        toast({ title: i18n.t('errors.searchFailed'), variant: 'destructive' });
-        return;
-      }
-      if (data) setSearchResults(data);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery, user, toast]);
-
   const sendFriendRequest = async (friendId: string | null) => {
     if (!user || !friendId) return;
     const { error } = await supabase.from('friendships').insert({
@@ -420,7 +384,7 @@ export default function Friends() {
       if (error.code === '23505') {
         toast({ title: t('friends.alreadySent') });
       } else {
-        toast({ title: t('common.error'), description: error.message, variant: 'destructive' });
+        toast({ title: t('common.error'), description: rpcMessage(error.message, t), variant: 'destructive' });
       }
     } else {
       toast({ title: t('friends.requestSent') });
@@ -508,58 +472,11 @@ export default function Friends() {
 
       {/* Friends tab */}
       {activeTab === 'friends' && (
+        <FindPeople
+          onFriendsChanged={() => { setFriendsPage(0); loadFriends(0); }}
+          onMessage={handleMessageFriend}
+        >
         <div className="space-y-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder={t('friends.searchPh')}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-11 rounded-xl"
-            />
-          </div>
-
-          {searchResults.length > 0 && (
-            <div className="space-y-2">
-              <h2 className="text-sm font-semibold text-muted-foreground">{t('friends.results')}</h2>
-              {searchResults.map((s) => (
-                <div key={s.id ?? ''} className="flex items-center justify-between bg-card rounded-xl p-3 shadow-soft">
-                  <button
-                    onClick={() => setViewingUserId(s.id ?? null)}
-                    aria-label={t('friends.viewProfile', { name: s.name ?? '' })}
-                    className="flex items-center gap-3 flex-1 min-w-0 text-left"
-                  >
-                    <UserAvatar
-                      url={s.avatar_url}
-                      name={s.name}
-                      className="w-10 h-10 bg-muted"
-                      textClassName="text-sm text-muted-foreground"
-                    />
-                    <div className="min-w-0">
-                      <p className="font-semibold text-sm text-foreground truncate">{s.name}</p>
-                      <p className="text-xs text-muted-foreground truncate">{s.major}</p>
-                    </div>
-                  </button>
-                  <div className="flex items-center">
-                    <button
-                      onClick={() => sendFriendRequest(s.id ?? '')}
-                      aria-label={`${t('friends.tabFriends')}: ${s.name}`}
-                      className="w-11 h-11 shrink-0 inline-flex items-center justify-center -m-1 text-primary"
-                    >
-                      <UserPlus className="w-5 h-5" />
-                    </button>
-                    <ModerationMenu
-                      target={{ kind: 'user', id: s.id ?? '' }}
-                      label={s.name}
-                      blockUserId={s.id}
-                      onBlocked={() => setSearchResults((prev) => prev.filter((r) => r.id !== s.id))}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
           {pendingRequests.length > 0 && (
             <div className="space-y-2">
               <h2 className="text-sm font-semibold text-muted-foreground">
@@ -688,6 +605,7 @@ export default function Friends() {
             )}
           </div>
         </div>
+        </FindPeople>
       )}
 
       {/* Groups tab */}

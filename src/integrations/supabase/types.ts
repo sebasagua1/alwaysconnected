@@ -627,6 +627,33 @@ export type Database = {
           last_sender_id: string | null
         }[]
       }
+      search_people: {
+        Args: { _query: string; _limit?: number; _offset?: number }
+        Returns: {
+          id: string
+          name: string
+          avatar_url: string | null
+          major: string | null
+          relation: "none" | "outgoing" | "incoming" | "friends"
+          friendship_id: string | null
+          mutual_friends: number
+        }[]
+      }
+      people_suggestions: {
+        Args: { _limit?: number }
+        Returns: {
+          id: string
+          name: string
+          avatar_url: string | null
+          major: string | null
+          mutual_friends: number
+          shared_groups: number
+        }[]
+      }
+      search_normalize: {
+        Args: { _t: string }
+        Returns: string
+      }
       chat_summaries: {
         Args: Record<PropertyKey, never>
         Returns: {
