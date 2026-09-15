@@ -29,6 +29,9 @@ import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 import { es as esLocale, enUS } from 'date-fns/locale';
 
+/** Caras que se enseñan antes del "+N", contando a quien organiza. */
+export const ATTENDEES_PREVIEW = 5;
+
 interface Props {
   event: MapEvent;
   onClose: () => void;
@@ -55,6 +58,9 @@ export function EventBottomSheet({ event, onClose }: Props) {
   const [checkingIn, setCheckingIn] = useState(false);
   const [attendees, setAttendees] = useState<Array<{ user_id: string; name: string | null; avatar_url: string | null; is_creator: boolean }>>([]);
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
+  // Se enseñan las primeras caras y un "+N": con veinte avatares la ficha
+  // dejaba de ser una ficha. Tocar el "+N" despliega el resto.
+  const [showAllAttendees, setShowAllAttendees] = useState(false);
   const [loadingAttendees, setLoadingAttendees] = useState(false);
   // Se incrementa tras apuntarse o salirse para releer la lista de quién va.
   const [attendeesVersion, setAttendeesVersion] = useState(0);
@@ -95,6 +101,8 @@ export function EventBottomSheet({ event, onClose }: Props) {
   //
   // Se relee cuando cambia el aforo por tiempo real, para que la lista no se
   // quede atrás del "3 lugares disponibles" de arriba.
+  useEffect(() => { setShowAllAttendees(false); }, [event.id]);
+
   useEffect(() => {
     let cancelled = false;
     const fetchAttendees = async () => {
@@ -485,7 +493,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
           ) : (
             <>
               <ul className="flex gap-3 overflow-x-auto no-scrollbar -mx-1 px-1 pb-1">
-                {attendees.map(a => (
+                {(showAllAttendees ? attendees : attendees.slice(0, ATTENDEES_PREVIEW)).map(a => (
                   <li key={a.user_id} className="shrink-0">
                     <button
                       type="button"
@@ -508,6 +516,21 @@ export function EventBottomSheet({ event, onClose }: Props) {
                     </button>
                   </li>
                 ))}
+                {!showAllAttendees && attendees.length > ATTENDEES_PREVIEW && (
+                  <li className="shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setShowAllAttendees(true)}
+                      aria-label={t('event.showAllAttendees', { count: attendees.length - ATTENDEES_PREVIEW })}
+                      className="w-16 flex flex-col items-center gap-1 text-center"
+                    >
+                      <span className="w-12 h-12 rounded-full bg-primary/10 text-primary text-sm font-bold flex items-center justify-center">
+                        +{attendees.length - ATTENDEES_PREVIEW}
+                      </span>
+                      <span className="w-full text-[11px] font-medium text-muted-foreground truncate">{t('event.seeAll')}</span>
+                    </button>
+                  </li>
+                )}
               </ul>
               {attendees.filter(a => !a.is_creator).length === 0 && (
                 <p className="text-xs text-muted-foreground">{t('event.noAttendeesYet')}</p>

@@ -48,6 +48,19 @@ describe('EventBottomSheet: quién va', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('perfil de ana');
   });
 
+  it('enseña 5 caras y un "+N" que despliega el resto', async () => {
+    const gente = Array.from({ length: 12 }, (_, i) => ({
+      user_id: `u${i}`, name: `Persona${i} Apellido`, avatar_url: null, is_creator: i === 0,
+    }));
+    rpc.mockResolvedValue({ data: gente, error: null });
+    render(<EventBottomSheet event={{ ...evento, max_spots: 20, current_spots: 11 }} onClose={vi.fn()} />);
+    expect(await screen.findByText('Persona4')).toBeInTheDocument();
+    expect(screen.queryByText('Persona5')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Ver a las 7 personas más' }));
+    expect(screen.getByText('Persona11')).toBeInTheDocument();
+    expect(screen.queryByText('+7')).not.toBeInTheDocument();
+  });
+
   it('sin nadie más que quien organiza, invita a ser la primera persona', async () => {
     rpc.mockResolvedValue({ data: [{ user_id: 'org', name: 'Org', avatar_url: null, is_creator: true }], error: null });
     render(<EventBottomSheet event={{ ...evento, current_spots: 0 }} onClose={vi.fn()} />);
