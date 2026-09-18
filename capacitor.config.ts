@@ -9,6 +9,16 @@ const config: CapacitorConfig = {
   appId: 'com.alwaysconnected.app',
   appName: 'Always Connected',
   webDir: 'dist',
+  plugins: {
+    PushNotifications: {
+      // Sin esto iOS NO enseña nada mientras la app está abierta: el plugin
+      // arranca con la lista de opciones vacía y le dice al sistema que no
+      // presente el aviso. La push llega, dispara 'pushNotificationReceived'
+      // y muere ahí, sin banner ni sonido. Es el motivo más común de "no me
+      // llegan las notificaciones" cuando en realidad sí llegaban.
+      presentationOptions: ['badge', 'sound', 'alert'],
+    },
+  },
 };
 
 export default config;
