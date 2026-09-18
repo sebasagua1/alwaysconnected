@@ -2,119 +2,117 @@
 -- ¿Por qué no llegan las notificaciones?
 --
 -- Se pega entero en el SQL Editor de Supabase y se ejecuta. No cambia
--- nada: solo mira. Cada fila es un eslabón de la cadena
+-- nada: solo mira. Recorre la cadena
 --
 --   trigger → push_send() → pg_net → Edge Function send-push → APNs → iPhone
 --
--- y dice OK o FALLA. El primero que salga FALLA es el que hay que
+-- y marca OK o FALLA en cada eslabón. El primer FALLA es el que hay que
 -- arreglar; los de abajo se apoyan en él.
 --
--- Existe porque push_send() está envuelta en un EXCEPTION WHEN OTHERS y
--- nunca deja caer un error hacia arriba (a propósito: una push rota no
--- puede tumbar el mensaje que la provocó). El efecto secundario es que,
--- cuando algo se rompe, no pasa absolutamente nada y no hay dónde mirar.
+-- Es UNA sola consulta a propósito: el SQL Editor solo enseña el
+-- resultado de la última sentencia, así que un script de ocho SELECT
+-- deja siete resultados invisibles. Todo sale en la misma tabla.
+--
+-- Hace falta porque push_send() está envuelta en un EXCEPTION WHEN
+-- OTHERS y nunca deja caer un error hacia arriba (a propósito: una push
+-- rota no puede tumbar el mensaje que la provocó). El efecto secundario
+-- es que, cuando algo se rompe, no pasa nada y no hay dónde mirar.
 -- ============================================================
 
--- ------------------------------------------------------------
--- 1. La extensión pg_net: sin ella la base no sabe hacer HTTP.
--- ------------------------------------------------------------
-SELECT '1. pg_net instalada' AS comprobacion,
-       CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_net')
-            THEN 'OK'
-            ELSE 'FALLA -> Database > Extensions > habilitar pg_net'
-       END AS resultado;
+SELECT paso, resultado
+FROM (
 
--- ------------------------------------------------------------
--- 2. El secreto de Vault. Es el sospechoso número uno: va en un script
---    aparte porque lleva la clave dentro y no se versiona en git (ver el
---    encabezado de 20260827000000_push-triggers.sql), así que es
---    justamente el paso que se olvida al montar el proyecto.
---
---    Si falta, push_send() escribe un WARNING y vuelve. Nada más.
--- ------------------------------------------------------------
-SELECT '2. secreto service_role_key en Vault' AS comprobacion,
-       CASE WHEN EXISTS (SELECT 1 FROM vault.decrypted_secrets
-                          WHERE name = 'service_role_key'
-                            AND coalesce(decrypted_secret, '') <> '')
-            THEN 'OK'
-            ELSE 'FALLA -> select vault.create_secret(''<service_role_key>'', ''service_role_key'');'
-       END AS resultado;
+  -- 1. La extensión pg_net: sin ella la base no sabe hacer HTTP.
+  SELECT 1 AS n, '1. pg_net instalada' AS paso,
+         CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_net')
+              THEN 'OK'
+              ELSE 'FALLA -> Database > Extensions > habilitar pg_net'
+         END AS resultado
 
--- ------------------------------------------------------------
--- 3. La URL que push_send() llama tiene que ser la de ESTE proyecto.
---    Está escrita a mano dentro de la función: si el proyecto se
---    reconstruyó (ver README de esta carpeta), apunta al anterior y las
---    llamadas se van a un dominio que ya no existe. Esta consulta saca la
---    URL y el ref del proyecto actual para compararlos de un vistazo.
--- ------------------------------------------------------------
-SELECT '3. URL dentro de push_send()' AS comprobacion,
-       coalesce(
-         substring(p.prosrc from 'https://[a-z0-9]+\.supabase\.co/functions/v1/send-push'),
-         'FALLA -> push_send() no contiene ninguna URL de send-push'
-       ) AS resultado,
-       'debe coincidir con el Project URL de Settings > API' AS nota
-FROM pg_proc p
-JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'public' AND p.proname = 'push_send';
+  UNION ALL
+  -- 2. El secreto de Vault. El sospechoso número uno: va en un script
+  --    aparte porque lleva la clave dentro y no se versiona en git, así
+  --    que es justo el paso que se olvida al montar el proyecto. Si
+  --    falta, push_send() escribe un WARNING y vuelve. Nada más.
+  SELECT 2, '2. secreto service_role_key en Vault',
+         CASE WHEN EXISTS (SELECT 1 FROM vault.decrypted_secrets
+                            WHERE name = 'service_role_key'
+                              AND coalesce(decrypted_secret, '') <> '')
+              THEN 'OK'
+              ELSE 'FALLA -> select vault.create_secret(''<service_role_key>'', ''service_role_key'');'
+         END
 
--- ------------------------------------------------------------
--- 4. Los disparadores. Deben salir los cinco y ninguno deshabilitado.
---    (La invitación a grupo no es un trigger: sale de dentro de
---    create_group_from_event(), así que no aparece en esta lista.)
--- ------------------------------------------------------------
-WITH esperados(nombre) AS (
-  VALUES ('trg_join_request_push'), ('trg_approval_push'),
-         ('trg_message_push'), ('trg_friend_request_push'),
-         ('trg_event_repeat_push')
-)
-SELECT '4. disparador ' || e.nombre AS comprobacion,
-       CASE WHEN t.tgname IS NULL  THEN 'FALLA -> no existe; vuelve a aplicar las migraciones'
-            WHEN t.tgenabled = 'D' THEN 'FALLA -> existe pero está DESHABILITADO'
-            ELSE 'OK'
-       END AS resultado
-FROM esperados e
-LEFT JOIN pg_trigger t ON t.tgname = e.nombre AND NOT t.tgisinternal
-ORDER BY 1;
+  UNION ALL
+  -- 3. La URL está escrita a mano dentro de push_send(). Si el proyecto
+  --    se reconstruyó, apunta al anterior y las llamadas se van a un
+  --    dominio que ya no existe.
+  SELECT 3, '3. URL dentro de push_send()',
+         coalesce(
+           (SELECT substring(p.prosrc from 'https://[a-z0-9]+\.supabase\.co/functions/v1/send-push')
+              FROM pg_proc p
+              JOIN pg_namespace ns ON ns.oid = p.pronamespace
+             WHERE ns.nspname = 'public' AND p.proname = 'push_send'),
+           'FALLA -> push_send() no existe o no contiene la URL')
+         || '  (debe coincidir con Settings > API > Project URL)'
 
--- ------------------------------------------------------------
--- 5. Dispositivos registrados. Si está a cero, el problema es del lado
---    de la app (permiso denegado en iOS, o el token nunca llegó a
---    register_device_token) y no del servidor: push_send() ni siquiera
---    hace la llamada HTTP cuando no hay ningún token.
--- ------------------------------------------------------------
-SELECT '5. dispositivos registrados' AS comprobacion,
-       CASE WHEN count(*) = 0
-            THEN 'FALLA -> ningún iPhone dado de alta; mirar el log de la app'
-            ELSE 'OK (' || count(*) || ' token(s), ' || count(DISTINCT user_id) || ' cuenta(s))'
-       END AS resultado
-FROM public.device_tokens;
+  UNION ALL
+  -- 4. Los disparadores. La invitación a grupo no está aquí: sale de
+  --    dentro de create_group_from_event(), no de un trigger.
+  SELECT 4, '4. disparadores push (5 esperados)',
+         coalesce(
+           'FALLA -> faltan o están deshabilitados: ' ||
+           (SELECT string_agg(e.nombre, ', ')
+              FROM (VALUES ('trg_join_request_push'), ('trg_approval_push'),
+                           ('trg_message_push'), ('trg_friend_request_push'),
+                           ('trg_event_repeat_push')) AS e(nombre)
+             WHERE NOT EXISTS (SELECT 1 FROM pg_trigger t
+                                WHERE t.tgname = e.nombre
+                                  AND NOT t.tgisinternal
+                                  AND t.tgenabled <> 'D')),
+           'OK (los 5 presentes y activos)')
 
--- Detalle por cuenta, para ver si es solo la tuya la que no tiene token.
-SELECT p.name, d.platform, d.created_at, d.updated_at
-FROM public.device_tokens d
-LEFT JOIN public.profiles p ON p.id = d.user_id
-ORDER BY d.updated_at DESC
-LIMIT 20;
+  UNION ALL
+  -- 5. Sin ningún token, push_send() ni siquiera hace la llamada HTTP:
+  --    el problema estaría en el teléfono (permiso denegado en iOS, o
+  --    falta la capability de Push Notifications en Xcode).
+  SELECT 5, '5. dispositivos registrados',
+         CASE WHEN (SELECT count(*) FROM public.device_tokens) = 0
+              THEN 'FALLA -> ningún iPhone dado de alta en device_tokens'
+              ELSE 'OK (' || (SELECT count(*) FROM public.device_tokens) || ' token(s), '
+                          || (SELECT count(DISTINCT user_id) FROM public.device_tokens) || ' cuenta(s))'
+         END
 
--- ------------------------------------------------------------
--- 6. Qué contestó la Edge Function en las últimas llamadas.
---
--- pg_net guarda las respuestas en net._http_response durante unas horas.
--- Aquí es donde aparece el error de verdad:
---   401  -> la clave del Vault no la acepta send-push
---   500  -> faltan los secretos de APNs (APNS_KEY_ID / TEAM_ID / .p8)
---   404  -> la función no está desplegada
---   200 con "sent": 0 -> APNs rechazó el token (el motivo va en results)
--- ------------------------------------------------------------
-SELECT created         AS cuando,
-       status_code     AS codigo,
-       left(content, 500) AS respuesta
-FROM   net._http_response
-ORDER  BY created DESC
-LIMIT  20;
+  UNION ALL
+  -- 5b. Qué cuenta tiene token y desde cuándo, por si es solo la tuya la
+  --     que no lo tiene.
+  SELECT 6, '5b. token de ' || coalesce(pr.name, '(sin nombre)'),
+         d.platform || ', alta ' || to_char(d.updated_at, 'YYYY-MM-DD HH24:MI')
+    FROM public.device_tokens d
+    LEFT JOIN public.profiles pr ON pr.id = d.user_id
 
--- ------------------------------------------------------------
--- 7. Llamadas encoladas que nunca se resolvieron. Muchas filas aquí con
---    pocas respuestas arriba = pg_net no está procesando la cola.
--- ------------------------------------------------------------
-SELECT count(*) AS peticiones_en_cola FROM net.http_request_queue;
+  UNION ALL
+  -- 6. Lo que contestó la Edge Function. pg_net guarda las respuestas
+  --    unas horas. Aquí es donde aparece el error de verdad.
+  SELECT 7, '6. respuestas de send-push',
+         'FALLA -> ninguna llamada registrada. O no se disparó nada, o '
+         || 'push_send() corta antes de llamar (mirar pasos 2 y 5)'
+   WHERE NOT EXISTS (SELECT 1 FROM net._http_response)
+
+  UNION ALL
+  --   401 -> la clave del Vault no la acepta send-push
+  --   404 -> la función no está desplegada
+  --   500 -> faltan los secretos de APNs (APNS_KEY_ID / TEAM_ID / .p8)
+  --   200 con "sent":0 -> APNs rechazó el token (el motivo va en results)
+  SELECT 8, '6. respuesta ' || to_char(x.created, 'YYYY-MM-DD HH24:MI'),
+         coalesce(x.status_code::text, 'sin código') || ' -> '
+         || left(coalesce(nullif(x.content, ''), x.error_msg, '(respuesta vacía)'), 300)
+    FROM (SELECT * FROM net._http_response ORDER BY created DESC LIMIT 10) x
+
+  UNION ALL
+  -- 7. Muchas peticiones en cola con pocas respuestas arriba = pg_net no
+  --    está procesando nada.
+  SELECT 9, '7. peticiones en cola sin resolver',
+         (SELECT count(*)::text FROM net.http_request_queue)
+
+) t
+ORDER BY n, paso DESC;
