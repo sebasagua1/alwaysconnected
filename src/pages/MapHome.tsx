@@ -765,7 +765,11 @@ export default function MapHome() {
 
   // Live user location → reuse a single marker, smooth camera updates
   useEffect(() => {
-    if (!mapRef.current || !mapLoaded || !userLocation) return;
+    // Se captura aquí y no se vuelve a leer mapRef.current dentro del async:
+    // la comprobación de arriba no vale para lo de dentro, porque la ref puede
+    // quedarse en null entre medias si el mapa se desmonta.
+    const map = mapRef.current;
+    if (!map || !mapLoaded || !userLocation) return;
     let cancelled = false;
 
     (async () => {
@@ -778,7 +782,7 @@ export default function MapHome() {
         el.innerHTML = '<div class="user-location-marker__pulse"></div><div class="user-location-marker__dot"></div>';
         userMarkerRef.current = new mapboxgl.Marker({ element: el })
           .setLngLat(lngLat)
-          .addTo(mapRef.current);
+          .addTo(map);
       } else {
         userMarkerRef.current.setLngLat(lngLat);
       }
@@ -787,11 +791,11 @@ export default function MapHome() {
       // off-screen, and only while they haven't moved the map themselves.
       if (!hasAutoCenteredRef.current) {
         hasAutoCenteredRef.current = true;
-        mapRef.current.flyTo({ center: lngLat, zoom: 16, duration: 900, essential: true });
+        map.flyTo({ center: lngLat, zoom: 16, duration: 900, essential: true });
       } else if (followUserRef.current) {
-        const bounds = mapRef.current.getBounds();
+        const bounds = map.getBounds();
         if (bounds && !bounds.contains(lngLat)) {
-          mapRef.current.easeTo({ center: lngLat, duration: 800 });
+          map.easeTo({ center: lngLat, duration: 800 });
         }
       }
     })();
