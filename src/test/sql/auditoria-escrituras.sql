@@ -21,7 +21,7 @@ GRANT USAGE ON SCHEMA auth TO authenticated, anon;
 CREATE TABLE public.institutions (id uuid PRIMARY KEY, name text);
 
 CREATE TABLE public.profiles (
-  id uuid PRIMARY KEY REFERENCES auth.users(id),
+  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   name text,
   campus_id uuid
 );
@@ -40,8 +40,8 @@ $$;
 -- ------------------------------------------------------------
 CREATE TABLE public.friendships (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  requester_id uuid NOT NULL REFERENCES auth.users(id),
-  addressee_id uuid NOT NULL REFERENCES auth.users(id),
+  requester_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  addressee_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'blocked')),
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (requester_id, addressee_id)
@@ -71,7 +71,7 @@ $$;
 -- ------------------------------------------------------------
 CREATE TABLE public.events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  creator_id uuid NOT NULL REFERENCES auth.users(id),
+  creator_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   title text NOT NULL,
   description text,
   address text,
@@ -79,6 +79,8 @@ CREATE TABLE public.events (
   max_spots int,
   current_spots int NOT NULL DEFAULT 0,
   institution_id uuid REFERENCES public.institutions(id),
+  lat double precision,
+  lng double precision,
   starts_at timestamptz NOT NULL DEFAULT now() + interval '1 day',
   ends_at timestamptz NOT NULL DEFAULT now() + interval '1 day 1 hour',
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -146,7 +148,7 @@ CREATE TRIGGER trg_event_rate_limit BEFORE INSERT ON public.events
 CREATE TABLE public.event_participants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id uuid NOT NULL REFERENCES public.events(id) ON DELETE CASCADE,
-  user_id uuid NOT NULL REFERENCES auth.users(id),
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   status text NOT NULL DEFAULT 'joined' CHECK (status IN ('joined', 'pending', 'declined')),
   checked_in boolean NOT NULL DEFAULT false,
   rating int,
@@ -233,7 +235,7 @@ $$;
 CREATE TABLE public.groups (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
-  created_by uuid NOT NULL REFERENCES auth.users(id),
+  created_by uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE public.groups ENABLE ROW LEVEL SECURITY;
@@ -244,7 +246,7 @@ CREATE POLICY "Creators can update groups" ON public.groups FOR UPDATE TO authen
 CREATE TABLE public.group_members (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   group_id uuid NOT NULL REFERENCES public.groups(id) ON DELETE CASCADE,
-  user_id uuid NOT NULL REFERENCES auth.users(id),
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   joined_at timestamptz NOT NULL DEFAULT now(),
   last_read_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (group_id, user_id)
@@ -410,8 +412,38 @@ CREATE TRIGGER trg_event_repeat_push AFTER INSERT ON public.events
   FOR EACH ROW WHEN (NEW.repeated_from IS NOT NULL)
   EXECUTE FUNCTION public.on_event_repeat_push();
 
+-- ------------------------------------------------------------
+-- reports (20260325002039 + 20260817010000)
+-- ------------------------------------------------------------
+CREATE TABLE public.reports (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  reporter_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  reported_user_id uuid REFERENCES auth.users(id) ON DELETE CASCADE,  -- SEC-09
+  reported_event_id uuid REFERENCES public.events(id) ON DELETE CASCADE,
+  reported_message_id uuid REFERENCES public.messages(id) ON DELETE CASCADE,
+  reason text NOT NULL,
+  details text,
+  status text NOT NULL DEFAULT 'pending',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT reports_one_target CHECK (
+    (reported_user_id    IS NOT NULL)::int
+  + (reported_event_id   IS NOT NULL)::int
+  + (reported_message_id IS NOT NULL)::int = 1
+  )
+);
+ALTER TABLE public.reports ENABLE ROW LEVEL SECURITY;
+CREATE UNIQUE INDEX reports_unique_user_target
+  ON public.reports (reporter_id, reported_user_id) WHERE reported_user_id IS NOT NULL;
+CREATE POLICY "Reporters can view their own reports" ON public.reports FOR SELECT TO authenticated
+  USING (auth.uid() = reporter_id);
+CREATE POLICY "Users can create reports" ON public.reports FOR INSERT TO authenticated
+  WITH CHECK (
+    auth.uid() = reporter_id
+    AND (reported_user_id IS NULL OR reported_user_id <> auth.uid())
+  );
+
 GRANT USAGE ON SCHEMA public TO authenticated, anon;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO authenticated;
 GRANT INSERT, UPDATE, DELETE ON
   public.events, public.event_participants, public.friendships,
-  public.groups, public.messages TO authenticated;
+  public.groups, public.messages, public.reports TO authenticated;

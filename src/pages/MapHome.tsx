@@ -121,6 +121,8 @@ export default function MapHome() {
   // responde la primera consulta, "no hay eventos" y "todavia no se sabe" son
   // el mismo array vacio.
   const [eventsLoaded, setEventsLoaded] = useState(false);
+  // Se alcanzó MAX_MAP_EVENTS y hay más eventos de los que caben (PERF-03).
+  const [eventsTruncated, setEventsTruncated] = useState(false);
   const pickMarkerRef = useRef<MapboxMarker | null>(null);
   const userMarkerRef = useRef<MapboxMarker | null>(null);
   const hasAutoCenteredRef = useRef(false);
@@ -175,7 +177,13 @@ export default function MapHome() {
         // ralentizan, se quedan clavados. Por `starts_at` ascendente, así que
         // lo que se recorta es lo que empieza más tarde.
         .order('starts_at', { ascending: true })
-        .limit(MAX_MAP_EVENTS);
+        // Uno más del tope, a propósito. El tope está bien puesto —mil
+        // marcadores clavan el webview— pero antes recortaba EN SILENCIO: si
+        // se llenaban los 500, lo que empieza más tarde simplemente no salía y
+        // nadie tenía forma de saber por qué su propio evento no aparecía.
+        // Pidiendo uno de más se distingue "hay 500" de "hay más de 500"; la
+        // fila sobrante se descarta antes de pintar.
+        .limit(MAX_MAP_EVENTS + 1);
       if (cancelled || seq !== lastFetch) return;
       // Se marca cargado tambien cuando hay error: si no, un fallo de red
       // dejaria el mapa sin pines Y sin estado vacio, o sea en blanco.
@@ -189,7 +197,10 @@ export default function MapHome() {
         toast({ title: i18n.t('errors.eventsLoad'), variant: 'destructive' });
         return;
       }
-      if (data) setEvents(data.map(toMapEvent));
+      if (data) {
+        setEventsTruncated(data.length > MAX_MAP_EVENTS);
+        setEvents(data.slice(0, MAX_MAP_EVENTS).map(toMapEvent));
+      }
     };
 
     // Una sola fila, por clave primaria y con los mismos filtros que la carga
@@ -1117,6 +1128,23 @@ export default function MapHome() {
             >
               {t('map.clearFilters')}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* El mapa se quedó en los 500 más próximos. Discreto y arriba, porque
+          no es un error: es que hay tanta actividad que no cabe. Sin esto, el
+          recorte era invisible y quien no veía su propio evento no tenía nada
+          que mirar para entender por qué. */}
+      {!pickingLocation && viewMode === 'map' && eventsTruncated && !showCreate && !selectedEvent && (
+        <div className="absolute inset-x-0 top-0 pt-safe z-10 px-6 pointer-events-none">
+          <div
+            role="status"
+            className="mt-2 mx-auto sm:max-w-[430px] bg-card/95 backdrop-blur-md rounded-xl shadow-lifted border border-border px-4 py-2 text-center"
+          >
+            <p className="text-xs text-muted-foreground">
+              {t('map.truncated', { count: MAX_MAP_EVENTS })}
+            </p>
           </div>
         </div>
       )}

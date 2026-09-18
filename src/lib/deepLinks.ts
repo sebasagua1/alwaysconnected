@@ -87,10 +87,15 @@ export function routeFromPushData(data: unknown): string | null {
     // El plan repetido aparece en el mapa, como cualquier evento nuevo.
     case 'event_repeat':
       return '/';
-    // Ambas se atienden desde "Mis eventos": ahí están los que organizas, con
-    // sus solicitudes, y los que te han aprobado.
+    // Todas se atienden desde "Mis eventos": ahí están los que organizas, con
+    // sus solicitudes, los que te han aprobado, y aquellos a los que te
+    // apuntaste y han cambiado o se han cancelado. El mapa no sirve para esto
+    // último: un evento cancelado ya no se pinta, así que llevar ahí dejaría a
+    // la persona mirando una pantalla que no explica nada.
     case 'join_request':
     case 'approval':
+    case 'event_changed':
+    case 'event_cancelled':
       return '/events';
     default:
       return null;

@@ -178,6 +178,14 @@ export function EditEventSheet({ event, onClose, onSaved }: Props) {
 
             {/* Privacy */}
             <PrivacySelector value={privacy} onChange={setPrivacy} />
+
+            {/* Antes se podía cambiar la hora o el sitio y nadie se enteraba:
+                la gente se presentaba donde ya no era. Ahora el disparador
+                trg_event_change_push avisa, y conviene decirlo aquí para que
+                el aviso no llegue de sorpresa a quien organiza. */}
+            {event.current_spots > 0 && (
+              <p className="text-xs text-muted-foreground">{t('edit.notifyNotice')}</p>
+            )}
           </div>
         </div>
 

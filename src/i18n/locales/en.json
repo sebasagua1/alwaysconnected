@@ -220,7 +220,7 @@
     "noAttendees": "No one has joined yet",
     "cancelEvent": "Cancel event",
     "cancelEventConfirm": "Cancel this event?",
-    "cancelEventConfirmDesc": "This will hide the event for everyone on the map.",
+    "cancelEventConfirmDesc": "The event will disappear from the map, and we'll notify everyone who joined.",
     "cancelEventFailed": "The event could not be cancelled. Reload and try again.",
     "rateStarOne": "1 star",
     "rateStarOther": "{{count}} stars",
@@ -298,7 +298,8 @@
     "titleRequired": "Title is required",
     "endBeforeStart": "End time must be after start time",
     "spotsBelowCurrent": "Capacity cannot be lower than current attendees",
-    "spotsAtMin": "Minimum: {{count}} (current attendees)"
+    "spotsAtMin": "Minimum: {{count}} (current attendees)",
+    "notifyNotice": "If you change the time, the place or the privacy, we'll notify everyone who joined."
   },
   "categories": {
     "study": "Study",
@@ -488,7 +489,8 @@
       "tomorrow": "Tomorrow",
       "live": "Happening now",
       "startsIn": "Starts in {{count}} min"
-    }
+    },
+    "truncated": "Showing the {{count}} soonest events. Use the filters to narrow it down."
   },
   "rpcErrors": {
     "notAuthenticated": "Your session expired. Sign in again.",
@@ -501,7 +503,7 @@
     "messageDeleted": "This message was deleted",
     "emptyMessage": "The message can't be empty",
     "messageLocked": "That change isn't allowed",
-    "campusLocked": "Your campus is already set. To change it, contact support.",
+    "campusLocked": "Your campus is set once. To change it, go to Profile → your verification card and request the change there.",
     "campusNotAvailable": "That campus isn't available.",
     "campusNotAllowed": "Your email belongs to another university. Choose one of its campuses.",
     "requestRateLimit": "You sent several requests today. Try again tomorrow.",
@@ -726,7 +728,14 @@
       "locked": "Too many attempts with that code. Request a new one.",
       "noPending": "There's no active code. Request a new one.",
       "manualReview": "We couldn't complete automatic verification. We'll review it manually."
-    }
+    },
+    "campusChange": "Wrong campus, or did you move?",
+    "campusChangeDesc": "Your campus is set once, so nobody can switch communities while keeping the verified badge. Tell us which one you want and we'll review it by hand.",
+    "campusChangeLabel": "Which campus, and why?",
+    "campusChangePh": "E.g. I moved to Campus Monterrey this semester",
+    "campusChangeSend": "Send request",
+    "campusChangeSent": "Request sent",
+    "campusChangeSentDesc": "We review these by hand. Your account keeps working in the meantime."
   },
   "afterEvent": {
     "title": "What's next?",

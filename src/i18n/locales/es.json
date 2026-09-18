@@ -220,7 +220,7 @@
     "noAttendees": "Nadie se ha unido aún",
     "cancelEvent": "Cancelar evento",
     "cancelEventConfirm": "¿Cancelar este evento?",
-    "cancelEventConfirmDesc": "Esto ocultará el evento para todos en el mapa.",
+    "cancelEventConfirmDesc": "El evento desaparecerá del mapa y avisaremos por notificación a quienes se apuntaron.",
     "cancelEventFailed": "No se pudo cancelar el evento. Recarga e inténtalo de nuevo.",
     "rateStarOne": "1 estrella",
     "rateStarOther": "{{count}} estrellas",
@@ -298,7 +298,8 @@
     "titleRequired": "El título es obligatorio",
     "endBeforeStart": "La hora de fin debe ser después del inicio",
     "spotsBelowCurrent": "El cupo no puede ser menor al número de asistentes actuales",
-    "spotsAtMin": "Mínimo: {{count}} (asistentes actuales)"
+    "spotsAtMin": "Mínimo: {{count}} (asistentes actuales)",
+    "notifyNotice": "Si cambias la hora, el lugar o la privacidad, avisaremos por notificación a quienes se apuntaron."
   },
   "categories": {
     "study": "Estudio",
@@ -488,7 +489,8 @@
       "tomorrow": "Mañana",
       "live": "En curso",
       "startsIn": "Empieza en {{count}} min"
-    }
+    },
+    "truncated": "Mostrando los {{count}} eventos más próximos. Usa los filtros para acotar."
   },
   "rpcErrors": {
     "notAuthenticated": "Tu sesión expiró. Vuelve a iniciar sesión.",
@@ -501,7 +503,7 @@
     "messageDeleted": "Este mensaje fue eliminado",
     "emptyMessage": "El mensaje no puede estar vacío",
     "messageLocked": "Ese cambio no está permitido",
-    "campusLocked": "Tu campus ya está asignado. Para cambiarlo, escribe a soporte.",
+    "campusLocked": "Tu campus se fija una sola vez. Para cambiarlo, entra a Perfil → tu tarjeta de verificación y pide el cambio ahí.",
     "campusNotAvailable": "Ese campus no está disponible.",
     "campusNotAllowed": "Tu correo es de otra universidad. Elige uno de sus campus.",
     "requestRateLimit": "Enviaste varias solicitudes hoy. Inténtalo mañana.",
@@ -726,7 +728,14 @@
       "locked": "Demasiados intentos con ese código. Pide uno nuevo.",
       "noPending": "No hay un código activo. Pide uno nuevo.",
       "manualReview": "No pudimos completar la verificación automática. La revisaremos manualmente."
-    }
+    },
+    "campusChange": "¿Te equivocaste o cambiaste de campus?",
+    "campusChangeDesc": "El campus se fija una sola vez para que nadie se mueva de comunidad conservando la insignia. Cuéntanos a cuál quieres cambiarte y lo revisamos a mano.",
+    "campusChangeLabel": "¿A qué campus y por qué?",
+    "campusChangePh": "Ej.: me cambié a Campus Monterrey este semestre",
+    "campusChangeSend": "Enviar solicitud",
+    "campusChangeSent": "Solicitud enviada",
+    "campusChangeSentDesc": "La revisamos a mano. Tu cuenta sigue funcionando igual mientras tanto."
   },
   "afterEvent": {
     "title": "¿Qué sigue?",
