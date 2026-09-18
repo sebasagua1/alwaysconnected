@@ -59,11 +59,36 @@ serve(async (req) => {
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
   // 1. Avatares del usuario (Storage no se borra en cascada).
-  const { data: files } = await admin.storage.from("avatars").list(user.id);
-  if (files?.length) {
-    await admin.storage
+  //
+  // list() de supabase-js usa limit: 100 POR DEFECTO y no pagina sola. La
+  // versión anterior pedía una sola página, así que a partir del archivo 101
+  // los avatares sobrevivían al borrado de la cuenta en un bucket público —
+  // justo lo contrario de lo que promete privacy.html §9 ("de forma inmediata
+  // y definitiva") y de lo que pide Apple en la guideline 5.1.1(v).
+  //
+  // El offset no avanza entre vueltas: cada remove() vacía la página que
+  // acabamos de leer, así que la siguiente vuelta vuelve a pedir la primera.
+  const LOTE = 100;
+  for (;;) {
+    const { data: archivos, error: listError } = await admin.storage
       .from("avatars")
-      .remove(files.map((f) => `${user.id}/${f.name}`));
+      .list(user.id, { limit: LOTE });
+
+    if (listError) {
+      console.error("list avatars failed", user.id, listError.message);
+      break;
+    }
+    if (!archivos?.length) break;
+
+    const { error: removeError } = await admin.storage
+      .from("avatars")
+      .remove(archivos.map((f) => `${user.id}/${f.name}`));
+
+    if (removeError) {
+      console.error("remove avatars failed", user.id, removeError.message);
+      break;
+    }
+    if (archivos.length < LOTE) break;
   }
 
   // 2. La cuenta. El resto cae por CASCADE desde auth.users.

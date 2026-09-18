@@ -510,7 +510,9 @@
     "notAnAttendee": "Only attendees can create a group from this event.",
     "eventNotStarted": "You can create the group once the event has started.",
     "inviteNotFound": "This invite is no longer available.",
-    "inviteAlreadyAnswered": "You already answered this invite."
+    "inviteAlreadyAnswered": "You already answered this invite.",
+    "participationLocked": "That change to your participation isn't allowed.",
+    "eventLocked": "That change to the event isn't allowed."
   },
   "legal": {
     "privacy": "Privacy Policy",

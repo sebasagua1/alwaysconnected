@@ -146,8 +146,11 @@ npx capacitor-assets generate --ios
 
 ### Notas de revisión de Apple para esta app
 - Apple pide justificar el uso de ubicación → el texto del Info.plist debe ser claro.
-- Si dejas el login con Google, Apple **exige** también ofrecer **Sign in with Apple**
-  (guideline 4.8). Por eso, para el primer envío, lo más simple es email+contraseña solo.
+- Si ofreces login con Google, Apple **exige** también ofrecer **Sign in with Apple**
+  (guideline 4.8). **Ya está hecho**: la app ofrece los tres métodos (correo, Google y
+  Apple) y `socialAuth.ts` implementa los dos sociales. El consejo que había aquí
+  —«para el primer envío, lo más simple es email+contraseña solo»— quedó obsoleto
+  cuando se implementó el login social, y contradecía lo que la app hace de verdad.
 - Ten a la mano una **cuenta de prueba institucional** para los revisores (si el registro está
   restringido a un dominio institucional).
 

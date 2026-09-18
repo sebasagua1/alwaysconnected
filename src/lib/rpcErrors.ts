@@ -31,6 +31,10 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   EVENT_NOT_STARTED: 'rpcErrors.eventNotStarted',
   INVITE_NOT_FOUND: 'rpcErrors.inviteNotFound',
   INVITE_ALREADY_ANSWERED: 'rpcErrors.inviteAlreadyAnswered',
+  // Los lanzan los guardianes de 20260920000000. No los produce ninguna ruta
+  // de la app: si alguien los ve, es que algo está llamando a la API a mano.
+  PARTICIPATION_FIELD_LOCKED: 'rpcErrors.participationLocked',
+  EVENT_FIELD_LOCKED: 'rpcErrors.eventLocked',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {

@@ -510,7 +510,9 @@
     "notAnAttendee": "Solo quien fue al evento puede crear un grupo con él.",
     "eventNotStarted": "El grupo se puede crear cuando el evento ya empezó.",
     "inviteNotFound": "Esta invitación ya no está disponible.",
-    "inviteAlreadyAnswered": "Ya respondiste esta invitación."
+    "inviteAlreadyAnswered": "Ya respondiste esta invitación.",
+    "participationLocked": "Ese cambio en tu participación no está permitido.",
+    "eventLocked": "Ese cambio en el evento no está permitido."
   },
   "legal": {
     "privacy": "Aviso de privacidad",

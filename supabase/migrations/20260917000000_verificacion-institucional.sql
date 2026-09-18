@@ -39,8 +39,12 @@ CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pg_trgm  WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
--- Misma definicion que en 20260916000000_buscar-personas.sql: la que se
--- aplique primero la crea y la otra la deja igual.
+-- Aqui se define search_normalize(). El comentario anterior la daba por
+-- compartida con 20260916000000_buscar-personas.sql, un archivo que no esta
+-- en el repositorio (vive sin aplicar en la rama feat/buscar-personas). La
+-- busqueda de personas de hoy es un ilike sobre public_profiles
+-- (Friends.tsx), no esta funcion. Si algun dia entra esa migracion, el
+-- CREATE OR REPLACE deja la definicion igual y no hay conflicto.
 CREATE OR REPLACE FUNCTION public.search_normalize(_t text)
 RETURNS text
 LANGUAGE sql
