@@ -9,6 +9,7 @@
 // El .p8 nunca sale de los secretos de Supabase.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { reintentarEnSandbox, tokenMuerto } from "../_shared/apns.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 
@@ -255,17 +256,18 @@ serve(async (req) => {
 
   const results: SendResult[] = [];
   for (const { token } of tokens) {
-    // Producción primero; si el token es de un build de desarrollo, APNs
-    // responde BadDeviceToken y se reintenta en sandbox. Así la misma función
-    // sirve para tu iPhone de pruebas y para TestFlight sin configurar nada.
+    // Producción primero; si el token es de un build de desarrollo, APNs lo
+    // rechaza y se reintenta en sandbox. Así la misma función sirve para tu
+    // iPhone de pruebas y para TestFlight sin configurar nada. Cuál de los dos
+    // motivos de rechazo manda Apple no es predecible: ver reintentarEnSandbox.
     let r = await pushTo(HOSTS.production, token, jwt, payload);
-    if (r.status === 400 && r.reason === "BadDeviceToken") {
+    const huboReintento = reintentarEnSandbox(r);
+    if (huboReintento) {
       r = await pushTo(HOSTS.sandbox, token, jwt, payload);
     }
 
-    // 410 Unregistered = la app se desinstaló. Se limpia para no arrastrar
-    // tokens muertos que fallan en cada envío.
-    if (r.status === 410 || r.reason === "Unregistered") {
+    // Tokens que ya no sirven: se limpian para no arrastrarlos en cada envío.
+    if (tokenMuerto(r, huboReintento)) {
       await admin.from("device_tokens").delete().eq("token", token);
     }
 
@@ -277,7 +279,11 @@ serve(async (req) => {
     if (r.status !== 200) {
       console.error(
         `APNs rechazó ${token.slice(0, 8)}… para ${targetUserId}: ` +
-          `${r.status} ${r.reason ?? "sin motivo"}`,
+          `${r.status} ${r.reason ?? "sin motivo"}` +
+          (huboReintento ? " (falló en producción y en sandbox)" : "") +
+          (r.reason === "DeviceTokenNotForTopic"
+            ? ` — comprueba que APNS_BUNDLE_ID (${APNS_BUNDLE_ID}) sea el Bundle ID de la app`
+            : ""),
       );
     }
 
