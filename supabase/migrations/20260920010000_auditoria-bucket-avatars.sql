@@ -7,8 +7,8 @@
 --
 -- Sin file_size_limit y sin allowed_mime_types. La politica de INSERT solo
 -- acotaba la CARPETA (la primera parte del nombre tiene que ser tu uuid).
--- El cliente se comporta bien —reduce la imagen y sube siempre a
--- `<uuid>/avatar.jpg` con contentType image/jpeg— pero eso es una
+-- El cliente se comporta bien --reduce la imagen y sube siempre a
+-- `<uuid>/avatar.jpg` con contentType image/jpeg-- pero eso es una
 -- convencion del cliente, no una restriccion.
 --
 -- Por la API directa, una cuenta autenticada podia:

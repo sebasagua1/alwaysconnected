@@ -8727,8 +8727,8 @@ COMMIT;
 --
 -- Sin file_size_limit y sin allowed_mime_types. La politica de INSERT solo
 -- acotaba la CARPETA (la primera parte del nombre tiene que ser tu uuid).
--- El cliente se comporta bien —reduce la imagen y sube siempre a
--- `<uuid>/avatar.jpg` con contentType image/jpeg— pero eso es una
+-- El cliente se comporta bien --reduce la imagen y sube siempre a
+-- `<uuid>/avatar.jpg` con contentType image/jpeg-- pero eso es una
 -- convencion del cliente, no una restriccion.
 --
 -- Por la API directa, una cuenta autenticada podia:
@@ -9073,7 +9073,7 @@ COMMIT;
 -- UX-03 (P3). groups.created_by era NOT NULL ... ON DELETE CASCADE, asi que
 -- borrar una cuenta eliminaba TODOS los grupos que esa persona hubiera
 -- creado y, en cascada, sus group_members y todos los messages de esos
--- grupos — incluidos los de las demas personas.
+-- grupos -- incluidos los de las demas personas.
 --
 -- Desde la privacidad de quien se va es correcto que desaparezca lo suyo.
 -- Para el resto del grupo es una perdida de datos inesperada causada por un
