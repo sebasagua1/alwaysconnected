@@ -274,7 +274,7 @@ CREATE TABLE public.messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   group_id uuid REFERENCES public.groups(id) ON DELETE CASCADE,
   event_id uuid REFERENCES public.events(id) ON DELETE CASCADE,
-  sender_id uuid NOT NULL,
+  sender_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   content text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz,
