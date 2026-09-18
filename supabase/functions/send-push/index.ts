@@ -106,6 +106,14 @@ const HOSTS = {
 
 type SendResult = { token: string; ok: boolean; status: number; reason?: string };
 
+// Cuánto tiempo guarda APNs el aviso si el teléfono está apagado, sin
+// cobertura o con la batería a cero. SIN esta cabecera el valor por defecto es
+// 0, que significa "inténtalo una vez y, si no entra, tíralo": justo el caso
+// de alguien que deja el móvil en la mochila y luego dice que no le llegan las
+// notificaciones. Una hora es lo razonable para avisos sociales — pasado ese
+// rato, la solicitud o el mensaje ya se ven mejor abriendo la app.
+const APNS_EXPIRATION_SECONDS = 60 * 60;
+
 async function pushTo(
   host: string,
   token: string,
@@ -119,6 +127,7 @@ async function pushTo(
       "apns-topic": APNS_BUNDLE_ID,
       "apns-push-type": "alert",
       "apns-priority": "10",
+      "apns-expiration": String(Math.floor(Date.now() / 1000) + APNS_EXPIRATION_SECONDS),
       "content-type": "application/json",
     },
     body: JSON.stringify(payload),
@@ -258,6 +267,18 @@ serve(async (req) => {
     // tokens muertos que fallan en cada envío.
     if (r.status === 410 || r.reason === "Unregistered") {
       await admin.from("device_tokens").delete().eq("token", token);
+    }
+
+    // Al registro de la función, no solo a la respuesta: los envíos de verdad
+    // los dispara la base con pg_net, que descarta el cuerpo. Sin esta línea,
+    // un "no me llegan las notificaciones" por TopicDisallowed (bundle id que
+    // no cuadra) o InvalidProviderToken (.p8 de otro equipo) no deja rastro en
+    // ningún sitio y no hay por dónde empezar a mirar.
+    if (r.status !== 200) {
+      console.error(
+        `APNs rechazó ${token.slice(0, 8)}… para ${targetUserId}: ` +
+          `${r.status} ${r.reason ?? "sin motivo"}`,
+      );
     }
 
     results.push({ token: token.slice(0, 8) + "…", ok: r.status === 200, status: r.status, reason: r.reason });
