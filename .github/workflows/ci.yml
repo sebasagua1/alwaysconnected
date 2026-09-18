@@ -1,0 +1,64 @@
+# Verificación automática de cada push y cada pull request.
+#
+# Existe porque hasta ahora no había NADA que impidiera que una regresión
+# llegara a main: las 380 pruebas solo corrían cuando alguien se acordaba de
+# ejecutarlas a mano. La auditoría del 2026-09-18 lo señaló como el hueco de
+# proceso con peor relación coste/riesgo del proyecto (OPS-01).
+#
+# El paso que más valor da no es el de las pruebas, es `schema:check`: el
+# consolidado full_schema.sql se quedó una vez diez migraciones atrás y
+# cualquiera que levantara un proyecto nuevo desde él se encontraba una base
+# SIN aislamiento por institución. No falló nada visible; simplemente estaba
+# mal. Eso ya no puede volver a pasar sin que esto se ponga rojo.
+#
+# Las variables VITE_ de abajo son FICTICIAS a propósito. No son secretos ni
+# hacen falta: el cliente de Supabase se crea al importar el módulo, así que
+# sin ellas revienta cualquier prueba que lo importe aunque sea de refilón.
+# Nada de este workflow habla con Supabase, ni con Vercel, ni con Apple.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    env:
+      VITE_SUPABASE_URL: https://dummy.supabase.co
+      VITE_SUPABASE_PUBLISHABLE_KEY: dummy-anon-key
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # tsc -b, no `tsc --noEmit` a secas: el tsconfig raíz tiene "files": []
+      # y solo referencias, así que sin -b sale con éxito SIEMPRE, incluso con
+      # errores de sintaxis. Ese comando no comprobaba nada.
+      - name: Tipos
+        run: npx tsc -b --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      # Incluye auditoriaEscrituras.sql.test.ts, que levanta un Postgres en
+      # memoria (PGlite) y comprueba que los huecos de autorización de la
+      # auditoría siguen cerrados. Las 39 pruebas de RLS contra un proyecto
+      # Supabase de verdad siguen omitidas: piden VITE_TEST_SUPABASE_URL y
+      # VITE_TEST_SUPABASE_ANON_KEY de un proyecto DEDICADO, que aún no existe.
+      - name: Pruebas
+        run: npm test
+
+      - name: El consolidado está al día
+        run: npm run schema:check
+
+      - name: Build de producción
+        run: npm run build

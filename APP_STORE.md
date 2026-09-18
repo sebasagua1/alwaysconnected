@@ -139,10 +139,39 @@ npx capacitor-assets generate --ios
 
 1. En **appstoreconnect.apple.com** → Apps → **+** → crea la app con el mismo Bundle ID.
 2. Rellena ficha: nombre, descripción, categoría, política de privacidad (URL obligatoria),
-   capturas de pantalla (usa el simulador), y el **cuestionario de privacidad**
-   (declara: ubicación, correo, contenido de usuario).
+   capturas de pantalla (usa el simulador), y el **cuestionario de privacidad**.
+   Lo que hay que declarar está ya escrito en dos sitios que **tienen que coincidir**:
+   `ios/App/App/PrivacyInfo.xcprivacy` y `public/privacy.html` §2. Hoy son: ubicación
+   precisa, correo, nombre, foto, contenido de usuario, actividad e identificador de
+   dispositivo (token de push). Nada de eso se usa para rastreo. Lee antes el aviso
+   sobre el SDK de Facebook, más abajo.
 3. En Xcode: **Product → Archive** → **Distribute App → App Store Connect → Upload**.
 4. En App Store Connect, asigna el build a la versión y envía a **revisión**.
+
+### El SDK de Facebook entra en el binario sin que la app lo use
+
+Pendiente de decisión antes de rellenar el cuestionario de privacidad (IOS-02 de la
+auditoría del 2026-09-18). Los hechos, comprobados:
+
+- `@capgo/capacitor-social-login` declara **FacebookCore y FacebookLogin como
+  dependencias fijas** de su único target de SPM. No hay forma de excluirlas por
+  configuración: lo comprobé en su `Package.swift`. Por eso `Package.resolved` lista
+  `facebook-ios-sdk`, y con él `app-check`, `appauth-ios` y `alamofire`.
+- La app **no lo usa ni lo inicializa**: `socialAuth.ts` solo llama a `initialize()`
+  con `apple` y `google`, y el plugin únicamente arranca el proveedor de Facebook si
+  se le pasa `facebook: { appId }`, cosa que no ocurre. Tampoco se llama nunca a
+  `setAdvertiserTrackingEnabled`.
+- El flag `providers: { facebook: false }` de la configuración de Capacitor **no
+  serviría**: en iOS el plugin solo lo respeta para `apple` y `twitter`.
+
+Apple clasifica el SDK de Facebook como SDK de *tracking*, así que su mera presencia
+obliga a contestar el cuestionario con cuidado, y `public/privacy.html` hoy no lo
+menciona. Dos salidas:
+
+| Opción | Qué implica |
+|---|---|
+| Quedarse como está | Declarar en el cuestionario que no se hace tracking (es cierto, no se inicializa) y añadir una línea a `privacy.html` explicando que el SDK viaja en el binario sin usarse. Cero riesgo de romper el login. |
+| Cambiar de plugin | `@capacitor-community/apple-sign-in` + `@codetrix-studio/capacitor-google-auth` no arrastran Facebook. Adelgaza el binario, pero **toca el inicio de sesión de una app ya publicada**: hay que reprobar los dos flujos de extremo a extremo en dispositivo real, incluido el caso del correo oculto de Apple. |
 
 ### Notas de revisión de Apple para esta app
 - Apple pide justificar el uso de ubicación → el texto del Info.plist debe ser claro.
