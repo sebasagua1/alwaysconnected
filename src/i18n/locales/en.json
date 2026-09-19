@@ -178,7 +178,7 @@
   },
   "leaderboard": {
     "title": "Leaderboard",
-    "pts": "pts",
+    "pts": "points",
     "empty": "No data yet"
   },
   "pointsHistory": {
