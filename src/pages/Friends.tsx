@@ -62,7 +62,7 @@ type LeaderEntry = {
   id: string | null;
   name: string | null;
   avatar_url: string | null;
-  reputation: number;
+  points: number;
 };
 
 type ActiveTab = 'friends' | 'groups' | 'leaderboard';
@@ -237,9 +237,15 @@ export default function Friends() {
     try {
       const { data, error } = await supabase
         .from('public_profiles')
-        .select('id, name, avatar_url, reputation')
-        .order('reputation', { ascending: false })
-        // Desempate: sin él, dos personas con la misma reputación podían
+        // Ordena por `points`, NO por `reputation`. Son dos monedas distintas:
+        // `points` sube al unirse a un evento, organizarlo, calificarlo o hacer
+        // check-in — que es lo que la gente hace y ve subir en su perfil—;
+        // `reputation` solo sube si OTRO se une a TU evento (+2) o al hacer
+        // check-in (+5). Ordenando por reputación, quien solo asiste a eventos
+        // sumaba cientos de puntos y veía el Top congelado en 0.
+        .select('id, name, avatar_url, points')
+        .order('points', { ascending: false })
+        // Desempate: sin él, dos personas con los mismos puntos podían
         // intercambiarse entre páginas y salir dos veces, o ninguna.
         .order('id', { ascending: true })
         .range(offset, offset + LEADER_PAGE_SIZE - 1);
@@ -812,7 +818,7 @@ export default function Friends() {
                 />
                 <p className="flex-1 font-semibold text-sm text-foreground truncate">{entry.name}</p>
                 <span className="text-sm font-bold text-primary shrink-0">
-                  {entry.reputation} {t('leaderboard.pts')}
+                  {entry.points} {t('leaderboard.pts')}
                 </span>
               </button>
             ))
