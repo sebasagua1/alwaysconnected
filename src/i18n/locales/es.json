@@ -178,7 +178,7 @@
   },
   "leaderboard": {
     "title": "Clasificación",
-    "pts": "pts",
+    "pts": "puntos",
     "empty": "Sin datos aún"
   },
   "pointsHistory": {

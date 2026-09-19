@@ -1,4 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// deepLinks.ts importa el cliente de Supabase en la cabecera, y crearlo exige
+// VITE_SUPABASE_URL. Sin .env —un clon recién hecho, o un worktree, donde el
+// archivo no llega porque está en .gitignore— el módulo revienta al cargarse
+// y se cae el archivo entero con "supabaseUrl is required", antes de ejecutar
+// una sola prueba. Aquí no se usa: todo lo que se prueba son funciones puras
+// de texto. Mismo apaño que en push.test.ts y los demás.
+vi.mock('@/integrations/supabase/client', () => ({ supabase: {} }));
+
 import { AUTH_CALLBACK_URL, authParamsFromUrl, routeFromPath, routeFromPushData, routeFromUrl } from '@/lib/deepLinks';
 
 const UUID = '3f1c8a54-6b2e-4d19-9a70-5c8e1b2d4f60';

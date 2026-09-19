@@ -8,6 +8,11 @@
 -- 2026-09-15), events y las funciones y disparadores de institución tal como
 -- quedaron en 20260828, 20260829 y 20260907. Si alguna de esas cambia en una
 -- migración nueva, hay que traerla aquí también.
+--
+-- Las claves ajenas hacia auth.users llevan ON DELETE CASCADE y
+-- profiles.email es NOT NULL, igual que en producción: sin eso, una prueba
+-- de borrado de cuenta o de alta sin correo pasaría aquí y fallaría allí
+-- (2026-09-18, al probar 20260920000000_perfiles-huerfanos.sql).
 -- ============================================================
 
 CREATE ROLE anon;
@@ -79,8 +84,8 @@ INSERT INTO public.institutions (id, name, slug, email_domains, lat, lng) VALUES
 -- profiles
 -- ------------------------------------------------------------
 CREATE TABLE public.profiles (
-  id                   uuid PRIMARY KEY REFERENCES auth.users(id),
-  email                text,
+  id                   uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email                text NOT NULL,
   name                 text,
   major                text,
   campus_id            uuid REFERENCES public.institutions(id),
@@ -174,7 +179,7 @@ GRANT EXECUTE ON FUNCTION public.same_institution(uuid, uuid) TO authenticated;
 
 CREATE TABLE public.events (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  creator_id     uuid NOT NULL,
+  creator_id     uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   title          text NOT NULL,
   privacy        text NOT NULL DEFAULT 'open',
   is_active      boolean NOT NULL DEFAULT true,
