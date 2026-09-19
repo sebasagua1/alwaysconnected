@@ -70,6 +70,9 @@ describe('routeFromPushData', () => {
     expect(routeFromPushData({ type: 'approval', event_id: UUID })).toBe('/events');
     expect(routeFromPushData({ type: 'group_invite', group_id: UUID })).toBe('/friends');
     expect(routeFromPushData({ type: 'event_repeat', event_id: UUID })).toBe('/');
+    // El aviso de que el evento empieza lleva a "Mis eventos", que es desde
+    // donde se abre la hoja con el botón de registrar asistencia.
+    expect(routeFromPushData({ type: 'event_started', event_id: UUID })).toBe('/events');
   });
 
   it('aguanta payloads incompletos o desconocidos', () => {

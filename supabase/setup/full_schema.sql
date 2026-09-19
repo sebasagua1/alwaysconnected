@@ -3,7 +3,7 @@
 -- Pegar en el SQL Editor de un proyecto Supabase NUEVO y ejecutar.
 --
 -- NO EDITAR A MANO: lo genera scripts/gen-full-schema.mjs.
--- Migraciones incluidas: 44 (hasta 20260919000000_despues-del-evento.sql).
+-- Migraciones incluidas: 46 (hasta 20260921010000_programar-push-inicio.sql).
 --
 -- NOTA: se omite el bloque de RLS sobre realtime.messages (tabla
 -- interna de Supabase) porque el SQL Editor no es su dueño. El
@@ -8255,3 +8255,161 @@ REVOKE EXECUTE ON FUNCTION public.notification_counts() FROM PUBLIC, anon;
 GRANT  EXECUTE ON FUNCTION public.notification_counts() TO authenticated;
 
 COMMIT;
+
+-- >>> 20260921000000_push-empieza-el-evento.sql <<<
+-- ============================================================
+-- Avisar por push cuando el evento empieza
+--
+-- Por que: el boton de "Registrar asistencia" solo existe dentro de la
+-- hoja del evento y solo mientras el evento esta en curso. Nada avisaba
+-- de que habia llegado ese momento, asi que habia que acordarse de abrir
+-- la app, buscar el evento y tocar. Medido el 2026-09-19: 43 eventos, 24
+-- ocasiones reales de hacer check-in, y CERO check-ins en toda la vida
+-- del proyecto. No fallaba nada: es que no se podia pulsar.
+--
+-- Por que un trabajo programado y no un disparador: "el evento empieza"
+-- no es un cambio en la base. Nadie escribe nada a las 19:00; sencillamente
+-- llega la hora. Los cuatro push de 20260827 cuelgan de un INSERT o un
+-- UPDATE, y aqui no hay ninguno al que engancharse. De ahi pg_cron, como
+-- el purgado de mensajes.
+--
+-- Lo que NO hace, a proposito:
+--   * No avisa a quien organiza: no puede hacer check-in (la interfaz se
+--     lo oculta con !isCreator y no tiene fila en event_participants).
+--   * No avisa a quien ya hizo check-in en esos primeros minutos.
+--   * No filtra por is_blocked: no es un aviso de otra persona, es el
+--     recordatorio de un plan al que te apuntaste tu.
+--
+-- ASCII puro (textos con U&'...'). Idempotente: se puede pegar dos veces.
+-- La programacion va aparte, en 20260921010000.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. La marca de "ya avisado"
+--
+-- En events y no en event_participants: el aviso se decide por evento
+-- (una pasada, una marca) aunque se mande a varias personas. Quien se
+-- una despues de que salga el aviso no lo recibe, y esta bien: se apunto
+-- con el evento ya empezado.
+-- ------------------------------------------------------------
+ALTER TABLE public.events
+  ADD COLUMN IF NOT EXISTS start_push_sent_at timestamptz;
+
+COMMENT ON COLUMN public.events.start_push_sent_at IS
+  'Cuando salio el aviso de "ya empezo". NULL = todavia no. Lo escribe notify_started_events().';
+
+-- Los eventos que YA empezaron cuando se aplica esto quedan marcados sin
+-- mandar nada. Sin esto, la primera pasada del cron avisaria de golpe de
+-- 34 eventos viejos, la mayoria terminados hace semanas. Los futuros se
+-- quedan en NULL y avisaran cuando les toque, que es lo que se quiere.
+UPDATE public.events
+SET start_push_sent_at = now()
+WHERE start_push_sent_at IS NULL
+  AND starts_at <= now();
+
+-- La consulta del cron solo mira los no avisados: un indice parcial la
+-- deja en nada por muchos eventos que se acumulen con el tiempo.
+CREATE INDEX IF NOT EXISTS events_start_push_pendiente_idx
+  ON public.events (starts_at)
+  WHERE start_push_sent_at IS NULL;
+
+
+-- ------------------------------------------------------------
+-- 2. El aviso
+--
+-- El UPDATE ... RETURNING de la CTE es lo que hace esto seguro: marca y
+-- reclama los eventos en la misma sentencia, asi que si dos pasadas del
+-- cron llegaran a solaparse, la segunda no ve ninguno y nadie recibe el
+-- aviso dos veces. Marcar antes de mandar y no despues es deliberado:
+-- push_send() ya se traga sus propios errores (se queda en WARNING), asi
+-- que "marcado pero no enviado" es el fallo bueno y "enviado dos veces"
+-- el malo.
+--
+-- Las dos ventanas:
+--   * ends_at > now()  -- si ya termino, no hay nada que registrar.
+--   * starts_at > now() - 1 hora  -- si el cron estuvo caido medio dia,
+--     que no llegue "ya empezo" de algo que empezo esta manana.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.notify_started_events()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r record;
+  v_n integer := 0;
+BEGIN
+  FOR r IN
+    WITH reclamados AS (
+      UPDATE public.events e
+      SET start_push_sent_at = now()
+      WHERE e.start_push_sent_at IS NULL
+        AND e.is_active
+        AND e.starts_at <= now()
+        AND e.starts_at > now() - interval '1 hour'
+        AND e.ends_at   > now()
+      RETURNING e.id, e.title, e.creator_id
+    )
+    SELECT rc.id AS event_id, rc.title, ep.user_id
+    FROM reclamados rc
+    JOIN public.event_participants ep ON ep.event_id = rc.id
+    WHERE ep.status = 'joined'
+      AND ep.user_id <> rc.creator_id
+      AND NOT ep.checked_in
+  LOOP
+    PERFORM public.push_send(
+      r.user_id,
+      U&'Ya empez\00F3',
+      U&'\00AB' || COALESCE(r.title, 'Tu plan') || U&'\00BB ya empez\00F3. Registra tu asistencia para sumar puntos.',
+      jsonb_build_object('type', 'event_started', 'event_id', r.event_id)
+    );
+    v_n := v_n + 1;
+  END LOOP;
+
+  RETURN v_n;
+END;
+$$;
+
+COMMENT ON FUNCTION public.notify_started_events() IS
+  'Avisa por push a quien se unio a un evento que acaba de empezar, para que registre su asistencia. Idempotente por events.start_push_sent_at. La llama el trabajo programado avisar-inicio-evento.';
+
+REVOKE EXECUTE ON FUNCTION public.notify_started_events() FROM PUBLIC, anon, authenticated;
+
+COMMIT;
+
+-- >>> 20260921010000_programar-push-inicio.sql <<<
+-- ============================================================
+-- Programar el aviso de "ya empezo el evento".
+--
+-- Va en su propio script por lo mismo que 20260825010000 y 20260920010000:
+-- el SQL Editor ejecuta cada uno dentro de una transaccion, y si
+-- CREATE EXTENSION pg_cron fallara se llevaria por delante la columna, el
+-- indice y la funcion de 20260921000000, que es lo que de verdad importa.
+--
+-- Cada 5 minutos, no cada minuto: el aviso llega entre 0 y 5 minutos
+-- despues de la hora de inicio, que para un evento de 2 horas (la mediana
+-- medida) no se nota, y son 288 pasadas al dia en vez de 1440. La consulta
+-- ademas va por indice parcial sobre los no avisados, asi que cuando no
+-- hay nada que hacer no cuesta nada.
+--
+-- Si esto falla no pasa nada grave: la funcion esta puesta y se puede
+-- llamar a mano, o programar desde Database > Cron Jobs en el panel.
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+-- unschedule falla si el trabajo no existe, de ahi el envoltorio.
+DO $$
+BEGIN
+  PERFORM cron.unschedule('avisar-inicio-evento');
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
+
+SELECT cron.schedule(
+  'avisar-inicio-evento',
+  '*/5 * * * *',
+  $$SELECT public.notify_started_events()$$
+);
