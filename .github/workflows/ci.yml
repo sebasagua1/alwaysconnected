@@ -1,0 +1,61 @@
+# Comprobaciones automáticas de cada push y cada PR.
+#
+# Hasta ahora el repositorio no tenía ninguna: las 435 pruebas existían pero
+# solo corrían si alguien se acordaba de lanzarlas a mano. Las de check-in,
+# por ejemplo, llevaban meses sin ejecutarse en ningún sitio salvo el portátil.
+#
+# No necesita NINGÚN secreto: `vite build` compila sin las variables VITE_*.
+# Ojo con eso, que es justo la trampa que costó una tarde en Xcode Cloud:
+# que esto salga verde NO significa que la app arranque. Las variables se
+# comprueban donde de verdad importan, en el workflow de Xcode Cloud y en
+# Vercel. Aquí se comprueba que el código compila, pasa las pruebas y que
+# full_schema.sql sigue cuadrando con las migraciones.
+
+name: Comprobaciones
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Si alguien empuja dos veces seguidas a la misma rama, la primera tirada
+# sobra: se cancela en vez de tener dos corriendo y pagar el doble de espera.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # `npm ci` y no `npm install`: respeta package-lock.json al pie de la
+      # letra, que es lo que hace que la tirada sea reproducible.
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # Incluye el typecheck: `npm run build` es `tsc -b --noEmit && vite build`.
+      - name: Compilar
+        run: npm run build
+
+      # Las de SQL levantan un Postgres en WebAssembly cada una; vitest.config.ts
+      # las mete en un solo proceso para que un runner de 2 núcleos no se ahogue.
+      - name: Pruebas
+        run: npm test
+
+      # La convención del proyecto es regenerar el esquema consolidado tras
+      # cada migración. Esto es lo que detecta que alguien se olvidó.
+      - name: full_schema.sql al día
+        run: npm run schema:check
