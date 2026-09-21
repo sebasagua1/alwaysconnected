@@ -216,6 +216,23 @@
   .shadow-lifted {
     box-shadow: 0 8px 32px rgba(0,0,0,0.12);
   }
+  /* Las mismas sombras, más hondas en oscuro.
+
+     Un negro al 8% sobre un fondo que ya es casi negro no se ve. Medido
+     como contraste entre la tarjeta y el halo que tiene pegado al borde:
+     en claro la sombra sube la separación de 1.075 a 1.284, y en oscuro
+     con el mismo 8% se quedaba en 1.142 — las 43 tarjetas de la app
+     perdían su relieve y quedaban planas sobre el fondo. Al 55% y al 70%
+     el despegue vuelve a leerse como en claro.
+
+     Solo cambia el alfa: la geometría es la misma, así que ninguna
+     tarjeta se mueve ni ocupa distinto. */
+  .dark .shadow-soft {
+    box-shadow: 0 4px 24px rgba(0,0,0,0.55);
+  }
+  .dark .shadow-lifted {
+    box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+  }
 }
 
 /* Hide scrollbar */
