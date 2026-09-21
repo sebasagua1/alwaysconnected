@@ -44,7 +44,7 @@ La carpeta `ios/` **ya está en el repositorio**, así que no hay que generarla:
 capacidades, entitlements y número de build están versionados. Basta con:
 
 ```bash
-cd ~/Developer/tec-spotter-app
+cd ~/Developer/alwaysconnected
 npm run ios:sync    # build web + copia el dist al proyecto nativo
 ```
 
@@ -188,7 +188,7 @@ menciona. Dos salidas:
 ## Resumen de comandos (cuando ya tengas Xcode)
 
 ```bash
-cd ~/Developer/tec-spotter-app
+cd ~/Developer/alwaysconnected
 npm run ios:sync
 npm run ios:open
 # …destino "Any iOS Device (arm64)" → Product → Archive → Distribute App
