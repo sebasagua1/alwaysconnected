@@ -359,4 +359,39 @@
   .user-location-marker__pulse {
     display: none;
   }
+
+  /* Las animaciones que vienen de tailwind.config y de tailwindcss-animate.
+     Se quedaban fuera: quien pide menos movimiento seguía viendo las ocho
+     hojas subir desde abajo y los cinco fundidos, que es justo el tipo de
+     desplazamiento grande que marea a quien activa este ajuste.
+
+     Se apagan poniendo la animación en su fotograma final en lugar de
+     quitarla: `animation: none` sobre un elemento que parte de
+     translateY(100%) lo dejaría fuera de la pantalla para siempre. Con
+     duración casi cero la hoja aparece ya colocada.
+
+     Los data-[state] son los de Radix (hojas, diálogos, menús), que usa
+     las mismas utilidades bajo otro nombre. */
+  .animate-slide-up,
+  .animate-slide-down,
+  .animate-fade-in,
+  .animate-scale-in,
+  .animate-accordion-down,
+  .animate-accordion-up,
+  [data-state='open'].animate-in,
+  [data-state='closed'].animate-out,
+  .animate-in,
+  .animate-out {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+  }
+
+  /* Y las transiciones, por el mismo motivo: el `transition ease-in-out` de
+     las hojas de Radix mueve igual aunque su animación ya no lo haga. */
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+  }
 }
