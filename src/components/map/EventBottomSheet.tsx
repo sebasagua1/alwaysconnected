@@ -20,6 +20,7 @@ import { EditEventSheet } from '@/components/map/EditEventSheet';
 import { useAuthStore } from '@/stores/authStore';
 import { supabase } from '@/integrations/supabase/client';
 import { getCurrentPosition } from '@/lib/geo';
+import { isWithinCheckInWindow } from '@/lib/eventWindow';
 import { useToast } from '@/hooks/use-toast';
 import { ModerationMenu } from '@/components/moderation/ModerationMenu';
 import { UserAvatar } from '@/components/ui/user-avatar';
@@ -74,19 +75,20 @@ export function EventBottomSheet({ event, onClose }: Props) {
   const [submittingRating, setSubmittingRating] = useState(false);
   const isCreator = user?.id === event.creator_id;
 
-  const [isOngoing, setIsOngoing] = useState(() => {
-    const now = Date.now();
-    return now >= new Date(event.starts_at).getTime() && now <= new Date(event.ends_at).getTime();
-  });
+  // La ventana de check-in la decide isWithinCheckInWindow, que abre 15 min
+  // ANTES de starts_at igual que check_in_to_event() en la base de datos.
+  // Antes esto comparaba contra starts_at a pelo y esos 15 minutos de margen
+  // no le servían a nadie: el servidor los aceptaba y la app no los enseñaba.
+  const [canCheckIn, setCanCheckIn] = useState(() =>
+    isWithinCheckInWindow(event.starts_at, event.ends_at)
+  );
 
-  // Re-evaluate every 30 s so the check-in button appears/disappears at the real boundary
+  // Se recalcula cada 30 s para que el botón aparezca y desaparezca en el
+  // límite de verdad, sin esperar a que algo vuelva a renderizar.
   useEffect(() => {
-    const compute = () => {
-      const now = Date.now();
-      return now >= new Date(event.starts_at).getTime() && now <= new Date(event.ends_at).getTime();
-    };
-    setIsOngoing(compute());
-    const id = setInterval(() => setIsOngoing(compute()), 30_000);
+    const compute = () => isWithinCheckInWindow(event.starts_at, event.ends_at);
+    setCanCheckIn(compute());
+    const id = setInterval(() => setCanCheckIn(compute()), 30_000);
     return () => clearInterval(id);
   }, [event.starts_at, event.ends_at]);
 
@@ -643,7 +645,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
         )}
 
         {/* Check-in button — shown only when joined, not the creator, and event is live */}
-        {!checking && !isCreator && hasJoined && isOngoing && (
+        {!checking && !isCreator && hasJoined && canCheckIn && (
           checkedIn ? (
             <Button disabled variant="secondary" className="w-full mt-2 h-11 rounded-xl font-bold">
               {t('event.checkedIn')}
