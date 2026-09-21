@@ -29,6 +29,8 @@
     "emailPlaceholder": "you@email.com",
     "password": "Password",
     "passwordPlaceholder": "Password",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
     "createAccount": "Create Account",
     "signIn": "Sign In",
     "signUp": "Sign Up",

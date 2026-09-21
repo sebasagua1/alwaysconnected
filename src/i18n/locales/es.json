@@ -29,6 +29,8 @@
     "emailPlaceholder": "tu@correo.com",
     "password": "Contraseña",
     "passwordPlaceholder": "Contraseña",
+    "showPassword": "Mostrar contraseña",
+    "hidePassword": "Ocultar contraseña",
     "createAccount": "Crear cuenta",
     "signIn": "Iniciar sesión",
     "signUp": "Registrarse",
