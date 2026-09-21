@@ -117,6 +117,58 @@
     -moz-osx-font-smoothing: grayscale;
     overscroll-behavior: none;
   }
+
+  /* ---------------------------------------------------------------
+     Tacto nativo dentro del WebView.
+
+     Safari pinta un recuadro gris al tocar cualquier cosa pulsable y
+     saca la lupa y el menú de copiar al mantener el dedo. En una web
+     eso se espera; dentro de una app envuelta en Capacitor es lo que
+     delata que no es nativa. La app ya responde al toque por su cuenta
+     (active:scale-95 en la barra, active:scale-[0.98] en las tarjetas),
+     así que el recuadro del sistema solo estorba.
+
+     Se limita a los controles: el texto del chat y las descripciones de
+     los eventos siguen siendo seleccionables y copiables.
+     --------------------------------------------------------------- */
+  button,
+  [role='button'],
+  nav,
+  label,
+  a {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+  }
+  button,
+  [role='button'],
+  nav,
+  label {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  /* Los campos de texto se quedan fuera de lo anterior: sin esto, en iOS
+     no se puede colocar el cursor ni seleccionar lo que uno escribió. */
+  input,
+  textarea,
+  [contenteditable] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* ---------------------------------------------------------------
+     Un solo anillo de foco para todo.
+
+     El componente Button ya traía el suyo, pero la app usa 106 <button>
+     nativos y solo 4 lo definían: el resto se quedaba con el contorno
+     por defecto del navegador, distinto en cada plataforma y sin
+     relación con el color de la app. :focus-visible (y no :focus) para
+     que el anillo salga al navegar con teclado y no al tocar con el dedo.
+     --------------------------------------------------------------- */
+  :where(button, [role='button'], a, input, textarea, select, [tabindex]):focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+    border-radius: inherit;
+  }
 }
 
 @layer utilities {

@@ -6,6 +6,7 @@ import { Search, UserPlus, Users, MessageCircle, Check, X as XIcon, Plus, Trophy
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useStaggerReveal } from '@/hooks/useStaggerReveal';
 import {
   Dialog,
   DialogContent,
@@ -479,8 +480,13 @@ export default function Friends() {
     );
   };
 
+  // Entrada en cascada de las filas de las tres pestañas. El scope es la
+  // página entera y solo se mueve lo marcado con data-reveal, así no hace
+  // falta envolver cada pestaña en un contenedor extra.
+  const listScope = useStaggerReveal<HTMLDivElement>([activeTab, loading]);
+
   return (
-    <div className="min-h-screen pb-nav px-4 pt-safe">
+    <div ref={listScope} className="min-h-screen pb-nav px-4 pt-safe">
       <Helmet>
         <title>{pageTitle(t('friends.title'))}</title>
         <meta name="description" content={t('friends.metaDesc')} />
@@ -639,7 +645,7 @@ export default function Friends() {
             ) : null}
             {!loading &&
               friends.map((f) => (
-                <div key={f.id ?? ''} className="flex items-center justify-between bg-card rounded-xl p-3 shadow-soft">
+                <div key={f.id ?? ''} data-reveal className="flex items-center justify-between bg-card rounded-xl p-3 shadow-soft">
                   <button
                     onClick={() => setViewingUserId(f.id ?? null)}
                     aria-label={t('friends.viewProfile', { name: f.name ?? '' })}
@@ -729,6 +735,7 @@ export default function Friends() {
               groups.map((g) => (
                 <button
                   key={g.id}
+                  data-reveal
                   onClick={() => navigate(`/groups/${g.id}`, { state: { from: 'groups' } })}
                   className={cn('w-full flex items-center gap-3 bg-card p-3 shadow-soft text-left', TAPPABLE, 'rounded-xl')}
                 >
@@ -785,6 +792,7 @@ export default function Friends() {
             leaderboard.map((entry, i) => (
               <button
                 key={entry.id ?? i}
+                data-reveal
                 onClick={() => setViewingUserId(entry.id)}
                 disabled={!entry.id}
                 aria-label={t('friends.viewProfile', { name: entry.name ?? '' })}
