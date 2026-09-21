@@ -172,6 +172,7 @@ export default function MyEvents() {
         {(['upcoming', 'past'] as const).map(tab => (
           <button
             key={tab}
+            aria-pressed={activeTab === tab}
             onClick={() => { setActiveTab(tab); setVisibleCount(PAGE_SIZE); }}
             className={cn(
               'inline-flex items-center justify-center min-h-[44px] px-5 rounded-full text-sm font-semibold transition-all',
