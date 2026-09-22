@@ -419,7 +419,18 @@ export default function Onboarding() {
         ))}
       </div>
 
-      <div ref={scrollRef} className="flex-1 flex flex-col overflow-y-auto">
+      {/* El padding horizontal está para que quepa el anillo de foco.
+
+          `overflow-y-auto` obliga al eje X a recortar también (si un eje no es
+          visible, el otro deja de serlo), y este contenedor medía exactamente
+          lo mismo que los campos que lleva dentro: 24 a 366, sin un píxel de
+          holgura. El anillo del Input sobresale 4px por lado, así que al
+          enfocar un campo se veía cortado a izquierda y derecha.
+
+          Los otros once contenedores con scroll de la app ya llevan px-4 o
+          px-5 y por eso no les pasa; este era el único sin nada. El -mx-1.5
+          compensa el px-1.5, de modo que nada se mueve de sitio. */}
+      <div ref={scrollRef} className="flex-1 flex flex-col overflow-y-auto -mx-1.5 px-1.5">
         {/* key={step} fuerza el remontaje para que la animación se dispare en
             cada paso; la dirección decide desde qué lado entra. */}
         <div key={step} className={direction === 'fwd' ? 'animate-step-in-right' : 'animate-step-in-left'}>
