@@ -83,6 +83,33 @@ export type Database = {
         }
         Relationships: []
       }
+      contact_settings: {
+        Row: {
+          created_at: string
+          discoverable: boolean
+          last_synced_at: string | null
+          notify_contacts_join: boolean
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          discoverable?: boolean
+          last_synced_at?: string | null
+          notify_contacts_join?: boolean
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          discoverable?: boolean
+          last_synced_at?: string | null
+          notify_contacts_join?: boolean
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       event_chat_state: {
         Row: {
           active_until: string | null
@@ -422,6 +449,24 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      invite_codes: {
+        Row: {
+          code: string
+          created_at: string
+          inviter_id: string
+        }
+        Insert: {
+          code: string
+          created_at?: string
+          inviter_id: string
+        }
+        Update: {
+          code?: string
+          created_at?: string
+          inviter_id?: string
+        }
+        Relationships: []
       }
       point_events: {
         Row: {
@@ -827,6 +872,44 @@ export type Database = {
           removed_at: string
         }[]
       }
+      my_contact_settings: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          discoverable: boolean
+          notify_contacts_join: boolean
+          last_synced_at: string | null
+          identifiers: number
+        }[]
+      }
+      set_contact_settings: {
+        Args: { _discoverable: boolean; _notify_join: boolean }
+        Returns: undefined
+      }
+      clear_contact_data: {
+        Args: Record<PropertyKey, never>
+        Returns: undefined
+      }
+      my_invite_code: {
+        Args: Record<PropertyKey, never>
+        Returns: string
+      }
+      log_invite_share: {
+        Args: { _channel: string; _recipients: number }
+        Returns: undefined
+      }
+      redeem_invite: {
+        Args: { _code: string }
+        Returns: {
+          inviter_id: string
+          name: string | null
+          avatar_url: string | null
+          relation: "none" | "outgoing" | "incoming" | "friends"
+        }[]
+      }
+      my_invite_stats: {
+        Args: Record<PropertyKey, never>
+        Returns: { shared: number; accepted: number }[]
+      }
       search_people: {
         Args: { _query: string; _limit?: number; _offset?: number }
         Returns: {
@@ -848,6 +931,7 @@ export type Database = {
           major: string | null
           mutual_friends: number
           shared_groups: number
+          in_contacts: boolean
         }[]
       }
       search_normalize: {

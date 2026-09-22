@@ -1,0 +1,7 @@
+/* Permission texts in English. The app name is written out: .strings files
+   don't expand build variables such as $(APP_BRAND_NAME). */
+"NSContactsUsageDescription" = "Always Connected uses the contacts you choose to find friends who are already on the app and to invite those who aren't. Your address book is never uploaded: only encrypted fingerprints of phone numbers and emails.";
+"NSLocationWhenInUseUsageDescription" = "Always Connected uses your location to show you nearby events on campus and to confirm your attendance (check-in).";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Always Connected uses your location to show you nearby events on campus and to confirm your attendance (check-in).";
+"NSCameraUsageDescription" = "Always Connected uses the camera so you can take a profile photo.";
+"NSPhotoLibraryUsageDescription" = "Always Connected accesses your photos so you can choose your profile photo.";

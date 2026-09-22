@@ -453,7 +453,18 @@ export default function Friends() {
         <meta property="og:description" content={t('friends.metaDesc')} />
         <meta property="og:url" content="/friends" />
       </Helmet>
-      <h1 className="text-2xl font-extrabold text-foreground mb-4">{t('friends.title')}</h1>
+      <div className="flex items-center justify-between gap-2 mb-4">
+        <h1 className="text-2xl font-extrabold text-foreground">{t('friends.title')}</h1>
+        {/* Contactos e invitaciones: nunca se pide el permiso sin pasar antes
+            por la pantalla que explica para qué. */}
+        <button
+          onClick={() => navigate('/friends/find')}
+          className="inline-flex items-center gap-1.5 min-h-[44px] px-3 rounded-full bg-primary/10 text-primary text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <UserPlus className="w-4 h-4" aria-hidden="true" />
+          {t('findFriends.entry')}
+        </button>
+      </div>
 
       {/* Tabs */}
       <div className="flex gap-2 mb-5">

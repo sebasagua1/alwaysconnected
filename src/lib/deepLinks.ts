@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import { PushNotifications } from '@capacitor/push-notifications';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
+import { savePendingInvite } from '@/lib/contacts';
 
 /**
  * Enlaces profundos y salto desde una notificación.
@@ -31,7 +32,16 @@ export const AUTH_CALLBACK_URL = `${APP_URL_SCHEME}://auth-callback`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Rutas sin parámetros que la app sabe abrir. Ver las <Route> de App.tsx. */
-const STATIC_ROUTES = new Set(['/', '/events', '/friends', '/profile']);
+const STATIC_ROUTES = new Set(['/', '/events', '/friends', '/profile', '/friends/find']);
+
+/** Código de invitación: 10 caracteres opacos (ver my_invite_code). */
+const INVITE = /^\/i\/([A-Za-z0-9]{10})$/;
+
+/** El código de un enlace de invitación, o null. */
+export function inviteCodeFromPath(path: string): string | null {
+  const clean = '/' + path.replace(/^\/+/, '').split('?')[0].split('#')[0];
+  return INVITE.exec(clean)?.[1] ?? null;
+}
 
 /**
  * Valida un camino contra las rutas reales de la app.
@@ -224,6 +234,21 @@ function go(route: string | null): void {
 /** Todo enlace entrante pasa por aquí: primero sesión, luego ruta. */
 async function handleUrl(url: string): Promise<void> {
   if (await consumeAuthCallback(url)) return;
+
+  // Una invitación no es una pantalla: se guarda el código (aunque no haya
+  // sesión todavía) y lo canjea PendingInvite en cuanto se entra.
+  try {
+    const parsed = new URL(url);
+    const path = parsed.protocol === `${APP_URL_SCHEME}:` ? `${parsed.host}${parsed.pathname}` : parsed.pathname;
+    const code = inviteCodeFromPath(path);
+    if (code) {
+      savePendingInvite(code);
+      go('/');
+      return;
+    }
+  } catch {
+    // No era una URL: sigue como cualquier otra.
+  }
   go(routeFromUrl(url));
 }
 

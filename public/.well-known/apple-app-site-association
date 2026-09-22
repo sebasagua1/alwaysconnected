@@ -1,0 +1,12 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["89RWP86552.com.alwaysconnected.app"],
+        "components": [
+          { "/": "/i/*", "comment": "Invitaciones: el codigo es opaco" }
+        ]
+      }
+    ]
+  }
+}

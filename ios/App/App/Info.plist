@@ -74,6 +74,10 @@
 	     el acto al tocarla. Ver EditProfileSheet.tsx. -->
 	<key>NSCameraUsageDescription</key>
 	<string>$(APP_BRAND_NAME) usa la cámara para que puedas tomarte una foto de perfil.</string>
+	<!-- Solo se pide desde "Encontrar amigos", tras una pantalla que explica
+	     para qué y que se puede rechazar. Traducciones en */InfoPlist.strings. -->
+	<key>NSContactsUsageDescription</key>
+	<string>$(APP_BRAND_NAME) usa los contactos que elijas para encontrar a amigos que ya están en la app e invitar a quien no. No se sube tu agenda: solo huellas cifradas de los teléfonos y correos.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>$(APP_BRAND_NAME) accede a tus fotos para que puedas elegir tu foto de perfil.</string>
 	<!-- La app solo usa encriptación estándar (HTTPS/TLS), exenta. Evita la

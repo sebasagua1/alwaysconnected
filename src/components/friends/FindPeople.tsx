@@ -21,6 +21,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
 import { useToast } from '@/hooks/use-toast';
 import { usePeopleSearch, type Relation } from '@/hooks/usePeopleSearch';
+import { useFriendActions } from '@/hooks/useFriendActions';
 import { rpcMessage } from '@/lib/rpcErrors';
 import { cn } from '@/lib/utils';
 
@@ -34,9 +35,9 @@ export type Person = {
   friendship_id: string | null;
   mutual_friends: number;
   shared_groups?: number;
+  /** Está en tus contactos (solo en sugerencias, tras buscar contactos). */
+  in_contacts?: boolean;
 };
-
-type Override = Pick<Person, 'relation' | 'friendship_id'>;
 
 interface Props {
   /** Lo que se ve cuando no se está buscando: solicitudes y lista de amigos. */
@@ -69,11 +70,11 @@ export function FindPeople({ children, onFriendsChanged, onMessage }: Props) {
   const [suggestions, setSuggestions] = useState<Person[] | null>(null);
   const [suggestionsFailed, setSuggestionsFailed] = useState(false);
 
-  // Lo que ha cambiado desde que llegó la lista (agregar, aceptar, cancelar),
-  // por id. Así un cambio se ve igual en la búsqueda, en las sugerencias y en
-  // la ficha, sin volver a pedir nada.
-  const [overrides, setOverrides] = useState<Record<string, Override>>({});
-  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  // Agregar, aceptar y cancelar, con lo que ha cambiado desde que llegó la
+  // lista guardado por id: así un cambio se ve igual en la búsqueda, en las
+  // sugerencias y en la ficha, sin volver a pedir nada.
+  const friendActions = useFriendActions(onFriendsChanged);
+  const { busy, add, accept, cancelRequest } = friendActions;
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [viewing, setViewing] = useState<Person | null>(null);
   const [cancelling, setCancelling] = useState<Person | null>(null);
@@ -94,106 +95,16 @@ export function FindPeople({ children, onFriendsChanged, onMessage }: Props) {
     if (active && suggestions === null) loadSuggestions();
   }, [active, suggestions, loadSuggestions]);
 
-  const withOverride = (p: Person): Person => ({ ...p, ...overrides[p.id] });
-  const setRelation = (id: string, o: Override) => setOverrides((prev) => ({ ...prev, [id]: o }));
-  const setBusyFor = (id: string, v: boolean) => setBusy((prev) => ({ ...prev, [id]: v }));
+  const withOverride = (p: Person): Person => friendActions.withOverride(p);
 
   const close = () => {
     setActive(false);
     setQuery('');
-    setOverrides({});
+    friendActions.reset();
     // Las sugerencias se piden de nuevo la próxima vez: quien acabas de
     // agregar ya no debe salir.
     setSuggestions(null);
     inputRef.current?.blur();
-  };
-
-  /** La fila real de la relación, tras un error que dice que ya existía. */
-  const refreshRelation = async (person: Person, previous: Override) => {
-    if (!user) return setRelation(person.id, previous);
-    const { data, error } = await supabase
-      .from('friendships')
-      .select('id, status, requester_id')
-      .or(`and(requester_id.eq.${user.id},addressee_id.eq.${person.id}),and(requester_id.eq.${person.id},addressee_id.eq.${user.id})`)
-      .maybeSingle();
-    if (error) return setRelation(person.id, previous);
-    if (!data) return setRelation(person.id, { relation: 'none', friendship_id: null });
-    setRelation(person.id, {
-      relation: data.status === 'accepted' ? 'friends' : data.requester_id === user.id ? 'outgoing' : 'incoming',
-      friendship_id: data.status === 'accepted' ? null : data.id,
-    });
-  };
-
-  const add = async (person: Person) => {
-    if (!user || busy[person.id]) return;
-    const previous: Override = { relation: person.relation, friendship_id: person.friendship_id };
-    setBusyFor(person.id, true);
-    setRelation(person.id, { relation: 'outgoing', friendship_id: null });
-    const { data, error } = await supabase
-      .from('friendships')
-      .insert({ requester_id: user.id, addressee_id: person.id, status: 'pending' })
-      .select('id')
-      .single();
-    setBusyFor(person.id, false);
-
-    if (!error && data) {
-      setRelation(person.id, { relation: 'outgoing', friendship_id: data.id });
-      toast({ title: t('friends.requestSent') });
-      return;
-    }
-    // Ya había algo entre las dos personas (otro dispositivo, o la lista
-    // estaba vieja): se enseña lo que hay de verdad, no un error.
-    if (error && /FRIEND_REQUEST_EXISTS|FRIEND_REQUEST_INCOMING|ALREADY_FRIENDS|23505/.test(`${error.message} ${error.code}`)) {
-      await refreshRelation(person, previous);
-      toast({ title: rpcMessage(error.code === '23505' ? 'FRIEND_REQUEST_EXISTS' : error.message, t) });
-      return;
-    }
-    setRelation(person.id, previous);
-    toast({ title: t('common.error'), description: rpcMessage(error?.message, t), variant: 'destructive' });
-  };
-
-  const accept = async (person: Person) => {
-    if (!person.friendship_id || busy[person.id]) return;
-    const previous: Override = { relation: person.relation, friendship_id: person.friendship_id };
-    setBusyFor(person.id, true);
-    setRelation(person.id, { relation: 'friends', friendship_id: null });
-    const { data, error } = await supabase
-      .from('friendships')
-      .update({ status: 'accepted' })
-      .eq('id', person.friendship_id)
-      .select('id');
-    setBusyFor(person.id, false);
-    // Sin filas: la solicitud ya no existe (la cancelaron).
-    if (error || !data?.length) {
-      await refreshRelation(person, previous);
-      toast({
-        title: error ? t('common.error') : t('friends.requestGone'),
-        description: error ? rpcMessage(error.message, t) : undefined,
-        variant: 'destructive',
-      });
-      return;
-    }
-    toast({ title: t('friends.requestAccepted') });
-    onFriendsChanged();
-  };
-
-  const cancelRequest = async (person: Person) => {
-    if (!person.friendship_id || busy[person.id]) return;
-    const previous: Override = { relation: person.relation, friendship_id: person.friendship_id };
-    setBusyFor(person.id, true);
-    setRelation(person.id, { relation: 'none', friendship_id: null });
-    const { error } = await supabase
-      .from('friendships')
-      .delete()
-      .eq('id', person.friendship_id)
-      .eq('status', 'pending');
-    setBusyFor(person.id, false);
-    if (error) {
-      setRelation(person.id, previous);
-      toast({ title: t('common.error'), description: rpcMessage(error.message, t), variant: 'destructive' });
-      return;
-    }
-    toast({ title: t('friends.requestCanceled') });
   };
 
   const actionFor = (p: Person, variant: 'row' | 'sheet') => {
@@ -250,7 +161,8 @@ export function FindPeople({ children, onFriendsChanged, onMessage }: Props) {
     const parts: string[] = [];
     // Primero lo que explica por qué sale; la carrera, si cabe. Al revés, una
     // carrera larga cortaba justo el "3 amigos en común".
-    if (p.mutual_friends > 0) parts.push(t('friends.mutualFriends', { count: p.mutual_friends }));
+    if (p.in_contacts) parts.push(t('findFriends.inYourContacts'));
+    else if (p.mutual_friends > 0) parts.push(t('friends.mutualFriends', { count: p.mutual_friends }));
     else if (p.shared_groups && p.shared_groups > 0) parts.push(t('friends.sharedGroups', { count: p.shared_groups }));
     if (p.major) parts.push(p.major);
     return parts.join(' · ');

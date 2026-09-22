@@ -2,6 +2,7 @@ import { Suspense } from 'react';
 import { BottomNav } from './BottomNav';
 import { PageTransition } from './PageTransition';
 import { useNotificationSync } from '@/hooks/useNotificationSync';
+import { PendingInvite } from '@/components/friends/PendingInvite';
 
 /** Rueda que ocupa solo el hueco del contenido, sin comerse la barra. */
 function ContentSpinner() {
@@ -27,6 +28,7 @@ export function AppShell() {
         <PageTransition />
       </Suspense>
       <BottomNav />
+      <PendingInvite />
     </div>
   );
 }
