@@ -18,6 +18,7 @@ const MyEvents = lazy(() => import('@/pages/MyEvents'));
 const Friends = lazy(() => import('@/pages/Friends'));
 const Profile = lazy(() => import('@/pages/Profile'));
 const GroupChat = lazy(() => import('@/pages/GroupChat'));
+const EventChat = lazy(() => import('@/pages/EventChat'));
 const NotFound = lazy(() => import('@/pages/NotFound'));
 const ResetPassword = lazy(() => import('@/pages/ResetPassword'));
 
@@ -105,6 +106,7 @@ const App = () => (
             <Route path="events" element={<MyEvents />} />
             <Route path="friends" element={<Friends />} />
             <Route path="groups/:id" element={<GroupChat />} />
+            <Route path="events/:eventId/chat" element={<EventChat />} />
             <Route path="profile" element={<Profile />} />
             {/* Dentro de AuthGate a propósito: la ruta padre es "/*" y captura
                 todo, así que un "*" hermano nunca llegaba a evaluarse y una URL

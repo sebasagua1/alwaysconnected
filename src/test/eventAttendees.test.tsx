@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import i18n from '@/i18n';
 import type { MapEvent } from '@/stores/eventStore';
 
@@ -37,7 +38,7 @@ describe('EventBottomSheet: quién va', () => {
       ],
       error: null,
     });
-    render(<EventBottomSheet event={evento} onClose={vi.fn()} />);
+    render(<MemoryRouter><EventBottomSheet event={evento} onClose={vi.fn()} /></MemoryRouter>);
     expect(rpc).toHaveBeenCalledWith('event_attendees', { _event_id: 'e1' });
     expect(await screen.findByRole('button', { name: 'Sebastián Villegas, organiza' })).toBeInTheDocument();
     expect(screen.getByText('Ana')).toBeInTheDocument();
@@ -53,7 +54,7 @@ describe('EventBottomSheet: quién va', () => {
       user_id: `u${i}`, name: `Persona${i} Apellido`, avatar_url: null, is_creator: i === 0,
     }));
     rpc.mockResolvedValue({ data: gente, error: null });
-    render(<EventBottomSheet event={{ ...evento, max_spots: 20, current_spots: 11 }} onClose={vi.fn()} />);
+    render(<MemoryRouter><EventBottomSheet event={{ ...evento, max_spots: 20, current_spots: 11 }} onClose={vi.fn()} /></MemoryRouter>);
     expect(await screen.findByText('Persona4')).toBeInTheDocument();
     expect(screen.queryByText('Persona5')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Ver a las 7 personas más' }));
@@ -63,7 +64,7 @@ describe('EventBottomSheet: quién va', () => {
 
   it('sin nadie más que quien organiza, invita a ser la primera persona', async () => {
     rpc.mockResolvedValue({ data: [{ user_id: 'org', name: 'Org', avatar_url: null, is_creator: true }], error: null });
-    render(<EventBottomSheet event={{ ...evento, current_spots: 0 }} onClose={vi.fn()} />);
+    render(<MemoryRouter><EventBottomSheet event={{ ...evento, current_spots: 0 }} onClose={vi.fn()} /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText('Aún no se ha unido nadie. Sé la primera persona.')).toBeInTheDocument());
   });
 });

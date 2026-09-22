@@ -83,6 +83,93 @@ export type Database = {
         }
         Relationships: []
       }
+      event_chat_state: {
+        Row: {
+          active_until: string | null
+          created_at: string
+          event_id: string
+          last_pushed_at: string | null
+          last_read_at: string
+          muted: boolean
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          active_until?: string | null
+          created_at?: string
+          event_id: string
+          last_pushed_at?: string | null
+          last_read_at?: string
+          muted?: boolean
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          active_until?: string | null
+          created_at?: string
+          event_id?: string
+          last_pushed_at?: string | null
+          last_read_at?: string
+          muted?: boolean
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      event_moderation_log: {
+        Row: {
+          action: "delete_message" | "remove_participant" | "readmit_participant"
+          actor_id: string | null
+          created_at: string
+          event_id: string
+          id: number
+          message_id: string | null
+          target_user_id: string | null
+        }
+        Insert: {
+          action: "delete_message" | "remove_participant" | "readmit_participant"
+          actor_id?: string | null
+          created_at?: string
+          event_id: string
+          id?: never
+          message_id?: string | null
+          target_user_id?: string | null
+        }
+        Update: {
+          action?: "delete_message" | "remove_participant" | "readmit_participant"
+          actor_id?: string | null
+          created_at?: string
+          event_id?: string
+          id?: never
+          message_id?: string | null
+          target_user_id?: string | null
+        }
+        Relationships: []
+      }
+      event_removals: {
+        Row: {
+          created_at: string
+          event_id: string
+          reason: string | null
+          removed_by: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          event_id: string
+          reason?: string | null
+          removed_by?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          event_id?: string
+          reason?: string | null
+          removed_by?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
       event_participants: {
         Row: {
           approval_seen: boolean
@@ -281,33 +368,42 @@ export type Database = {
           content: string
           created_at: string
           deleted_at: string | null
+          deleted_by: string | null
           edited_at: string | null
           event_id: string | null
           expires_at: string | null
           group_id: string | null
           id: string
+          is_announcement: boolean
+          mentions: string[]
           sender_id: string
         }
         Insert: {
           content: string
           created_at?: string
           deleted_at?: string | null
+          deleted_by?: string | null
           edited_at?: string | null
           event_id?: string | null
           expires_at?: string | null
           group_id?: string | null
           id?: string
+          is_announcement?: boolean
+          mentions?: string[]
           sender_id: string
         }
         Update: {
           content?: string
           created_at?: string
           deleted_at?: string | null
+          deleted_by?: string | null
           edited_at?: string | null
           event_id?: string | null
           expires_at?: string | null
           group_id?: string | null
           id?: string
+          is_announcement?: boolean
+          mentions?: string[]
           sender_id?: string
         }
         Relationships: [
@@ -618,6 +714,7 @@ export type Database = {
           unread_messages: number
           approvals: number
           group_invites: number
+          event_chat_unread: number
         }[]
       }
       create_group_from_event: {
@@ -666,6 +763,68 @@ export type Database = {
           last_message_at: string | null
           last_content: string | null
           last_sender_id: string | null
+        }[]
+      }
+      can_access_event_chat: {
+        Args: { _event_id: string }
+        Returns: boolean
+      }
+      event_chat_summary: {
+        Args: { _event_id: string }
+        Returns: {
+          can_access: boolean
+          is_organizer: boolean
+          removed: boolean
+          muted: boolean
+          last_read_at: string | null
+          unread: number
+          member_count: number
+        }[]
+      }
+      event_chat_members: {
+        Args: { _event_id: string }
+        Returns: {
+          user_id: string
+          name: string | null
+          avatar_url: string | null
+          is_organizer: boolean
+        }[]
+      }
+      mark_event_chat_read: {
+        Args: { _event_id: string }
+        Returns: undefined
+      }
+      set_event_chat_muted: {
+        Args: { _event_id: string; _muted: boolean }
+        Returns: boolean
+      }
+      set_event_chat_presence: {
+        Args: { _event_id: string; _active: boolean }
+        Returns: undefined
+      }
+      event_chat_unread: {
+        Args: Record<PropertyKey, never>
+        Returns: { event_id: string; unread: number }[]
+      }
+      moderate_event_message: {
+        Args: { _message_id: string }
+        Returns: undefined
+      }
+      remove_event_participant: {
+        Args: { _event_id: string; _user_id: string; _reason?: string }
+        Returns: undefined
+      }
+      readmit_event_participant: {
+        Args: { _event_id: string; _user_id: string }
+        Returns: undefined
+      }
+      event_removed_people: {
+        Args: { _event_id: string }
+        Returns: {
+          user_id: string
+          name: string | null
+          avatar_url: string | null
+          removed_at: string
         }[]
       }
       search_people: {

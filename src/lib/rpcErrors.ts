@@ -39,6 +39,14 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   EVENT_NOT_STARTED: 'rpcErrors.eventNotStarted',
   INVITE_NOT_FOUND: 'rpcErrors.inviteNotFound',
   INVITE_ALREADY_ANSWERED: 'rpcErrors.inviteAlreadyAnswered',
+  // Chat de actividad (20260923).
+  MESSAGE_RATE_LIMIT: 'rpcErrors.messageRateLimit',
+  ANNOUNCEMENT_NOT_ALLOWED: 'rpcErrors.announcementNotAllowed',
+  ANNOUNCEMENT_RATE_LIMIT: 'rpcErrors.announcementRateLimit',
+  NOT_A_CHAT_MEMBER: 'rpcErrors.notAChatMember',
+  NOT_THE_ORGANIZER: 'rpcErrors.notTheOrganizer',
+  REMOVED_FROM_EVENT: 'rpcErrors.removedFromEvent',
+  NOT_A_PARTICIPANT: 'rpcErrors.notAParticipant',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {

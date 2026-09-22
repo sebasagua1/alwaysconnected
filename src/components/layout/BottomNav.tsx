@@ -15,14 +15,15 @@ export function BottomNav() {
   const location = useLocation();
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { joinRequests, friendRequests, unreadMessages, approvals, groupInvites } = useNotificationStore();
+  const { joinRequests, friendRequests, unreadMessages, approvals, groupInvites, eventChatUnread } = useNotificationStore();
 
   // Amigos concentra dos cosas que esperan respuesta: quien te ha agregado y
   // quien te ha escrito.
   const badges: Record<string, number> = {
     // Mis eventos junta las dos direcciones: quien espera que le apruebes y
     // los eventos en los que acaban de aprobarte a ti.
-    '/events': joinRequests + approvals,
+    // y los chats de las actividades, que viven dentro de cada una.
+    '/events': joinRequests + approvals + eventChatUnread,
     '/friends': friendRequests + unreadMessages + groupInvites,
   };
 

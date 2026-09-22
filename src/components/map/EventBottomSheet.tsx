@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { MapEvent, useEventStore } from '@/stores/eventStore';
 import { EVENT_CATEGORIES } from '@/lib/constants';
@@ -14,7 +15,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import { Clock, MapPin, Users, X, Loader2, Pencil, Star } from 'lucide-react';
+import { Clock, MapPin, Users, X, Loader2, Pencil, Star, MessagesSquare, ChevronRight } from 'lucide-react';
 import { CATEGORY_ICONS } from '@/lib/categoryIcons';
 import { EditEventSheet } from '@/components/map/EditEventSheet';
 import { useAuthStore } from '@/stores/authStore';
@@ -74,6 +75,9 @@ export function EventBottomSheet({ event, onClose }: Props) {
   const [hoverRating, setHoverRating] = useState<number | null>(null);
   const [submittingRating, setSubmittingRating] = useState(false);
   const isCreator = user?.id === event.creator_id;
+  const navigate = useNavigate();
+  /** Mensajes sin leer en el chat del grupo; null mientras no se sabe. */
+  const [chatUnread, setChatUnread] = useState<number | null>(null);
 
   // La ventana de check-in la decide isWithinCheckInWindow, que abre 15 min
   // ANTES de starts_at igual que check_in_to_event() en la base de datos.
@@ -124,6 +128,22 @@ export function EventBottomSheet({ event, onClose }: Props) {
     fetchAttendees();
     return () => { cancelled = true; };
   }, [event.id, event.current_spots, attendeesVersion, t, toast]);
+
+  // El chat del grupo es para quien organiza y quien ya está dentro. Se pide
+  // el recuento aparte: si la base aún no tiene el chat (20260923 sin
+  // aplicar) la llamada falla y el botón simplemente no sale.
+  const inChat = isCreator || hasJoined;
+  useEffect(() => {
+    if (!inChat) { setChatUnread(null); return; }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase.rpc('event_chat_summary', { _event_id: event.id });
+      if (cancelled) return;
+      const row = Array.isArray(data) ? data[0] : data;
+      setChatUnread(!error && row?.can_access ? Number(row.unread ?? 0) : null);
+    })();
+    return () => { cancelled = true; };
+  }, [inChat, event.id]);
 
   // Solicitudes pendientes — solo las ve y resuelve el organizador.
   useEffect(() => {
@@ -211,6 +231,9 @@ export function EventBottomSheet({ event, onClose }: Props) {
       } else if (error.message?.includes('EVENT_FULL')) {
         setMyStatus(prevStatus);
         toast({ title: t('event.eventFull'), variant: 'destructive' });
+      } else if (error.message?.includes('REMOVED_FROM_EVENT')) {
+        setMyStatus(null);
+        toast({ title: t('rpcErrors.removedFromEvent'), variant: 'destructive' });
       } else {
         // Error desconocido: releer el estado real en vez de adivinarlo
         const { data: recheck } = await supabase
@@ -543,6 +566,33 @@ export function EventBottomSheet({ event, onClose }: Props) {
             </>
           )}
         </div>
+
+        {/* El chat del grupo: solo quien organiza o ya está dentro. */}
+        {!checking && inChat && chatUnread !== null && (
+          <button
+            onClick={() => navigate(`/events/${event.id}/chat`)}
+            className="w-full mb-4 flex items-center gap-3 min-h-[52px] px-3 rounded-xl border border-primary/30 bg-primary/5 text-left active:scale-[0.98] transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <MessagesSquare className="w-5 h-5 text-primary shrink-0" aria-hidden="true" />
+            <span className="flex-1 min-w-0">
+              <span className="block text-sm font-bold text-foreground">{t('eventChat.open')}</span>
+              <span className="block text-xs text-muted-foreground truncate">
+                {chatUnread > 0
+                  ? chatUnread === 1 ? t('eventChat.unreadOne') : t('eventChat.unreadOther', { count: chatUnread })
+                  : t('eventChat.openHint')}
+              </span>
+            </span>
+            {chatUnread > 0 && (
+              <span
+                aria-hidden="true"
+                className="min-w-[22px] h-[22px] px-1.5 rounded-full bg-destructive text-destructive-foreground text-xs font-bold flex items-center justify-center"
+              >
+                {chatUnread > 99 ? '99+' : chatUnread}
+              </span>
+            )}
+            <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" aria-hidden="true" />
+          </button>
+        )}
 
         {/* Terminó: qué hacer ahora, para quien organizó o fue. */}
         {!checking && eventEnded && user && (isCreator || hasJoined) && (

@@ -30,6 +30,8 @@ export function useNotificationSync() {
       approvals: Number(row.approvals ?? 0),
       // La base vieja no la devuelve: se queda en 0 hasta aplicar 20260919.
       groupInvites: Number((row as { group_invites?: number }).group_invites ?? 0),
+      // Igual: hasta aplicar 20260923 la base no la devuelve.
+      eventChatUnread: Number((row as { event_chat_unread?: number }).event_chat_unread ?? 0),
     });
   }, [user, setCounts]);
 

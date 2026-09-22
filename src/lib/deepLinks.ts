@@ -46,6 +46,10 @@ export function routeFromPath(path: string): string | null {
   const group = clean.match(/^\/groups\/([^/]+)$/);
   if (group && UUID.test(group[1])) return clean;
 
+  // El chat de una actividad.
+  const eventChat = clean.match(/^\/events\/([^/]+)\/chat$/);
+  if (eventChat && UUID.test(eventChat[1])) return clean;
+
   return null;
 }
 
@@ -80,6 +84,12 @@ export function routeFromPushData(data: unknown): string | null {
   switch (d.type) {
     case 'message':
       return typeof d.group_id === 'string' ? routeFromPath(`/groups/${d.group_id}`) : null;
+    // Chat de actividad: mensajes agrupados, menciones y avisos del
+    // organizador abren el chat de esa actividad (20260923000000).
+    case 'event_message':
+    case 'chat_mention':
+    case 'organizer_announcement':
+      return typeof d.event_id === 'string' ? routeFromPath(`/events/${d.event_id}/chat`) : null;
     // Las invitaciones a grupos se responden arriba de la pestaña Amigos.
     case 'friend_request':
     case 'group_invite':

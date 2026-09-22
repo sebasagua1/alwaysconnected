@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { CalendarDays, ChevronRight, Clock, Users } from 'lucide-react';
+import { CalendarDays, ChevronRight, Clock, MessagesSquare, Users } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
 import { useToast } from '@/hooks/use-toast';
@@ -36,6 +36,7 @@ export default function MyEvents() {
   const [visibleCount, setVisibleCount] = useState(10);
   const [selected, setSelected] = useState<EventWithParticipation | null>(null);
   const [pendingByEvent, setPendingByEvent] = useState<Record<string, number>>({});
+  const [chatUnreadByEvent, setChatUnreadByEvent] = useState<Record<string, number>>({});
   const PAGE_SIZE = 10;
 
   const fetchMyEvents = useCallback(async () => {
@@ -114,6 +115,13 @@ export default function MyEvents() {
         const { data: pending } = await supabase.rpc('pending_requests_by_event');
         setPendingByEvent(
           Object.fromEntries((pending ?? []).map((r) => [r.event_id, Number(r.pending)]))
+        );
+
+        // Mensajes sin leer del chat de cada actividad. Si la base todavía
+        // no tiene el chat, la llamada falla y la tarjeta queda como antes.
+        const { data: chatUnread } = await supabase.rpc('event_chat_unread');
+        setChatUnreadByEvent(
+          Object.fromEntries((chatUnread ?? []).map((r) => [r.event_id, Number(r.unread)]))
         );
 
         // Se marcan vistos aquí, ya con la lista pintada: el aviso se enseña
@@ -257,6 +265,12 @@ export default function MyEvents() {
                   {pendingByEvent[event.id] > 0 && (
                     <span className="px-2 py-0.5 rounded-full bg-destructive text-destructive-foreground text-xs font-bold">
                       {t('myEvents.requests', { count: pendingByEvent[event.id] })}
+                    </span>
+                  )}
+                  {chatUnreadByEvent[event.id] > 0 && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-bold">
+                      <MessagesSquare className="w-3 h-3" aria-hidden="true" />
+                      {t('eventChat.unreadChip', { count: chatUnreadByEvent[event.id] })}
                     </span>
                   )}
                   {event.justApproved && (
