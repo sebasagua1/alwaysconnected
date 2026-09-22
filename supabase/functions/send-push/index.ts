@@ -9,6 +9,7 @@
 // El .p8 nunca sale de los secretos de Supabase.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { reintentarEnSandbox, tokenMuerto } from "../_shared/apns.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 
@@ -106,6 +107,14 @@ const HOSTS = {
 
 type SendResult = { token: string; ok: boolean; status: number; reason?: string };
 
+// Cuánto tiempo guarda APNs el aviso si el teléfono está apagado, sin
+// cobertura o con la batería a cero. SIN esta cabecera el valor por defecto es
+// 0, que significa "inténtalo una vez y, si no entra, tíralo": justo el caso
+// de alguien que deja el móvil en la mochila y luego dice que no le llegan las
+// notificaciones. Una hora es lo razonable para avisos sociales — pasado ese
+// rato, la solicitud o el mensaje ya se ven mejor abriendo la app.
+const APNS_EXPIRATION_SECONDS = 60 * 60;
+
 async function pushTo(
   host: string,
   token: string,
@@ -119,6 +128,7 @@ async function pushTo(
       "apns-topic": APNS_BUNDLE_ID,
       "apns-push-type": "alert",
       "apns-priority": "10",
+      "apns-expiration": String(Math.floor(Date.now() / 1000) + APNS_EXPIRATION_SECONDS),
       "content-type": "application/json",
     },
     body: JSON.stringify(payload),
@@ -246,18 +256,35 @@ serve(async (req) => {
 
   const results: SendResult[] = [];
   for (const { token } of tokens) {
-    // Producción primero; si el token es de un build de desarrollo, APNs
-    // responde BadDeviceToken y se reintenta en sandbox. Así la misma función
-    // sirve para tu iPhone de pruebas y para TestFlight sin configurar nada.
+    // Producción primero; si el token es de un build de desarrollo, APNs lo
+    // rechaza y se reintenta en sandbox. Así la misma función sirve para tu
+    // iPhone de pruebas y para TestFlight sin configurar nada. Cuál de los dos
+    // motivos de rechazo manda Apple no es predecible: ver reintentarEnSandbox.
     let r = await pushTo(HOSTS.production, token, jwt, payload);
-    if (r.status === 400 && r.reason === "BadDeviceToken") {
+    const huboReintento = reintentarEnSandbox(r);
+    if (huboReintento) {
       r = await pushTo(HOSTS.sandbox, token, jwt, payload);
     }
 
-    // 410 Unregistered = la app se desinstaló. Se limpia para no arrastrar
-    // tokens muertos que fallan en cada envío.
-    if (r.status === 410 || r.reason === "Unregistered") {
+    // Tokens que ya no sirven: se limpian para no arrastrarlos en cada envío.
+    if (tokenMuerto(r, huboReintento)) {
       await admin.from("device_tokens").delete().eq("token", token);
+    }
+
+    // Al registro de la función, no solo a la respuesta: los envíos de verdad
+    // los dispara la base con pg_net, que descarta el cuerpo. Sin esta línea,
+    // un "no me llegan las notificaciones" por TopicDisallowed (bundle id que
+    // no cuadra) o InvalidProviderToken (.p8 de otro equipo) no deja rastro en
+    // ningún sitio y no hay por dónde empezar a mirar.
+    if (r.status !== 200) {
+      console.error(
+        `APNs rechazó ${token.slice(0, 8)}… para ${targetUserId}: ` +
+          `${r.status} ${r.reason ?? "sin motivo"}` +
+          (huboReintento ? " (falló en producción y en sandbox)" : "") +
+          (r.reason === "DeviceTokenNotForTopic"
+            ? ` — comprueba que APNS_BUNDLE_ID (${APNS_BUNDLE_ID}) sea el Bundle ID de la app`
+            : ""),
+      );
     }
 
     results.push({ token: token.slice(0, 8) + "…", ok: r.status === 200, status: r.status, reason: r.reason });

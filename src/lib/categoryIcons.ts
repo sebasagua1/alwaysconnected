@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import type { EventCategory } from './constants';
 
-type BadgeType = 'organizer' | 'explorer' | 'study_buddy' | 'team_player' | 'streak_7';
+export type BadgeType = 'organizer' | 'explorer' | 'study_buddy' | 'team_player' | 'streak_7';
 
 export const CATEGORY_ICONS: Record<EventCategory, LucideIcon> = {
   study: GraduationCap,

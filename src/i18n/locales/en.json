@@ -43,10 +43,10 @@
     "resetSentDesc": "If that address has an account, a link to choose a new password is on its way."
   },
   "onboarding": {
-    "campusTitle": "Your Campus",
-    "campusSubtitle": "Select your university or campus",
-    "campusSearch": "Search campuses…",
-    "campusEmpty": "No campuses found",
+    "campusTitle": "Your institution",
+    "campusSubtitle": "Search for your university, school or campus",
+    "campusSearch": "Name, acronym or city…",
+    "campusEmpty": "We couldn't find that institution.",
     "welcomeTitle": "Welcome!",
     "welcomeSubtitle": "Let's set up your profile",
     "fullName": "Full name",
@@ -73,7 +73,11 @@
     "campusLoadError": "We couldn't load the universities. Check your connection.",
     "campusRetry": "Try again",
     "campusVerifiedHint": "Your email is from {{university}}: choose your campus.",
-    "campusLabel": "Campus {{campus}}"
+    "campusLabel": "Campus {{campus}}",
+    "countryFilter": "Filter by country",
+    "allCountries": "All",
+    "institutionResults_one": "{{count}} institution",
+    "institutionResults_other": "{{count}} institutions"
   },
   "profile": {
     "title": "Profile",
@@ -198,7 +202,7 @@
   },
   "leaderboard": {
     "title": "Leaderboard",
-    "pts": "pts",
+    "pts": "points",
     "empty": "No data yet"
   },
   "pointsHistory": {
@@ -259,7 +263,11 @@
     "decline": "Decline",
     "requestApproved": "Request approved",
     "requestDeclined": "Request declined",
-    "organizer": "host"
+    "organizer": "host",
+    "you": "You",
+    "noAttendeesYet": "No one has joined yet. Be the first.",
+    "showAllAttendees": "See {{count}} more people",
+    "seeAll": "See all"
   },
   "create": {
     "title": "New Event",
@@ -390,7 +398,16 @@
     "explorer": "Explorer",
     "study_buddy": "Study Buddy",
     "team_player": "Team Player",
-    "streak_7": "7-Day Streak"
+    "streak_7": "7-Day Streak",
+    "how": {
+      "organizer": "Create {{count}} events",
+      "explorer": "Join {{count}} events",
+      "study_buddy": "Check in to {{count}} study sessions",
+      "team_player": "Join {{count}} sports events",
+      "streak_7": "Join events on {{count}} different days"
+    },
+    "earned": "Earned!",
+    "progress": "{{current}} of {{target}}"
   },
   "map": {
     "title": "Campus Event Map",
@@ -431,6 +448,70 @@
       "skip": "Skip",
       "done": "Done",
       "progress": "Step {{current}} of {{total}}"
+    },
+    "filters": {
+      "button": "Filters",
+      "buttonActive": "Filters, {{count}} active",
+      "title": "Filter events",
+      "when": "When",
+      "whenAny": "Any time",
+      "whenOptions": {
+        "now": "Now",
+        "next3h": "Next 3 h",
+        "today": "Today",
+        "tomorrow": "Tomorrow",
+        "weekend": "Weekend",
+        "week": "Next 7 days",
+        "range": "Pick dates"
+      },
+      "whenHints": {
+        "now": "Happening now or starting within 1 hour",
+        "next3h": "Anything happening in the next 3 hours"
+      },
+      "rangePick": "Tap the first and last day",
+      "rangeOne": "{{from}}",
+      "rangeMany": "{{from}} – {{to}}",
+      "dayPart": "Start time",
+      "dayParts": {
+        "morning": "Morning",
+        "afternoon": "Afternoon",
+        "evening": "Evening"
+      },
+      "dayPartHints": {
+        "morning": "5 AM–12 PM",
+        "afternoon": "12–7 PM",
+        "evening": "From 7 PM"
+      },
+      "duration": "Duration",
+      "durations": {
+        "short": "Up to 1 h",
+        "medium": "1 to 2 h",
+        "long": "Over 2 h"
+      },
+      "experience": "Type of experience",
+      "access": {
+        "direct": "Join instantly",
+        "approval": "Needs approval"
+      },
+      "size": {
+        "small": "Small group",
+        "large": "Large group"
+      },
+      "sizeHints": {
+        "small": "Up to 5 people",
+        "large": "6 people or more"
+      },
+      "onlyWithSpots": "Only with spots left",
+      "clear": "Clear filters",
+      "show_one": "Show 1 event",
+      "show_other": "Show {{count}} events",
+      "showNone": "No events match",
+      "removeChip": "Remove filter {{label}}",
+      "mapNoMatch": "No events match your filters",
+      "today": "Today",
+      "tomorrow": "Tomorrow",
+      "live": "Happening now",
+      "startsIn": "Starts in {{count}} min"
     }
   },
   "rpcErrors": {
@@ -452,7 +533,14 @@
     "friendRequestIncoming": "This person already sent you a request. Accept it.",
     "alreadyFriends": "You're already friends.",
     "friendRateLimit": "You sent a lot of requests in a row. Try again later.",
-    "friendshipLocked": "That change isn't allowed."
+    "friendshipLocked": "That change isn't allowed.",
+    "requestRateLimit": "You sent several requests today. Try again tomorrow.",
+    "invalidRequest": "Check the request details.",
+    "repeatNotAllowed": "Only the organizer or attendees can repeat a plan.",
+    "notAnAttendee": "Only attendees can create a group from this event.",
+    "eventNotStarted": "You can create the group once the event has started.",
+    "inviteNotFound": "This invite is no longer available.",
+    "inviteAlreadyAnswered": "You already answered this invite."
   },
   "legal": {
     "privacy": "Privacy Policy",
@@ -589,5 +677,115 @@
     "you": "You",
     "yesterday": "Yesterday",
     "noMessagesShort": "No messages yet"
+  },
+  "institutionTypes": {
+    "university": "University",
+    "technological_university": "Technological university",
+    "polytechnic_university": "Polytechnic university",
+    "technological_institute": "Technological institute",
+    "university_institution": "University institution",
+    "technological_institution": "Technological institution",
+    "technical_institution": "Technical institution",
+    "college": "College",
+    "community_college": "Community college",
+    "school": "School",
+    "other": "Educational institution"
+  },
+  "institutionRequest": {
+    "cta": "Ask us to add my institution",
+    "title": "Add my institution",
+    "desc": "We'll review it before adding it. Meanwhile you can pick the closest one or come back later.",
+    "name": "Institution name",
+    "country": "Country",
+    "city": "City (optional)",
+    "website": "Official website (optional)",
+    "submit": "Send request",
+    "sent": "Request sent",
+    "sentDesc": "Thanks. We'll let you know when it's added."
+  },
+  "verification": {
+    "title": "Verify your institution",
+    "yourInstitution": "Your institution",
+    "emailIntro": "We'll send a one-time code to your institutional email. Your sign-in email and sign-in method don't change.",
+    "emailLabel": "Institutional email",
+    "emailPh": "your.name@university.edu",
+    "studentIdLabel": "Student ID (optional)",
+    "studentIdHint": "Only you can see it. It isn't shown on your public profile.",
+    "sendCode": "Send code to my institutional email",
+    "sending": "Sending…",
+    "privacyNote": "We'll never ask for your university password. From your institutional email we only keep an irreversible fingerprint (so it can't verify two accounts) and a hidden version.",
+    "codeSent": "We sent a 6-digit code to {{email}}. Check your spam folder too.",
+    "codeLabel": "Code",
+    "verify": "Verify",
+    "verifying": "Verifying…",
+    "changeEmail": "Change email",
+    "resend": "Resend code",
+    "resendIn": "Resend in {{seconds}}s",
+    "verifiedToast": "Institution verified!",
+    "doneTitle": "Your institution is verified",
+    "doneEmail": "Verified with {{email}}",
+    "noAutomatic": "Your institution doesn't have automatic email verification yet. You can request a manual review; your account keeps working as usual.",
+    "chooseInstitutionFirst": "First choose your institution in your profile.",
+    "inReview": "Your verification is under review. We'll let you know when it's done; meanwhile your account works normally.",
+    "requestReview": "Request manual review",
+    "reviewRequested": "Review request sent",
+    "loadError": "We couldn't load your verification.",
+    "cardUnverified": "Your profile isn't verified yet",
+    "cardUnverifiedBody": "Verify your institution with your institutional email",
+    "cardPending": "Check your institutional email",
+    "cardPendingBody": "Enter the code we sent to {{email}}",
+    "cardReview": "Verification under review",
+    "cardReviewBody": "Your account keeps working while we review it",
+    "cardVerified": "Institution verified",
+    "errors": {
+      "invalidEmail": "That email isn't valid.",
+      "personalEmail": "Use the email your institution gave you, not a personal one.",
+      "invalidStudentId": "Check your student ID.",
+      "domainNotVerifiable": "That email can't verify this institution automatically. You can request a manual review.",
+      "institutionMismatch": "That email belongs to a different institution than your profile's. Request a manual review.",
+      "alreadyVerified": "This email already verifies your account.",
+      "cooldown": "Wait a moment before requesting another code.",
+      "rateLimited": "Too many attempts. Try again later.",
+      "unavailableNow": "Email verification isn't available right now.",
+      "sendFailed": "We couldn't send the code. Try again.",
+      "invalidCode_one": "Wrong code. {{count}} attempt left.",
+      "invalidCode_other": "Wrong code. {{count}} attempts left.",
+      "expired": "The code expired. Request a new one.",
+      "locked": "Too many attempts with that code. Request a new one.",
+      "noPending": "There's no active code. Request a new one.",
+      "manualReview": "We couldn't complete automatic verification. We'll review it manually."
+    }
+  },
+  "afterEvent": {
+    "title": "What's next?",
+    "metSomeone": "Met someone?",
+    "add": "Add",
+    "sent": "Sent",
+    "friends": "Friends",
+    "addAria": "Add {{name}} as a friend",
+    "repeat": "Repeat the plan",
+    "repeatWhen": "{{when}} · same time",
+    "repeatNotify_one": "We'll let the person who went know",
+    "repeatNotify_other": "We'll let the {{count}} people who went know",
+    "group": "Start a group with everyone who went",
+    "groupHint": "They get an invite and join if they accept",
+    "groupCreated_one": "Group created. We invited 1 person.",
+    "groupCreated_other": "Group created. We invited {{count}} people.",
+    "groupCreatedNone": "Group created.",
+    "creatingGroup": "Creating group…",
+    "repeatBanner": "Repeating “{{title}}”. When you publish, we'll let everyone who went know.",
+    "justEnded": "Just ended",
+    "whatsNext": "What's next?"
+  },
+  "groupInvites": {
+    "title": "Group invites",
+    "from": "{{name}} invited you",
+    "fromEvent": "{{name}} invited you · from “{{event}}”",
+    "accept": "Join",
+    "decline": "No thanks",
+    "accepted": "You joined the group",
+    "declined": "Invite declined",
+    "acceptAria": "Join {{group}}",
+    "declineAria": "Decline the invite to {{group}}"
   }
 }

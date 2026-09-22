@@ -53,6 +53,60 @@ supabase secrets set APP_ORIGIN=https://alwaysconnected.vercel.app
 El token de Mapbox va en `VITE_MAPBOX_TOKEN` y viaja en el bundle: es público
 por diseño y se restringe por dominio desde el panel de Mapbox.
 
+## Notificaciones push (iOS)
+
+Es el paso que más se olvida, y cuando falta **no da ningún error**: los avisos
+simplemente no llegan. `push_send()` está envuelta en un `EXCEPTION WHEN OTHERS`
+para que una push rota no tumbe el mensaje que la provocó, así que un fallo de
+configuración es completamente mudo.
+
+Hacen falta las cuatro cosas, y en este orden:
+
+1. **Desplegar la función**:
+
+   ```bash
+   supabase functions deploy send-push
+   ```
+
+2. **Los secretos de APNs** (Apple Developer → Keys → clave de tipo *Apple Push
+   Notifications service*, que se descarga una sola vez como `.p8`):
+
+   ```bash
+   supabase secrets set APNS_KEY_ID=XXXXXXXXXX
+   supabase secrets set APNS_TEAM_ID=YYYYYYYYYY
+   supabase secrets set APNS_BUNDLE_ID=com.alwaysconnected.app
+   supabase secrets set APNS_PRIVATE_KEY="$(cat AuthKey_XXXXXXXXXX.p8)"
+   ```
+
+   `APNS_BUNDLE_ID` tiene que ser **exactamente** el Bundle ID de la app; si no
+   cuadra, APNs responde `TopicDisallowed` y no entrega nada.
+
+3. **La clave de servidor en Vault**, que es de donde la saca la base para
+   llamar a la función. Va aparte a propósito: lleva la clave dentro y este
+   repositorio está en git.
+
+   ```sql
+   select vault.create_secret('<service_role_key>', 'service_role_key');
+   ```
+
+   Sin este secreto, `push_send()` escribe un `WARNING` y vuelve sin llamar a
+   nadie.
+
+4. **La capacidad en Xcode**: target App → Signing & Capabilities →
+   *+ Capability* → **Push Notifications**. Sin ella el iPhone nunca obtiene
+   token y `registerPush()` no tiene nada que registrar.
+
+### Cuando no llegan
+
+`diagnostico-push.sql` recorre la cadena entera (pg_net → Vault → disparadores →
+tokens → respuestas de la Edge Function) y marca `OK` o `FALLA` en cada eslabón.
+Se pega en el SQL Editor y no modifica nada. El primer `FALLA` es la causa.
+
+Las respuestas reales de APNs quedan en dos sitios: en `net._http_response`
+(lo que contestó la Edge Function, que es lo que consulta el paso 6 del script)
+y en el log de la propia función en el panel de Supabase, donde ahora se
+registra cada rechazo de APNs con su motivo.
+
 ## Moderación (revisar a diario)
 
 Apple exige actuar sobre el contenido reportado en menos de 24 h. La cola está en

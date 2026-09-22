@@ -1,0 +1,358 @@
+{
+  "note": "Foto de produccion al 2026-09-14 tras 20260917000000 (reconstruida en PGlite desde la replica de produccion; ids reales). Regenerar con: node scripts/import-institutions/import.mjs --print-snapshot-sql",
+  "universities": [
+    {
+      "id": "2c931b2c-9449-4ba7-b701-2a57c2ae2f62",
+      "slug": "tec",
+      "country_code": "MX",
+      "name": "Tecnológico de Monterrey",
+      "short_name": "Tec",
+      "institution_type": "university",
+      "city": null,
+      "state_region": null
+    },
+    {
+      "id": "d8700f55-9fd3-42d1-a199-fba956e5d78d",
+      "slug": "florida-state",
+      "country_code": "US",
+      "name": "Florida State University",
+      "short_name": "FSU",
+      "institution_type": "university",
+      "city": null,
+      "state_region": null
+    },
+    {
+      "id": "bcda7873-6322-4d24-8b49-428e6706ee7d",
+      "slug": "purdue",
+      "country_code": "US",
+      "name": "Purdue University",
+      "short_name": "Purdue",
+      "institution_type": "university",
+      "city": null,
+      "state_region": null
+    },
+    {
+      "id": "24ba682b-945a-4355-865a-dc65ec118861",
+      "slug": "icesi",
+      "country_code": "CO",
+      "name": "Universidad Icesi",
+      "short_name": "Icesi",
+      "institution_type": "university",
+      "city": null,
+      "state_region": null
+    },
+    {
+      "id": "9fa36a6f-f113-4788-90b2-5fc69430c851",
+      "slug": "javeriana",
+      "country_code": "CO",
+      "name": "Pontificia Universidad Javeriana",
+      "short_name": "Javeriana",
+      "institution_type": "university",
+      "city": null,
+      "state_region": null
+    },
+    {
+      "id": "5ef91efd-a109-48d3-8f68-2a9308ce8c5e",
+      "slug": "cesa",
+      "country_code": "CO",
+      "name": "Colegio de Estudios Superiores de Administración",
+      "short_name": "CESA",
+      "institution_type": "university",
+      "city": null,
+      "state_region": null
+    }
+  ],
+  "institutions": [
+    {
+      "id": "be062ad6-1a5d-4687-a71d-21c2ac7a8ad0",
+      "slug": "florida-state",
+      "name": "Florida State University",
+      "university_slug": "florida-state",
+      "campus_slug": "principal",
+      "campus_name": null,
+      "city": "Tallahassee"
+    },
+    {
+      "id": "2d5e3036-eed0-4398-92db-f92cb5f4dd4e",
+      "slug": "icesi",
+      "name": "Universidad Icesi",
+      "university_slug": "icesi",
+      "campus_slug": "principal",
+      "campus_name": null,
+      "city": "Cali"
+    },
+    {
+      "id": "3869753e-03d4-4ad9-ae96-2b7605117f4b",
+      "slug": "purdue",
+      "name": "Purdue University",
+      "university_slug": "purdue",
+      "campus_slug": "principal",
+      "campus_name": null,
+      "city": "West Lafayette"
+    },
+    {
+      "id": "1fe414c7-3136-4696-ac67-2b07a416e9cf",
+      "slug": "tec-ciudad-de-mexico",
+      "name": "Tecnológico de Monterrey, Campus Ciudad de México",
+      "university_slug": "tec",
+      "campus_slug": "ciudad-de-mexico",
+      "campus_name": "Ciudad de México",
+      "city": "Ciudad de México"
+    },
+    {
+      "id": "9269e0c2-1704-4264-8e26-294c7fddbf8a",
+      "slug": "tec-guadalajara",
+      "name": "Tecnológico de Monterrey, Campus Guadalajara",
+      "university_slug": "tec",
+      "campus_slug": "guadalajara",
+      "campus_name": "Guadalajara",
+      "city": "Zapopan"
+    },
+    {
+      "id": "a77a918e-5b0b-45b2-9a01-acdd4d61d08a",
+      "slug": "tec-monterrey",
+      "name": "Tecnológico de Monterrey, Campus Monterrey",
+      "university_slug": "tec",
+      "campus_slug": "monterrey",
+      "campus_name": "Monterrey",
+      "city": "Monterrey"
+    },
+    {
+      "id": "1a898a3a-53c0-4468-8dc6-b03bef169a6e",
+      "slug": "tec-queretaro",
+      "name": "Tecnológico de Monterrey, Campus Querétaro",
+      "university_slug": "tec",
+      "campus_slug": "queretaro",
+      "campus_name": "Querétaro",
+      "city": "Querétaro"
+    },
+    {
+      "id": "62cd4de7-26c3-49e4-b4f4-7b5e3efd0617",
+      "slug": "cesa",
+      "name": "CESA — Colegio de Estudios Superiores de Administración",
+      "university_slug": "cesa",
+      "campus_slug": "principal",
+      "campus_name": null,
+      "city": "Bogotá"
+    },
+    {
+      "id": "91eb1307-a047-436b-ba78-8c6eca58c4fe",
+      "slug": "javeriana",
+      "name": "Pontificia Universidad Javeriana",
+      "university_slug": "javeriana",
+      "campus_slug": "principal",
+      "campus_name": null,
+      "city": "Bogotá"
+    },
+    {
+      "id": "9aa57d8a-732e-4293-aa8a-bab741523796",
+      "slug": "unam",
+      "name": "Universidad Nacional Autónoma de México",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "a7463fb5-c938-4743-87cf-51f43edae71b",
+      "slug": "ipn",
+      "name": "Instituto Politécnico Nacional",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "c32b35f0-6177-4488-bb3c-cfa2e0985164",
+      "slug": "udg",
+      "name": "Universidad de Guadalajara",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "d54d915b-c7a1-4e6d-a2b5-bb7ff3a6f603",
+      "slug": "uanl",
+      "name": "Universidad Autónoma de Nuevo León",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "e843d37b-5c82-42c0-b853-654807a41042",
+      "slug": "uam",
+      "name": "Universidad Autónoma Metropolitana",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "31744f31-49df-466f-bab4-f4527afde0f5",
+      "slug": "buap",
+      "name": "Benemérita Universidad Autónoma de Puebla",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "948cbbe0-8a83-4e6c-a4b6-e0aeb1d7f090",
+      "slug": "uaemex",
+      "name": "Universidad Autónoma del Estado de México",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "713927e5-430e-4325-af3f-0333d410b5d1",
+      "slug": "uaslp",
+      "name": "Universidad Autónoma de San Luis Potosí",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "eaa4cd40-0566-42a6-ac91-e652b1137151",
+      "slug": "uaq",
+      "name": "Universidad Autónoma de Querétaro",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "46a080c1-c6d2-4ee9-ba04-db520d6ef99e",
+      "slug": "ibero",
+      "name": "Universidad Iberoamericana",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "f5d3ed89-6d29-4fbe-9470-44cd6ce0db26",
+      "slug": "itam",
+      "name": "Instituto Tecnológico Autónomo de México",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "60786e59-f502-4f49-824c-7509b8e2a400",
+      "slug": "anahuac",
+      "name": "Universidad Anáhuac",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "35a6dfa2-32e4-4286-ac5b-22241ecf3065",
+      "slug": "udlap",
+      "name": "Universidad de las Américas Puebla",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "026f4553-90bf-46b6-b17f-5784dbff1b7f",
+      "slug": "up",
+      "name": "Universidad Panamericana",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "9be8685c-ae88-4a73-ba4f-14b835d9b66b",
+      "slug": "colmex",
+      "name": "El Colegio de México",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    },
+    {
+      "id": "e592d5a8-f8e9-41e9-b285-68c5f5f858e1",
+      "slug": "cide",
+      "name": "Centro de Investigación y Docencia Económicas",
+      "university_slug": null,
+      "campus_slug": null,
+      "campus_name": null,
+      "city": null
+    }
+  ],
+  "domains": [
+    {
+      "domain": "exatec.mx",
+      "university_slug": "tec",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "is_active": true
+    },
+    {
+      "domain": "fsu.edu",
+      "university_slug": "florida-state",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "is_active": true
+    },
+    {
+      "domain": "icesi.edu.co",
+      "university_slug": "icesi",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "is_active": true
+    },
+    {
+      "domain": "itesm.mx",
+      "university_slug": "tec",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "is_active": true
+    },
+    {
+      "domain": "javeriana.edu.co",
+      "university_slug": "javeriana",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "is_active": true
+    },
+    {
+      "domain": "purdue.edu",
+      "university_slug": "purdue",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "is_active": true
+    },
+    {
+      "domain": "tec.mx",
+      "university_slug": "tec",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "is_active": true
+    },
+    {
+      "domain": "u.icesi.edu.co",
+      "university_slug": "icesi",
+      "audience": "unknown",
+      "confidence": "unconfirmed",
+      "verification_enabled": false,
+      "is_active": true
+    }
+  ]
+}

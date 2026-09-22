@@ -43,10 +43,10 @@
     "resetSentDesc": "Si esa dirección tiene cuenta, te llega un enlace para elegir contraseña nueva."
   },
   "onboarding": {
-    "campusTitle": "Tu campus",
-    "campusSubtitle": "Selecciona tu universidad o campus",
-    "campusSearch": "Buscar campus…",
-    "campusEmpty": "No se encontraron campus",
+    "campusTitle": "Tu institución",
+    "campusSubtitle": "Busca tu universidad, escuela o campus",
+    "campusSearch": "Nombre, siglas o ciudad…",
+    "campusEmpty": "No encontramos esa institución.",
     "welcomeTitle": "¡Bienvenido!",
     "welcomeSubtitle": "Configuremos tu perfil",
     "fullName": "Nombre completo",
@@ -73,7 +73,11 @@
     "campusLoadError": "No pudimos cargar las universidades. Revisa tu conexión.",
     "campusRetry": "Reintentar",
     "campusVerifiedHint": "Tu correo es de {{university}}: elige tu campus.",
-    "campusLabel": "Campus {{campus}}"
+    "campusLabel": "Campus {{campus}}",
+    "countryFilter": "Filtrar por país",
+    "allCountries": "Todos",
+    "institutionResults_one": "{{count}} institución",
+    "institutionResults_other": "{{count}} instituciones"
   },
   "profile": {
     "title": "Perfil",
@@ -198,7 +202,7 @@
   },
   "leaderboard": {
     "title": "Clasificación",
-    "pts": "pts",
+    "pts": "puntos",
     "empty": "Sin datos aún"
   },
   "pointsHistory": {
@@ -259,7 +263,11 @@
     "decline": "Rechazar",
     "requestApproved": "Solicitud aprobada",
     "requestDeclined": "Solicitud rechazada",
-    "organizer": "organiza"
+    "organizer": "organiza",
+    "you": "Tú",
+    "noAttendeesYet": "Aún no se ha unido nadie. Sé la primera persona.",
+    "showAllAttendees": "Ver a las {{count}} personas más",
+    "seeAll": "Ver todos"
   },
   "create": {
     "title": "Nuevo evento",
@@ -390,7 +398,16 @@
     "explorer": "Explorador",
     "study_buddy": "Compañero de estudio",
     "team_player": "Jugador en equipo",
-    "streak_7": "Racha de 7 días"
+    "streak_7": "Racha de 7 días",
+    "how": {
+      "organizer": "Crea {{count}} eventos",
+      "explorer": "Únete a {{count}} eventos",
+      "study_buddy": "Haz check-in en {{count}} sesiones de estudio",
+      "team_player": "Únete a {{count}} eventos de deportes",
+      "streak_7": "Únete a eventos en {{count}} días distintos"
+    },
+    "earned": "¡Conseguida!",
+    "progress": "{{current}} de {{target}}"
   },
   "map": {
     "title": "Mapa de eventos del campus",
@@ -431,6 +448,70 @@
       "skip": "Saltar",
       "done": "Listo",
       "progress": "Paso {{current}} de {{total}}"
+    },
+    "filters": {
+      "button": "Filtros",
+      "buttonActive": "Filtros, {{count}} activos",
+      "title": "Filtrar eventos",
+      "when": "Cuándo",
+      "whenAny": "Cuando sea",
+      "whenOptions": {
+        "now": "Ahora",
+        "next3h": "Próximas 3 h",
+        "today": "Hoy",
+        "tomorrow": "Mañana",
+        "weekend": "Fin de semana",
+        "week": "Próximos 7 días",
+        "range": "Elegir días"
+      },
+      "whenHints": {
+        "now": "En curso o empieza en menos de 1 hora",
+        "next3h": "Algo que pase de aquí a 3 horas"
+      },
+      "rangePick": "Toca el primer y el último día",
+      "rangeOne": "{{from}}",
+      "rangeMany": "{{from}} – {{to}}",
+      "dayPart": "Hora de inicio",
+      "dayParts": {
+        "morning": "Por la mañana",
+        "afternoon": "Por la tarde",
+        "evening": "Por la noche"
+      },
+      "dayPartHints": {
+        "morning": "5 a 12 h",
+        "afternoon": "12 a 19 h",
+        "evening": "Desde 19 h"
+      },
+      "duration": "Duración",
+      "durations": {
+        "short": "Hasta 1 h",
+        "medium": "1 a 2 h",
+        "long": "Más de 2 h"
+      },
+      "experience": "Tipo de experiencia",
+      "access": {
+        "direct": "Entrada directa",
+        "approval": "Con aprobación"
+      },
+      "size": {
+        "small": "Grupo pequeño",
+        "large": "Grupo grande"
+      },
+      "sizeHints": {
+        "small": "Hasta 5 personas",
+        "large": "6 personas o más"
+      },
+      "onlyWithSpots": "Solo con lugares disponibles",
+      "clear": "Quitar filtros",
+      "show_one": "Ver 1 evento",
+      "show_other": "Ver {{count}} eventos",
+      "showNone": "Ningún evento coincide",
+      "removeChip": "Quitar filtro {{label}}",
+      "mapNoMatch": "Ningún evento coincide con tus filtros",
+      "today": "Hoy",
+      "tomorrow": "Mañana",
+      "live": "En curso",
+      "startsIn": "Empieza en {{count}} min"
     }
   },
   "rpcErrors": {
@@ -452,7 +533,14 @@
     "friendRequestIncoming": "Esta persona ya te envió una solicitud. Acéptala.",
     "alreadyFriends": "Ya son amigos.",
     "friendRateLimit": "Enviaste muchas solicitudes seguidas. Inténtalo más tarde.",
-    "friendshipLocked": "Ese cambio no está permitido."
+    "friendshipLocked": "Ese cambio no está permitido.",
+    "requestRateLimit": "Enviaste varias solicitudes hoy. Inténtalo mañana.",
+    "invalidRequest": "Revisa los datos de la solicitud.",
+    "repeatNotAllowed": "Solo puede repetir un plan quien lo organizó o fue.",
+    "notAnAttendee": "Solo quien fue al evento puede crear un grupo con él.",
+    "eventNotStarted": "El grupo se puede crear cuando el evento ya empezó.",
+    "inviteNotFound": "Esta invitación ya no está disponible.",
+    "inviteAlreadyAnswered": "Ya respondiste esta invitación."
   },
   "legal": {
     "privacy": "Aviso de privacidad",
@@ -589,5 +677,115 @@
     "you": "Tú",
     "yesterday": "Ayer",
     "noMessagesShort": "Sin mensajes aún"
+  },
+  "institutionTypes": {
+    "university": "Universidad",
+    "technological_university": "Universidad tecnológica",
+    "polytechnic_university": "Universidad politécnica",
+    "technological_institute": "Instituto tecnológico",
+    "university_institution": "Institución universitaria",
+    "technological_institution": "Institución tecnológica",
+    "technical_institution": "Institución técnica profesional",
+    "college": "College",
+    "community_college": "Community college",
+    "school": "Colegio",
+    "other": "Institución educativa"
+  },
+  "institutionRequest": {
+    "cta": "Solicitar que agreguemos mi institución",
+    "title": "Agregar mi institución",
+    "desc": "La revisaremos antes de añadirla. Mientras tanto puedes elegir la más cercana o volver más tarde.",
+    "name": "Nombre de la institución",
+    "country": "País",
+    "city": "Ciudad (opcional)",
+    "website": "Sitio web oficial (opcional)",
+    "submit": "Enviar solicitud",
+    "sent": "Solicitud enviada",
+    "sentDesc": "Gracias. Te avisaremos cuando la agreguemos."
+  },
+  "verification": {
+    "title": "Verifica tu institución",
+    "yourInstitution": "Tu institución",
+    "emailIntro": "Te enviaremos un código de un solo uso a tu correo institucional. Tu correo de acceso y tu forma de iniciar sesión no cambian.",
+    "emailLabel": "Correo institucional",
+    "emailPh": "tu.nombre@universidad.edu",
+    "studentIdLabel": "Matrícula (opcional)",
+    "studentIdHint": "Solo la ves tú. No aparece en tu perfil público.",
+    "sendCode": "Enviar código a mi correo institucional",
+    "sending": "Enviando…",
+    "privacyNote": "Nunca te pediremos la contraseña de tu universidad. De tu correo institucional solo guardamos una huella irreversible (para que no verifique dos cuentas) y una versión oculta.",
+    "codeSent": "Enviamos un código de 6 dígitos a {{email}}. Revisa también la carpeta de spam.",
+    "codeLabel": "Código",
+    "verify": "Verificar",
+    "verifying": "Verificando…",
+    "changeEmail": "Cambiar correo",
+    "resend": "Reenviar código",
+    "resendIn": "Reenviar en {{seconds}} s",
+    "verifiedToast": "¡Institución verificada!",
+    "doneTitle": "Tu institución está verificada",
+    "doneEmail": "Verificada con {{email}}",
+    "noAutomatic": "Tu institución todavía no tiene verificación automática por correo. Puedes solicitar una revisión manual; tu cuenta sigue funcionando igual.",
+    "chooseInstitutionFirst": "Primero elige tu institución en tu perfil.",
+    "inReview": "Tu verificación está en revisión. Te avisaremos cuando termine; mientras tanto tu cuenta funciona con normalidad.",
+    "requestReview": "Solicitar revisión manual",
+    "reviewRequested": "Solicitud de revisión enviada",
+    "loadError": "No pudimos cargar tu verificación.",
+    "cardUnverified": "Falta verificar tu perfil",
+    "cardUnverifiedBody": "Verifica tu institución con tu correo institucional",
+    "cardPending": "Revisa tu correo institucional",
+    "cardPendingBody": "Escribe el código que enviamos a {{email}}",
+    "cardReview": "Verificación en revisión",
+    "cardReviewBody": "Tu cuenta sigue funcionando mientras la revisamos",
+    "cardVerified": "Institución verificada",
+    "errors": {
+      "invalidEmail": "Ese correo no es válido.",
+      "personalEmail": "Usa el correo que te dio tu institución, no uno personal.",
+      "invalidStudentId": "Revisa la matrícula.",
+      "domainNotVerifiable": "Ese correo no permite verificar esta institución automáticamente. Puedes solicitar una revisión manual.",
+      "institutionMismatch": "Ese correo es de otra institución distinta a la de tu perfil. Solicita una revisión manual.",
+      "alreadyVerified": "Este correo ya verifica tu cuenta.",
+      "cooldown": "Espera un momento antes de pedir otro código.",
+      "rateLimited": "Demasiados intentos. Inténtalo más tarde.",
+      "unavailableNow": "La verificación por correo no está disponible en este momento.",
+      "sendFailed": "No pudimos enviar el código. Inténtalo de nuevo.",
+      "invalidCode_one": "Código incorrecto. Te queda {{count}} intento.",
+      "invalidCode_other": "Código incorrecto. Te quedan {{count}} intentos.",
+      "expired": "El código caducó. Pide uno nuevo.",
+      "locked": "Demasiados intentos con ese código. Pide uno nuevo.",
+      "noPending": "No hay un código activo. Pide uno nuevo.",
+      "manualReview": "No pudimos completar la verificación automática. La revisaremos manualmente."
+    }
+  },
+  "afterEvent": {
+    "title": "¿Qué sigue?",
+    "metSomeone": "¿Conociste a alguien?",
+    "add": "Agregar",
+    "sent": "Enviada",
+    "friends": "Amigos",
+    "addAria": "Agregar a {{name}} como amigo",
+    "repeat": "Repetir el plan",
+    "repeatWhen": "{{when}} · misma hora",
+    "repeatNotify_one": "Avisaremos a la persona que fue",
+    "repeatNotify_other": "Avisaremos a las {{count}} personas que fueron",
+    "group": "Crear un grupo con quienes fueron",
+    "groupHint": "Les llega una invitación y entran si aceptan",
+    "groupCreated_one": "Grupo creado. Invitamos a 1 persona.",
+    "groupCreated_other": "Grupo creado. Invitamos a {{count}} personas.",
+    "groupCreatedNone": "Grupo creado.",
+    "creatingGroup": "Creando grupo…",
+    "repeatBanner": "Repites «{{title}}». Al publicarlo avisaremos a quienes fueron.",
+    "justEnded": "Acaba de terminar",
+    "whatsNext": "¿Qué sigue?"
+  },
+  "groupInvites": {
+    "title": "Invitaciones a grupos",
+    "from": "{{name}} te invitó",
+    "fromEvent": "{{name}} te invitó · de «{{event}}»",
+    "accept": "Unirme",
+    "decline": "No, gracias",
+    "accepted": "Te uniste al grupo",
+    "declined": "Invitación rechazada",
+    "acceptAria": "Unirme a {{group}}",
+    "declineAria": "Rechazar la invitación a {{group}}"
   }
 }

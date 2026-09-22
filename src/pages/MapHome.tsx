@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import type { RepeatDraft } from '@/lib/repeatPlan';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { Plus, LocateFixed, Layers, List, Map as MapIcon, Search, X as XIcon, type LucideIcon } from 'lucide-react';
+import { Plus, LocateFixed, Layers, List, Map as MapIcon, Search, SlidersHorizontal, X as XIcon, type LucideIcon } from 'lucide-react';
 import { useEventStore, selectSelectedEvent } from '@/stores/eventStore';
 import { EVENT_CATEGORIES, MAPBOX_STYLE_LIGHT, MAPBOX_STYLE_DARK } from '@/lib/constants';
 import { prefersDark, onColorSchemeChange } from '@/lib/theme';
@@ -22,7 +24,9 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import { pageTitle } from '@/lib/brand';
 import { useInstitutionCenter } from '@/hooks/useInstitutionCenter';
 import { toMapEvent, needsServerCheck, type EventRow } from '@/lib/eventSync';
-import { matchesFilter } from '@/lib/eventFilter';
+import { matchesFilter, filterEvents, countActiveFilters, dependsOnClock } from '@/lib/eventFilter';
+import { EventFiltersSheet } from '@/components/map/EventFiltersSheet';
+import { ActiveFilterChips } from '@/components/map/ActiveFilterChips';
 import { planMarkers, CLUSTER_MAX_ZOOM, MAX_MAP_EVENTS } from '@/lib/mapClusters';
 
 /** Un marcador vivo, con lo justo para saber qué hay que refrescar de él. */
@@ -68,11 +72,27 @@ export default function MapHome() {
   const markersRef = useRef<Map<string, MarkerEntry>>(new Map());
   const markersMapRef = useRef<MapboxMap | null>(null);
   const clustersRef = useRef<Map<string, ClusterEntry>>(new Map());
-  const { events, setEvents, upsertEvent, removeEvent, setSelectedEvent, filterCategory, setFilterCategory } = useEventStore();
+  const { events, setEvents, upsertEvent, removeEvent, setSelectedEvent, filterCategory, setFilterCategory, advancedFilters, resetFilters } = useEventStore();
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  // "Ahora" y "Próximas 3 h" caducan solos: sin este reloj, un evento que
+  // terminó seguiría saliendo hasta tocar algo. Solo late con esos filtros.
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    if (!dependsOnClock(advancedFilters)) return;
+    setClock(Date.now());
+    const id = setInterval(() => setClock(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, [advancedFilters]);
+  const activeFilterCount = countActiveFilters(advancedFilters);
   // Resuelto contra la lista viva en cada render: así la hoja abierta refleja
   // lo que llegue por tiempo real.
   const selectedEvent = useEventStore(selectSelectedEvent);
   const [showCreate, setShowCreate] = useState(false);
+  // "Repetir el plan" llega desde la ficha de un evento pasado (Mis eventos)
+  // con el borrador en el state de la navegación.
+  const routerLocation = useLocation();
+  const navigate = useNavigate();
+  const [repeatDraft, setRepeatDraft] = useState<RepeatDraft | null>(null);
   // El aviso de primer uso. Se guarda en el perfil y no en localStorage para
   // que no reaparezca al cambiar de telefono.
   const { profile, fetchProfile } = useAuthStore();
@@ -376,7 +396,7 @@ export default function MapHome() {
         return {
           id: e.id,
           placeable: colocable,
-          passesFilter: matchesFilter(e, { category: filterCategory, query: searchQuery }),
+          passesFilter: matchesFilter(e, { category: filterCategory, query: searchQuery, ...advancedFilters }, new Date(clock)),
           x: punto.x,
           y: punto.y,
         };
@@ -578,7 +598,7 @@ export default function MapHome() {
       entry.marker.remove();
       clustersRef.current.delete(key);
     });
-  }, [events, filterCategory, searchQuery, setSelectedEvent]);
+  }, [events, filterCategory, searchQuery, advancedFilters, clock, setSelectedEvent]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -641,6 +661,21 @@ export default function MapHome() {
    * que el boton no hacia nada. La ubicacion se pide ahora desde dentro del
    * formulario, donde se entiende para que es.
    */
+  useEffect(() => {
+    const repeat = (routerLocation.state as { repeat?: Omit<RepeatDraft, 'startsAt'> & { startsAt: string } } | null)?.repeat;
+    if (!repeat) return;
+    // Se consume una vez: sin limpiar el state, volver atrás o recargar
+    // abriría otra vez el formulario.
+    navigate('.', { replace: true, state: null });
+    if (pickMarkerRef.current) {
+      pickMarkerRef.current.remove();
+      pickMarkerRef.current = null;
+    }
+    setRepeatDraft({ ...repeat, startsAt: new Date(repeat.startsAt) });
+    setPickedLocation(repeat.location);
+    setShowCreate(true);
+  }, [routerLocation.state, navigate]);
+
   const handleOpenCreate = () => {
     if (pickMarkerRef.current) {
       pickMarkerRef.current.remove();
@@ -709,6 +744,7 @@ export default function MapHome() {
 
   const handleCloseCreate = () => {
     setShowCreate(false);
+    setRepeatDraft(null);
     setPickedLocation(null);
     if (pickMarkerRef.current) {
       pickMarkerRef.current.remove();
@@ -941,6 +977,23 @@ export default function MapHome() {
                 </button>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => setFiltersOpen(true)}
+              aria-label={activeFilterCount ? t('map.filters.buttonActive', { count: activeFilterCount }) : t('map.filters.button')}
+              aria-haspopup="dialog"
+              className={cn(
+                'relative flex-shrink-0 w-11 h-11 rounded-full flex items-center justify-center shadow-soft border',
+                activeFilterCount ? 'bg-primary text-primary-foreground border-primary' : 'glass text-foreground border-border',
+              )}
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+              {activeFilterCount > 0 && (
+                <span aria-hidden="true" className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full bg-background text-primary text-[11px] font-bold flex items-center justify-center border border-primary">
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
           </div>
           <div className="flex gap-2 items-center">
             <div className="flex gap-2 overflow-x-auto no-scrollbar py-1 flex-1">
@@ -968,6 +1021,7 @@ export default function MapHome() {
               {viewMode === 'map' ? <List className="w-4 h-4" /> : <MapIcon className="w-4 h-4" />}
             </button>
           </div>
+          {activeFilterCount > 0 && <ActiveFilterChips onOpen={() => setFiltersOpen(true)} />}
         </div>
       )}
 
@@ -981,11 +1035,11 @@ export default function MapHome() {
         >
           <EventListView
             events={events}
-            filterCategory={filterCategory}
-            searchQuery={searchQuery}
+            filter={{ category: filterCategory, query: searchQuery, ...advancedFilters }}
+            now={new Date(clock)}
             onSelect={(event) => { setSelectedEvent(event); setViewMode('map'); }}
             onCreate={handleOpenCreate}
-            onClearFilters={() => { setFilterCategory(null); setSearchQuery(''); }}
+            onClearFilters={() => { resetFilters(); setSearchQuery(''); }}
           />
         </div>
       )}
@@ -1049,6 +1103,26 @@ export default function MapHome() {
         </div>
       )}
 
+      {/* Hay eventos pero los filtros no dejan pasar ninguno. Con solo la
+          categoría no hacía falta avisar; con "Mañana por la noche" un mapa
+          sin pines parece roto. */}
+      {!pickingLocation && viewMode === 'map' && eventsLoaded && events.length > 0 && !showCreate && !selectedEvent
+        && filterEvents(events, { category: filterCategory, query: searchQuery, ...advancedFilters }, new Date(clock)).length === 0 && (
+        <div className="absolute inset-x-0 above-nav mb-24 z-10 px-6 pointer-events-none">
+          <div role="status" className="pointer-events-auto mx-auto sm:max-w-[430px] bg-card/95 backdrop-blur-md rounded-2xl shadow-lifted border border-border p-4 text-center">
+            <p className="text-sm font-semibold text-foreground">{t('map.filters.mapNoMatch')}</p>
+            <button
+              onClick={() => { resetFilters(); setSearchQuery(''); }}
+              className="mt-3 inline-flex items-center min-h-[44px] px-5 rounded-xl bg-muted text-foreground text-sm font-semibold"
+            >
+              {t('map.clearFilters')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <EventFiltersSheet open={filtersOpen} onOpenChange={setFiltersOpen} events={events} searchQuery={searchQuery} />
+
       {/* Event bottom sheet */}
       {selectedEvent && (
         <EventBottomSheet
@@ -1064,6 +1138,7 @@ export default function MapHome() {
           onPickLocation={handleStartPicking}
           pickedLocation={pickedLocation}
           hidden={pickingLocation}
+          initial={repeatDraft}
         />
       )}
     </div>

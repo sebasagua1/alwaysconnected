@@ -3,7 +3,7 @@
 -- Pegar en el SQL Editor de un proyecto Supabase NUEVO y ejecutar.
 --
 -- NO EDITAR A MANO: lo genera scripts/gen-full-schema.mjs.
--- Migraciones incluidas: 41 (hasta 20260916000000_buscar-personas.sql).
+-- Migraciones incluidas: 49 (hasta 20260921010000_programar-push-inicio.sql).
 --
 -- NOTA: se omite el bloque de RLS sobre realtime.messages (tabla
 -- interna de Supabase) porque el SQL Editor no es su dueño. El
@@ -5410,3 +5410,3719 @@ REVOKE EXECUTE ON FUNCTION public.people_suggestions(integer) FROM PUBLIC, anon;
 GRANT  EXECUTE ON FUNCTION public.people_suggestions(integer) TO authenticated;
 
 COMMIT;
+
+-- >>> 20260917000000_verificacion-institucional.sql <<<
+-- ============================================================
+-- Verificacion institucional y catalogo ampliado (esquema)
+--
+-- Modelo, adaptado a lo que ya existe en produccion (no se renombra nada
+-- porque la version publicada en App Store lee `institutions` y la vista
+-- `campuses`):
+--
+--   universities                  la institucion canonica (Tec, UNAM, Purdue...)
+--   institutions                  sus campus; profiles.campus_id y
+--                                 events.institution_id apuntan aqui
+--   institution_email_domains     dominios con evidencia; solo los confirmados,
+--                                 activos y habilitados verifican
+--   email_domain_blocklist        correos personales y relays (Apple, Gmail...)
+--   profile_affiliations          la afiliacion de cada perfil y su estado
+--   institution_verification_challenges   codigos de un solo uso (solo hash)
+--   institution_verification_events       auditoria
+--   institution_requests          "agreguen mi institucion" y revisiones
+--
+-- Reglas que no cambian: cada campus es su propia comunidad
+-- (same_institution), el campus se elige una vez desde la app, no se borra
+-- ni se cambia el id de ninguna institucion y no se reasigna ningun perfil.
+--
+-- Lo que cambia para cuentas nuevas: la verificacion ya no la da el alta con
+-- solo mirar el dominio (se daba incluso sin confirmar el correo). La da un
+-- correo CONFIRMADO de un dominio con evidencia oficial, o un codigo enviado
+-- al correo institucional. Las cuentas ya verificadas se conservan como
+-- `legacy_*`; la unica verificada con el correo sin confirmar queda pendiente.
+--
+-- Idempotente. ASCII puro para poder pegarla en el SQL Editor.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 0. Extensiones
+-- ------------------------------------------------------------
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pg_trgm  WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+-- Misma definicion que en 20260916000000_buscar-personas.sql: la que se
+-- aplique primero la crea y la otra la deja igual.
+CREATE OR REPLACE FUNCTION public.search_normalize(_t text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = ''
+AS $$
+  SELECT btrim(regexp_replace(
+    lower(extensions.unaccent('extensions.unaccent'::regdictionary, coalesce(_t, ''))),
+    '\s+', ' ', 'g'
+  ));
+$$;
+REVOKE EXECUTE ON FUNCTION public.search_normalize(text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.search_normalize(text) TO authenticated;
+
+-- ------------------------------------------------------------
+-- 1. universities: datos de institucion
+-- ------------------------------------------------------------
+ALTER TABLE public.universities
+  ADD COLUMN IF NOT EXISTS institution_type  text NOT NULL DEFAULT 'university',
+  ADD COLUMN IF NOT EXISTS control           text,
+  ADD COLUMN IF NOT EXISTS state_region      text,
+  ADD COLUMN IF NOT EXISTS city              text,
+  ADD COLUMN IF NOT EXISTS website_url       text,
+  ADD COLUMN IF NOT EXISTS logo_url          text,
+  ADD COLUMN IF NOT EXISTS aliases           text[] NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS source_name       text,
+  ADD COLUMN IF NOT EXISTS source_ref        text,
+  ADD COLUMN IF NOT EXISTS source_url        text,
+  ADD COLUMN IF NOT EXISTS source_checked_at date,
+  ADD COLUMN IF NOT EXISTS search_document   text NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS updated_at        timestamptz NOT NULL DEFAULT now();
+
+-- Muchas instituciones del catalogo no tienen una abreviatura oficial: mejor
+-- vacia que inventada.
+ALTER TABLE public.universities ALTER COLUMN short_name DROP NOT NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'universities_institution_type_check') THEN
+    ALTER TABLE public.universities ADD CONSTRAINT universities_institution_type_check CHECK (
+      institution_type IN ('university', 'technological_university', 'polytechnic_university',
+        'technological_institute', 'university_institution', 'technological_institution',
+        'technical_institution', 'college', 'community_college', 'school', 'other'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'universities_control_check') THEN
+    ALTER TABLE public.universities ADD CONSTRAINT universities_control_check
+      CHECK (control IS NULL OR control IN ('public', 'private'));
+  END IF;
+END $$;
+
+-- La clave estable del importador: pais + slug canonico.
+CREATE UNIQUE INDEX IF NOT EXISTS universities_country_slug_key
+  ON public.universities (country_code, slug);
+CREATE UNIQUE INDEX IF NOT EXISTS universities_source_key
+  ON public.universities (country_code, source_name, source_ref)
+  WHERE source_ref IS NOT NULL;
+
+-- ------------------------------------------------------------
+-- 2. institutions (campus)
+-- ------------------------------------------------------------
+ALTER TABLE public.institutions
+  ADD COLUMN IF NOT EXISTS campus_slug     text,
+  ADD COLUMN IF NOT EXISTS state_region    text,
+  ADD COLUMN IF NOT EXISTS search_document text NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS updated_at      timestamptz NOT NULL DEFAULT now();
+
+CREATE UNIQUE INDEX IF NOT EXISTS institutions_university_campus_slug_key
+  ON public.institutions (university_id, campus_slug)
+  WHERE university_id IS NOT NULL AND campus_slug IS NOT NULL;
+
+-- Los nueve campus del catalogo anterior: el slug de campus sale del suyo.
+UPDATE public.institutions i
+SET campus_slug = CASE
+      WHEN i.campus_name IS NULL THEN 'principal'
+      ELSE regexp_replace(i.slug, '^' || u.slug || '-', '')
+    END
+FROM public.universities u
+WHERE u.id = i.university_id
+  AND i.campus_slug IS NULL;
+
+-- Texto de busqueda: nombre, abreviatura, alias, ciudad y estado, sin
+-- acentos. Columna mantenida por disparador y no expresion indexada porque
+-- array_to_string no es IMMUTABLE.
+CREATE OR REPLACE FUNCTION public.universities_search_document()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  NEW.search_document := public.search_normalize(concat_ws(' ',
+    NEW.name, NEW.short_name, array_to_string(NEW.aliases, ' '), NEW.city, NEW.state_region));
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_universities_search_document ON public.universities;
+CREATE TRIGGER trg_universities_search_document
+  BEFORE INSERT OR UPDATE ON public.universities
+  FOR EACH ROW EXECUTE FUNCTION public.universities_search_document();
+
+CREATE OR REPLACE FUNCTION public.institutions_search_document()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  NEW.search_document := public.search_normalize(concat_ws(' ',
+    NEW.name, NEW.campus_name, NEW.short_name, NEW.city, NEW.state_region));
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_institutions_search_document ON public.institutions;
+CREATE TRIGGER trg_institutions_search_document
+  BEFORE INSERT OR UPDATE ON public.institutions
+  FOR EACH ROW EXECUTE FUNCTION public.institutions_search_document();
+
+UPDATE public.universities SET search_document = search_document;
+UPDATE public.institutions SET search_document = search_document;
+
+CREATE INDEX IF NOT EXISTS universities_search_trgm_idx
+  ON public.universities USING gin (search_document extensions.gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS institutions_search_trgm_idx
+  ON public.institutions USING gin (search_document extensions.gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS institutions_university_id_idx
+  ON public.institutions (university_id);
+
+-- ------------------------------------------------------------
+-- 3. Dominios de correo
+--
+-- Un dominio de sitio web no es un dominio de correo estudiantil. Solo
+-- verifica un dominio con evidencia oficial de que se entrega a estudiantes
+-- o a afiliados vigentes; la base lo impone con un CHECK, no solo el
+-- importador. Se compara el hostname exacto: un subdominio es otra fila.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.institution_email_domains (
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  domain              text NOT NULL,
+  university_id       uuid NOT NULL REFERENCES public.universities(id),
+  campus_id           uuid REFERENCES public.institutions(id),
+  audience            text NOT NULL DEFAULT 'unknown'
+    CHECK (audience IN ('student', 'faculty_staff', 'all_affiliates', 'alumni', 'unknown')),
+  verification_enabled boolean NOT NULL DEFAULT false,
+  confidence          text NOT NULL DEFAULT 'unconfirmed'
+    CHECK (confidence IN ('confirmed', 'probable', 'unconfirmed')),
+  official_source_url text,
+  source_title        text,
+  last_verified_at    date,
+  notes               text,
+  is_active           boolean NOT NULL DEFAULT true,
+  -- Solo si hay evidencia de que la parte local es la matricula (a01234567@tec.mx).
+  student_id_pattern  text,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  updated_at          timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT institution_email_domains_domain_key UNIQUE (domain),
+  -- ASCII (un IDN se guarda en punycode, xn--), minusculas, al menos un punto.
+  CONSTRAINT institution_email_domains_domain_format CHECK (
+    domain ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+    AND length(domain) <= 253),
+  CONSTRAINT institution_email_domains_verification_rule CHECK (
+    NOT verification_enabled OR (
+      confidence = 'confirmed'
+      AND is_active
+      AND audience IN ('student', 'all_affiliates')
+      AND official_source_url IS NOT NULL
+      AND last_verified_at IS NOT NULL))
+);
+ALTER TABLE public.institution_email_domains ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.institution_email_domains FROM PUBLIC, anon, authenticated;
+
+-- Correos personales y relays: nunca pueden ser de una institucion.
+CREATE TABLE IF NOT EXISTS public.email_domain_blocklist (
+  domain text PRIMARY KEY,
+  kind   text NOT NULL CHECK (kind IN ('apple_relay', 'personal', 'disposable')),
+  notes  text
+);
+ALTER TABLE public.email_domain_blocklist ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.email_domain_blocklist FROM PUBLIC, anon, authenticated;
+
+INSERT INTO public.email_domain_blocklist (domain, kind, notes) VALUES
+  ('privaterelay.appleid.com', 'apple_relay', 'Sign in with Apple, Hide My Email (direcciones existentes)'),
+  ('private.icloud.com',       'apple_relay', 'Sign in with Apple, Hide My Email (direcciones nuevas desde 2026)'),
+  ('icloud.com', 'personal', NULL), ('me.com', 'personal', NULL), ('mac.com', 'personal', NULL),
+  ('gmail.com', 'personal', NULL), ('googlemail.com', 'personal', NULL),
+  ('outlook.com', 'personal', NULL), ('hotmail.com', 'personal', NULL), ('live.com', 'personal', NULL),
+  ('msn.com', 'personal', NULL), ('outlook.es', 'personal', NULL), ('hotmail.es', 'personal', NULL),
+  ('live.com.mx', 'personal', NULL), ('hotmail.com.mx', 'personal', NULL),
+  ('yahoo.com', 'personal', NULL), ('yahoo.com.mx', 'personal', NULL), ('yahoo.es', 'personal', NULL),
+  ('ymail.com', 'personal', NULL), ('aol.com', 'personal', NULL), ('proton.me', 'personal', NULL),
+  ('protonmail.com', 'personal', NULL), ('gmx.com', 'personal', NULL), ('zoho.com', 'personal', NULL)
+ON CONFLICT (domain) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION public.guard_institution_email_domain()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  NEW.domain := lower(rtrim(btrim(NEW.domain), '.'));
+  IF EXISTS (SELECT 1 FROM public.email_domain_blocklist b WHERE b.domain = NEW.domain) THEN
+    RAISE EXCEPTION 'DOMAIN_IS_PERSONAL: %', NEW.domain;
+  END IF;
+  IF NEW.campus_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.institutions i WHERE i.id = NEW.campus_id AND i.university_id = NEW.university_id
+  ) THEN
+    RAISE EXCEPTION 'DOMAIN_CAMPUS_MISMATCH: %', NEW.domain;
+  END IF;
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_guard_institution_email_domain ON public.institution_email_domains;
+CREATE TRIGGER trg_guard_institution_email_domain
+  BEFORE INSERT OR UPDATE ON public.institution_email_domains
+  FOR EACH ROW EXECUTE FUNCTION public.guard_institution_email_domain();
+
+-- Los dominios que ya estaban en las universidades del catalogo pasan a la
+-- tabla SIN verificar. La migracion de datos habilita los que tienen evidencia.
+INSERT INTO public.institution_email_domains (domain, university_id, notes)
+SELECT DISTINCT lower(d), u.id, 'Migrado de universities.email_domains (20260915); sin evidencia revisada'
+FROM public.universities u, unnest(u.email_domains) AS d
+WHERE btrim(d) <> ''
+ON CONFLICT (domain) DO NOTHING;
+
+-- ------------------------------------------------------------
+-- 4. Secreto para los hash (pimienta)
+--
+-- Correos y codigos se guardan como HMAC-SHA256 con una clave que vive en
+-- Vault, no en el repositorio. Sin ella, un volcado de la tabla no permite
+-- probar correos por diccionario.
+-- ------------------------------------------------------------
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM vault.secrets WHERE name = 'institution_email_pepper') THEN
+    PERFORM vault.create_secret(
+      encode(extensions.gen_random_bytes(32), 'hex'),
+      'institution_email_pepper',
+      'HMAC para correos institucionales y codigos de verificacion'
+    );
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.institution_hmac(_value text)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_pepper text;
+BEGIN
+  SELECT decrypted_secret INTO v_pepper
+  FROM vault.decrypted_secrets
+  WHERE name = 'institution_email_pepper'
+  LIMIT 1;
+  IF v_pepper IS NULL THEN
+    RAISE EXCEPTION 'VERIFICATION_NOT_CONFIGURED';
+  END IF;
+  RETURN encode(extensions.hmac(convert_to(_value, 'UTF8'), convert_to(v_pepper, 'UTF8'), 'sha256'), 'hex');
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.institution_hmac(text) FROM PUBLIC, anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 5. Correo: normalizar, enmascarar, resolver
+-- ------------------------------------------------------------
+-- NULL si no parece un correo. No acepta caracteres fuera de ASCII en el
+-- dominio: el cliente y la Edge Function lo convierten a punycode antes.
+CREATE OR REPLACE FUNCTION public.normalize_email_address(_email text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public
+AS $$
+  SELECT CASE
+    WHEN e ~ '^[^@\s]{1,64}@[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+     AND length(e) <= 254 THEN e
+  END
+  FROM (SELECT lower(rtrim(btrim(coalesce(_email, '')), '.')) AS e) x;
+$$;
+REVOKE EXECUTE ON FUNCTION public.normalize_email_address(text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.normalize_email_address(text) TO authenticated;
+
+-- s***@tec.mx
+CREATE OR REPLACE FUNCTION public.mask_email(_email text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public
+AS $$
+  SELECT CASE WHEN _email LIKE '%@%'
+    THEN left(split_part(_email, '@', 1), 1) || '***@' || split_part(_email, '@', 2)
+  END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.mask_email(text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.mask_email(text) TO authenticated;
+
+-- El dominio (ya normalizado) solo si puede VERIFICAR: activo, habilitado,
+-- confirmado, de estudiantes o afiliados, universidad activa y no personal.
+CREATE OR REPLACE FUNCTION public.verifiable_email_domain(_email text)
+RETURNS public.institution_email_domains
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT d.*
+  FROM public.institution_email_domains d
+  JOIN public.universities u ON u.id = d.university_id AND u.is_active
+  WHERE d.domain = public.email_domain(public.normalize_email_address(_email))
+    AND d.is_active
+    AND d.verification_enabled
+    AND d.confidence = 'confirmed'
+    AND d.audience IN ('student', 'all_affiliates')
+    AND NOT EXISTS (SELECT 1 FROM public.email_domain_blocklist b WHERE b.domain = d.domain)
+  LIMIT 1;
+$$;
+REVOKE EXECUTE ON FUNCTION public.verifiable_email_domain(text) FROM PUBLIC, anon, authenticated;
+
+-- Las viejas funciones de 20260915 pasan a usar la tabla de dominios, para
+-- que no quede un segundo camino que verifique con dominios sin evidencia.
+CREATE OR REPLACE FUNCTION public.university_for_email(_email text)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT (public.verifiable_email_domain(_email)).university_id;
+$$;
+REVOKE EXECUTE ON FUNCTION public.university_for_email(text) FROM PUBLIC, anon, authenticated;
+
+-- Campus que el correo determina SIN ambiguedad: el del dominio, o el unico
+-- campus activo de la universidad. Nunca uno cualquiera de varios.
+CREATE OR REPLACE FUNCTION public.institution_for_email(_email text)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  WITH d AS (SELECT * FROM public.verifiable_email_domain(_email))
+  SELECT CASE
+    WHEN (SELECT campus_id FROM d) IS NOT NULL THEN (SELECT campus_id FROM d)
+    WHEN (SELECT university_id FROM d) IS NULL THEN NULL
+    WHEN (SELECT count(*) FROM public.institutions i
+          WHERE i.university_id = (SELECT university_id FROM d) AND i.is_active) = 1
+      THEN (SELECT i.id FROM public.institutions i
+            WHERE i.university_id = (SELECT university_id FROM d) AND i.is_active)
+  END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.institution_for_email(text) FROM PUBLIC, anon, authenticated;
+
+-- Matricula solo cuando el dominio documenta el formato y la parte local lo cumple.
+CREATE OR REPLACE FUNCTION public.student_id_for_email(_email text)
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT CASE
+    WHEN d.student_id_pattern IS NOT NULL
+     AND split_part(public.normalize_email_address(_email), '@', 1) ~ d.student_id_pattern
+    THEN split_part(public.normalize_email_address(_email), '@', 1)
+  END
+  FROM public.verifiable_email_domain(_email) d;
+$$;
+REVOKE EXECUTE ON FUNCTION public.student_id_for_email(text) FROM PUBLIC, anon, authenticated;
+
+-- La universidad acreditada por el correo de acceso de quien llama, solo si
+-- ese correo esta CONFIRMADO por el proveedor.
+CREATE OR REPLACE FUNCTION public.my_email_university()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT public.university_for_email(u.email)
+  FROM auth.users u
+  WHERE u.id = auth.uid()
+    AND u.email_confirmed_at IS NOT NULL;
+$$;
+REVOKE EXECUTE ON FUNCTION public.my_email_university() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.my_email_university() TO authenticated;
+
+-- ------------------------------------------------------------
+-- 6. Afiliaciones
+--
+-- Una fila por perfil: la afiliacion vigente. El historial va a la tabla de
+-- auditoria. El correo institucional NO se guarda en claro: hash con
+-- pimienta (para la unicidad) y version enmascarada (para mostrarla).
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.profile_affiliations (
+  user_id                  uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  university_id            uuid REFERENCES public.universities(id),
+  campus_id                uuid REFERENCES public.institutions(id),
+  declared_role            text NOT NULL DEFAULT 'student'
+    CHECK (declared_role IN ('student', 'faculty_staff', 'other')),
+  status                   text NOT NULL DEFAULT 'unverified'
+    CHECK (status IN ('unverified', 'pending_email', 'verified', 'expired', 'revoked', 'manual_review')),
+  institutional_email_hash text,
+  institutional_email_masked text,
+  email_domain_id          uuid REFERENCES public.institution_email_domains(id),
+  verification_method      text
+    CHECK (verification_method IS NULL OR verification_method IN (
+      'institutional_email_otp', 'auth_email_domain', 'legacy_auth_email', 'legacy_manual', 'manual_review')),
+  verified_at              timestamptz,
+  status_reason            text,
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  updated_at               timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT profile_affiliations_verified_has_university CHECK (
+    status <> 'verified' OR (university_id IS NOT NULL AND verified_at IS NOT NULL AND verification_method IS NOT NULL))
+);
+ALTER TABLE public.profile_affiliations ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.profile_affiliations FROM PUBLIC, anon, authenticated;
+
+-- Un correo institucional verifica UNA cuenta. Se aplica en la base, asi que
+-- dos confirmaciones simultaneas no pueden ganar las dos.
+CREATE UNIQUE INDEX IF NOT EXISTS profile_affiliations_verified_email_key
+  ON public.profile_affiliations (institutional_email_hash)
+  WHERE status = 'verified' AND institutional_email_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS profile_affiliations_domain_idx
+  ON public.profile_affiliations (email_domain_id) WHERE status = 'verified';
+
+-- profiles.institution_verified sigue existiendo (la lee la app publicada y la
+-- vista publica), pero ahora es un reflejo de la afiliacion.
+CREATE OR REPLACE FUNCTION public.sync_profile_verified()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  NEW.updated_at := now();
+  UPDATE public.profiles
+  SET institution_verified = (NEW.status = 'verified')
+  WHERE id = NEW.user_id
+    AND institution_verified IS DISTINCT FROM (NEW.status = 'verified');
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.sync_profile_verified() FROM PUBLIC, anon, authenticated;
+DROP TRIGGER IF EXISTS trg_sync_profile_verified ON public.profile_affiliations;
+CREATE TRIGGER trg_sync_profile_verified
+  BEFORE INSERT OR UPDATE ON public.profile_affiliations
+  FOR EACH ROW EXECUTE FUNCTION public.sync_profile_verified();
+
+-- ------------------------------------------------------------
+-- 7. Desafios y auditoria
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.institution_verification_challenges (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  university_id   uuid NOT NULL REFERENCES public.universities(id),
+  campus_id       uuid REFERENCES public.institutions(id),
+  email_domain_id uuid NOT NULL REFERENCES public.institution_email_domains(id),
+  email_hash      text NOT NULL,
+  email_masked    text NOT NULL,
+  -- Matricula tecleada, si se pidio. Privada: ninguna politica la expone.
+  student_id_input text,
+  otp_hash        text NOT NULL,
+  status          text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'verified', 'expired', 'revoked', 'locked', 'conflict', 'cancelled')),
+  attempts        integer NOT NULL DEFAULT 0,
+  max_attempts    integer NOT NULL DEFAULT 5,
+  ip_hash         text,
+  expires_at      timestamptz NOT NULL,
+  resend_after    timestamptz NOT NULL,
+  consumed_at     timestamptz,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS institution_verification_challenges_user_idx
+  ON public.institution_verification_challenges (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS institution_verification_challenges_email_idx
+  ON public.institution_verification_challenges (email_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS institution_verification_challenges_ip_idx
+  ON public.institution_verification_challenges (ip_hash, created_at DESC) WHERE ip_hash IS NOT NULL;
+ALTER TABLE public.institution_verification_challenges ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.institution_verification_challenges FROM PUBLIC, anon, authenticated;
+
+CREATE TABLE IF NOT EXISTS public.institution_verification_events (
+  id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id      uuid REFERENCES auth.users(id) ON DELETE CASCADE,
+  challenge_id uuid,
+  event        text NOT NULL,
+  detail       jsonb NOT NULL DEFAULT '{}',
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS institution_verification_events_user_idx
+  ON public.institution_verification_events (user_id, created_at DESC);
+ALTER TABLE public.institution_verification_events ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.institution_verification_events FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.log_verification_event(_user uuid, _challenge uuid, _event text, _detail jsonb DEFAULT '{}')
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  INSERT INTO public.institution_verification_events (user_id, challenge_id, event, detail)
+  VALUES (_user, _challenge, _event, coalesce(_detail, '{}'));
+$$;
+REVOKE EXECUTE ON FUNCTION public.log_verification_event(uuid, uuid, text, jsonb) FROM PUBLIC, anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 8. Solicitudes (agregar institucion, revision manual)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.institution_requests (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  kind          text NOT NULL CHECK (kind IN ('add_institution', 'manual_verification')),
+  institution_name text,
+  country_code  text CHECK (country_code IS NULL OR country_code ~ '^[A-Z]{2}$'),
+  city          text,
+  website_url   text,
+  university_id uuid REFERENCES public.universities(id),
+  campus_id     uuid REFERENCES public.institutions(id),
+  notes         text,
+  status        text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'duplicate')),
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT institution_requests_lengths CHECK (
+    length(coalesce(institution_name, '')) <= 200 AND length(coalesce(city, '')) <= 120
+    AND length(coalesce(website_url, '')) <= 300 AND length(coalesce(notes, '')) <= 1000)
+);
+CREATE INDEX IF NOT EXISTS institution_requests_user_idx ON public.institution_requests (user_id, created_at DESC);
+ALTER TABLE public.institution_requests ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.institution_requests FROM PUBLIC, anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 9. Verificacion por el correo de ACCESO (Google, correo confirmado)
+--
+-- Se evalua cuando el proveedor confirma el correo: al crear la cuenta si ya
+-- llega confirmado (Google, Apple) o al confirmar despues (correo y
+-- contrasena). Un relay de Apple o un Gmail nunca pasan de aqui.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.apply_auth_email_affiliation(_user_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_email     text;
+  v_confirmed timestamptz;
+  v_domain    public.institution_email_domains;
+  v_hash      text;
+  v_campus    uuid;
+  v_profile_campus uuid;
+  v_profile_university uuid;
+  v_current   public.profile_affiliations;
+BEGIN
+  SELECT public.normalize_email_address(u.email), u.email_confirmed_at
+  INTO v_email, v_confirmed
+  FROM auth.users u WHERE u.id = _user_id;
+
+  SELECT * INTO v_current FROM public.profile_affiliations WHERE user_id = _user_id;
+
+  -- Si la verificacion venia del correo de acceso y ese correo cambio o dejo
+  -- de ser verificable, se retira.
+  IF v_current.status = 'verified'
+     AND v_current.verification_method IN ('auth_email_domain', 'legacy_auth_email')
+     AND v_current.institutional_email_hash IS NOT NULL
+     AND (v_email IS NULL OR public.institution_hmac(v_email) <> v_current.institutional_email_hash) THEN
+    UPDATE public.profile_affiliations
+    SET status = 'revoked', status_reason = 'auth_email_changed'
+    WHERE user_id = _user_id;
+    PERFORM public.log_verification_event(_user_id, NULL, 'revoked', '{"reason":"auth_email_changed"}');
+    SELECT * INTO v_current FROM public.profile_affiliations WHERE user_id = _user_id;
+  END IF;
+
+  IF v_email IS NULL OR v_confirmed IS NULL THEN
+    RETURN 'not_confirmed';
+  END IF;
+
+  v_domain := public.verifiable_email_domain(v_email);
+  IF v_domain.id IS NULL THEN
+    RETURN 'not_institutional';
+  END IF;
+
+  IF v_current.status = 'verified' THEN
+    RETURN 'already_verified';
+  END IF;
+
+  v_hash := public.institution_hmac(v_email);
+
+  SELECT p.campus_id, i.university_id INTO v_profile_campus, v_profile_university
+  FROM public.profiles p LEFT JOIN public.institutions i ON i.id = p.campus_id
+  WHERE p.id = _user_id;
+
+  v_campus := public.institution_for_email(v_email);
+
+  -- El correo ya verifica otra cuenta: a revision, sin decir cual.
+  IF EXISTS (
+    SELECT 1 FROM public.profile_affiliations a
+    WHERE a.institutional_email_hash = v_hash AND a.status = 'verified' AND a.user_id <> _user_id
+  ) THEN
+    INSERT INTO public.profile_affiliations (user_id, university_id, status, status_reason, email_domain_id, institutional_email_masked)
+    VALUES (_user_id, v_domain.university_id, 'manual_review', 'email_in_use', v_domain.id, public.mask_email(v_email))
+    ON CONFLICT (user_id) DO UPDATE SET status = 'manual_review', status_reason = 'email_in_use',
+      university_id = EXCLUDED.university_id, email_domain_id = EXCLUDED.email_domain_id,
+      institutional_email_masked = EXCLUDED.institutional_email_masked;
+    PERFORM public.log_verification_event(_user_id, NULL, 'conflict', '{"method":"auth_email_domain"}');
+    RETURN 'manual_review';
+  END IF;
+
+  -- Ya pertenece a otra institucion: no se le cambia la comunidad.
+  IF v_profile_university IS NOT NULL AND v_profile_university <> v_domain.university_id THEN
+    INSERT INTO public.profile_affiliations (user_id, university_id, status, status_reason, email_domain_id, institutional_email_masked)
+    VALUES (_user_id, v_domain.university_id, 'manual_review', 'institution_mismatch', v_domain.id, public.mask_email(v_email))
+    ON CONFLICT (user_id) DO UPDATE SET status = 'manual_review', status_reason = 'institution_mismatch',
+      university_id = EXCLUDED.university_id, email_domain_id = EXCLUDED.email_domain_id,
+      institutional_email_masked = EXCLUDED.institutional_email_masked;
+    PERFORM public.log_verification_event(_user_id, NULL, 'institution_mismatch', '{"method":"auth_email_domain"}');
+    RETURN 'manual_review';
+  END IF;
+
+  -- Campus inequivoco y todavia sin campus: se asigna.
+  IF v_profile_campus IS NULL AND v_campus IS NOT NULL THEN
+    UPDATE public.profiles SET campus_id = v_campus WHERE id = _user_id;
+    v_profile_campus := v_campus;
+  END IF;
+
+  IF v_profile_campus IS NULL THEN
+    -- Varios campus: se sugiere la universidad y la persona elige.
+    INSERT INTO public.profile_affiliations (user_id, university_id, status, status_reason, email_domain_id, institutional_email_masked)
+    VALUES (_user_id, v_domain.university_id, 'unverified', 'choose_campus', v_domain.id, public.mask_email(v_email))
+    ON CONFLICT (user_id) DO UPDATE SET status = 'unverified', status_reason = 'choose_campus',
+      university_id = EXCLUDED.university_id, email_domain_id = EXCLUDED.email_domain_id,
+      institutional_email_masked = EXCLUDED.institutional_email_masked;
+    RETURN 'choose_campus';
+  END IF;
+
+  INSERT INTO public.profile_affiliations (
+    user_id, university_id, campus_id, status, institutional_email_hash, institutional_email_masked,
+    email_domain_id, verification_method, verified_at, status_reason)
+  VALUES (_user_id, v_domain.university_id, v_profile_campus, 'verified', v_hash, public.mask_email(v_email),
+    v_domain.id, 'auth_email_domain', now(), NULL)
+  ON CONFLICT (user_id) DO UPDATE SET
+    university_id = EXCLUDED.university_id, campus_id = EXCLUDED.campus_id, status = 'verified',
+    institutional_email_hash = EXCLUDED.institutional_email_hash,
+    institutional_email_masked = EXCLUDED.institutional_email_masked,
+    email_domain_id = EXCLUDED.email_domain_id, verification_method = 'auth_email_domain',
+    verified_at = now(), status_reason = NULL;
+
+  UPDATE public.profiles
+  SET student_id = public.student_id_for_email(v_email)
+  WHERE id = _user_id AND student_id IS NULL AND public.student_id_for_email(v_email) IS NOT NULL;
+
+  PERFORM public.log_verification_event(_user_id, NULL, 'verified', '{"method":"auth_email_domain"}');
+  RETURN 'verified';
+EXCEPTION WHEN unique_violation THEN
+  -- Otra cuenta gano la carrera con el mismo correo.
+  UPDATE public.profile_affiliations SET status = 'manual_review', status_reason = 'email_in_use'
+  WHERE user_id = _user_id;
+  RETURN 'manual_review';
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.apply_auth_email_affiliation(uuid) FROM PUBLIC, anon, authenticated;
+
+-- El alta ya NO verifica ni asigna campus por si sola: crea el perfil.
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email) VALUES (NEW.id, NEW.email);
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM PUBLIC, anon, authenticated;
+
+-- AFTER y con nombre posterior a on_auth_user_created: el perfil ya existe.
+CREATE OR REPLACE FUNCTION public.on_auth_user_email_state()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF TG_OP = 'INSERT'
+     OR NEW.email_confirmed_at IS DISTINCT FROM OLD.email_confirmed_at
+     OR NEW.email IS DISTINCT FROM OLD.email THEN
+    PERFORM public.apply_auth_email_affiliation(NEW.id);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_auth_user_email_state() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_auth_user_email_state ON auth.users;
+CREATE TRIGGER trg_auth_user_email_state
+  AFTER INSERT OR UPDATE OF email, email_confirmed_at ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.on_auth_user_email_state();
+
+-- ------------------------------------------------------------
+-- 10. Elegir campus desde la app (reemplaza la de 20260915)
+--
+--   * Si ya tenia campus, no se cambia (CAMPUS_LOCKED).
+--   * Solo campus activos del catalogo (CAMPUS_NOT_AVAILABLE).
+--   * Con correo de acceso confirmado y verificable, solo campus de esa
+--     universidad (CAMPUS_NOT_ALLOWED); al elegirlo se completa la afiliacion.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.set_profile_campus()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  v_target_university uuid;
+  v_email_university  uuid;
+BEGIN
+  IF NEW.campus_id IS NOT DISTINCT FROM OLD.campus_id
+     OR current_user <> 'authenticated' THEN
+    RETURN NEW;
+  END IF;
+
+  IF OLD.campus_id IS NOT NULL THEN
+    RAISE EXCEPTION 'CAMPUS_LOCKED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT i.university_id INTO v_target_university
+  FROM public.institutions i
+  JOIN public.universities u ON u.id = i.university_id
+  WHERE i.id = NEW.campus_id AND i.is_active AND u.is_active;
+
+  IF v_target_university IS NULL THEN
+    RAISE EXCEPTION 'CAMPUS_NOT_AVAILABLE' USING ERRCODE = '42501';
+  END IF;
+
+  v_email_university := public.my_email_university();
+  IF v_email_university IS NOT NULL AND v_email_university <> v_target_university THEN
+    RAISE EXCEPTION 'CAMPUS_NOT_ALLOWED' USING ERRCODE = '42501';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.set_profile_campus() FROM PUBLIC, anon, authenticated;
+
+-- Despues de guardar el campus: completar la afiliacion por correo de acceso,
+-- o retirarla si un cambio hecho desde el panel la deja en otra institucion.
+CREATE OR REPLACE FUNCTION public.after_profile_campus_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_university uuid;
+BEGIN
+  IF NEW.campus_id IS NOT DISTINCT FROM OLD.campus_id THEN
+    RETURN NEW;
+  END IF;
+  SELECT university_id INTO v_university FROM public.institutions WHERE id = NEW.campus_id;
+
+  UPDATE public.profile_affiliations
+  SET status = 'revoked', status_reason = 'institution_changed'
+  WHERE user_id = NEW.id
+    AND status IN ('verified', 'pending_email')
+    AND university_id IS DISTINCT FROM v_university;
+  IF FOUND THEN
+    PERFORM public.log_verification_event(NEW.id, NULL, 'revoked', '{"reason":"institution_changed"}');
+    UPDATE public.institution_verification_challenges SET status = 'revoked'
+    WHERE user_id = NEW.id AND status = 'pending';
+  END IF;
+
+  UPDATE public.profile_affiliations
+  SET campus_id = NEW.campus_id
+  WHERE user_id = NEW.id AND status = 'verified' AND university_id = v_university;
+
+  PERFORM public.apply_auth_email_affiliation(NEW.id);
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.after_profile_campus_change() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_after_profile_campus_change ON public.profiles;
+CREATE TRIGGER trg_after_profile_campus_change
+  AFTER UPDATE OF campus_id ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.after_profile_campus_change();
+
+-- ------------------------------------------------------------
+-- 11. Verificacion con codigo al correo institucional
+--
+-- start_: SOLO service_role (la Edge Function, que valida el JWT, manda el
+-- correo y nunca guarda el codigo). confirm_: la app, con su sesion.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.start_institution_verification(
+  _user_id       uuid,
+  _university_id uuid,
+  _campus_id     uuid,
+  _email         text,
+  _student_id    text DEFAULT NULL,
+  _ip_hash       text DEFAULT NULL
+)
+RETURNS TABLE (status text, challenge_id uuid, code text, email_masked text, expires_at timestamptz, resend_after timestamptz)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_email   text := public.normalize_email_address(_email);
+  v_domain  public.institution_email_domains;
+  v_profile_university uuid;
+  v_last    public.institution_verification_challenges;
+  v_current public.profile_affiliations;
+  v_hash    text;
+  v_code    text;
+  v_id      uuid := gen_random_uuid();
+  v_expires timestamptz := now() + interval '10 minutes';
+  v_resend  timestamptz := now() + interval '60 seconds';
+BEGIN
+  IF _user_id IS NULL OR NOT EXISTS (SELECT 1 FROM auth.users WHERE id = _user_id) THEN
+    RETURN QUERY SELECT 'NOT_AUTHENTICATED'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  IF v_email IS NULL THEN
+    RETURN QUERY SELECT 'INVALID_EMAIL'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM public.email_domain_blocklist b WHERE b.domain = public.email_domain(v_email)) THEN
+    RETURN QUERY SELECT 'PERSONAL_EMAIL'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  IF _student_id IS NOT NULL AND (length(btrim(_student_id)) = 0 OR length(_student_id) > 40) THEN
+    RETURN QUERY SELECT 'INVALID_STUDENT_ID'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  v_domain := public.verifiable_email_domain(v_email);
+  IF v_domain.id IS NULL OR v_domain.university_id <> _university_id THEN
+    RETURN QUERY SELECT 'DOMAIN_NOT_VERIFIABLE'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  IF _campus_id IS NOT NULL AND (
+       NOT EXISTS (SELECT 1 FROM public.institutions i WHERE i.id = _campus_id AND i.university_id = _university_id AND i.is_active)
+       OR (v_domain.campus_id IS NOT NULL AND v_domain.campus_id <> _campus_id)) THEN
+    RETURN QUERY SELECT 'CAMPUS_INVALID'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  SELECT i.university_id INTO v_profile_university
+  FROM public.profiles p JOIN public.institutions i ON i.id = p.campus_id
+  WHERE p.id = _user_id;
+  IF v_profile_university IS NOT NULL AND v_profile_university <> _university_id THEN
+    RETURN QUERY SELECT 'INSTITUTION_MISMATCH'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_current FROM public.profile_affiliations WHERE user_id = _user_id;
+  v_hash := public.institution_hmac(v_email);
+
+  IF v_current.status = 'verified' AND v_current.institutional_email_hash = v_hash THEN
+    RETURN QUERY SELECT 'ALREADY_VERIFIED'::text, NULL::uuid, NULL::text, v_current.institutional_email_masked, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  -- Enfriamiento entre envios.
+  SELECT * INTO v_last FROM public.institution_verification_challenges c
+  WHERE c.user_id = _user_id ORDER BY c.created_at DESC LIMIT 1;
+  IF v_last.id IS NOT NULL AND v_last.resend_after > now() THEN
+    RETURN QUERY SELECT 'COOLDOWN'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, v_last.resend_after;
+    RETURN;
+  END IF;
+
+  -- Limites: por cuenta, por correo y por IP.
+  IF (SELECT count(*) FROM public.institution_verification_challenges c
+      WHERE c.user_id = _user_id AND c.created_at > now() - interval '1 hour') >= 5
+  OR (SELECT count(*) FROM public.institution_verification_challenges c
+      WHERE c.user_id = _user_id AND c.created_at > now() - interval '1 day') >= 10
+  OR (SELECT count(*) FROM public.institution_verification_challenges c
+      WHERE c.email_hash = v_hash AND c.created_at > now() - interval '1 hour') >= 3
+  OR (_ip_hash IS NOT NULL AND (SELECT count(*) FROM public.institution_verification_challenges c
+      WHERE c.ip_hash = _ip_hash AND c.created_at > now() - interval '1 hour') >= 20) THEN
+    PERFORM public.log_verification_event(_user_id, NULL, 'rate_limited', '{}');
+    RETURN QUERY SELECT 'RATE_LIMITED'::text, NULL::uuid, NULL::text, NULL::text, NULL::timestamptz, NULL::timestamptz;
+    RETURN;
+  END IF;
+
+  -- Un desafio vivo a la vez.
+  UPDATE public.institution_verification_challenges c SET status = 'revoked'
+  WHERE c.user_id = _user_id AND c.status = 'pending';
+
+  v_code := lpad((('x' || encode(extensions.gen_random_bytes(4), 'hex'))::bit(32)::bigint % 1000000)::text, 6, '0');
+
+  INSERT INTO public.institution_verification_challenges (
+    id, user_id, university_id, campus_id, email_domain_id, email_hash, email_masked,
+    student_id_input, otp_hash, ip_hash, expires_at, resend_after)
+  VALUES (
+    v_id, _user_id, _university_id, coalesce(_campus_id, v_domain.campus_id), v_domain.id, v_hash,
+    public.mask_email(v_email), nullif(btrim(_student_id), ''),
+    public.institution_hmac(v_id::text || ':' || v_code), _ip_hash, v_expires, v_resend);
+
+  -- Una verificacion vigente no se degrada mientras se prueba otro correo.
+  INSERT INTO public.profile_affiliations (user_id, university_id, campus_id, status, institutional_email_masked, email_domain_id)
+  VALUES (_user_id, _university_id, _campus_id, 'pending_email', public.mask_email(v_email), v_domain.id)
+  ON CONFLICT (user_id) DO UPDATE SET
+    status = CASE WHEN profile_affiliations.status = 'verified' THEN 'verified' ELSE 'pending_email' END,
+    university_id = CASE WHEN profile_affiliations.status = 'verified' THEN profile_affiliations.university_id ELSE EXCLUDED.university_id END,
+    status_reason = CASE WHEN profile_affiliations.status = 'verified' THEN profile_affiliations.status_reason ELSE NULL END;
+
+  PERFORM public.log_verification_event(_user_id, v_id, 'challenge_created', jsonb_build_object('domain', v_domain.domain));
+
+  RETURN QUERY SELECT 'SENT'::text, v_id, v_code, public.mask_email(v_email), v_expires, v_resend;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.start_institution_verification(uuid, uuid, uuid, text, text, text) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.start_institution_verification(uuid, uuid, uuid, text, text, text) TO service_role;
+
+-- Si el correo no se pudo enviar, el desafio no debe quedar vivo ni contar.
+CREATE OR REPLACE FUNCTION public.cancel_institution_challenge(_challenge_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_user uuid;
+BEGIN
+  UPDATE public.institution_verification_challenges
+  SET status = 'cancelled', resend_after = now()
+  WHERE id = _challenge_id AND status = 'pending'
+  RETURNING user_id INTO v_user;
+  IF v_user IS NOT NULL THEN
+    UPDATE public.profile_affiliations SET status = 'unverified'
+    WHERE user_id = v_user AND status = 'pending_email';
+    PERFORM public.log_verification_event(v_user, _challenge_id, 'challenge_cancelled', '{}');
+  END IF;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.cancel_institution_challenge(uuid) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.cancel_institution_challenge(uuid) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.confirm_institution_verification(_code text)
+RETURNS TABLE (status text, attempts_left integer)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_uid   uuid := auth.uid();
+  v_c     public.institution_verification_challenges;
+  v_ok    boolean;
+  v_failed_hour integer;
+  v_domain_ok boolean;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED';
+  END IF;
+
+  -- FOR UPDATE: dos confirmaciones a la vez se ponen en fila, y la segunda
+  -- ya no encuentra el desafio pendiente.
+  SELECT * INTO v_c FROM public.institution_verification_challenges c
+  WHERE c.user_id = v_uid AND c.status = 'pending'
+  ORDER BY c.created_at DESC LIMIT 1
+  FOR UPDATE;
+
+  IF v_c.id IS NULL THEN
+    RETURN QUERY SELECT 'NO_PENDING'::text, 0;
+    RETURN;
+  END IF;
+
+  IF v_c.expires_at <= now() THEN
+    UPDATE public.institution_verification_challenges SET status = 'expired' WHERE id = v_c.id;
+    UPDATE public.profile_affiliations SET status = 'expired' WHERE user_id = v_uid AND status = 'pending_email';
+    PERFORM public.log_verification_event(v_uid, v_c.id, 'expired', '{}');
+    RETURN QUERY SELECT 'EXPIRED'::text, 0;
+    RETURN;
+  END IF;
+
+  SELECT count(*) INTO v_failed_hour FROM public.institution_verification_events e
+  WHERE e.user_id = v_uid AND e.event = 'invalid_code' AND e.created_at > now() - interval '1 hour';
+  IF v_failed_hour >= 15 THEN
+    RETURN QUERY SELECT 'RATE_LIMITED'::text, 0;
+    RETURN;
+  END IF;
+
+  v_ok := coalesce(_code, '') ~ '^[0-9]{6}$'
+          AND public.institution_hmac(v_c.id::text || ':' || _code) = v_c.otp_hash;
+
+  IF NOT v_ok THEN
+    UPDATE public.institution_verification_challenges
+    SET attempts = attempts + 1,
+        status = CASE WHEN attempts + 1 >= max_attempts THEN 'locked' ELSE 'pending' END
+    WHERE id = v_c.id;
+    PERFORM public.log_verification_event(v_uid, v_c.id, 'invalid_code', '{}');
+    IF v_c.attempts + 1 >= v_c.max_attempts THEN
+      UPDATE public.profile_affiliations SET status = 'unverified' WHERE user_id = v_uid AND status = 'pending_email';
+      RETURN QUERY SELECT 'LOCKED'::text, 0;
+    ELSE
+      RETURN QUERY SELECT 'INVALID_CODE'::text, v_c.max_attempts - v_c.attempts - 1;
+    END IF;
+    RETURN;
+  END IF;
+
+  -- El dominio pudo desactivarse entre el envio y la confirmacion.
+  SELECT EXISTS (
+    SELECT 1 FROM public.institution_email_domains d
+    JOIN public.universities u ON u.id = d.university_id AND u.is_active
+    WHERE d.id = v_c.email_domain_id AND d.is_active AND d.verification_enabled
+      AND d.confidence = 'confirmed' AND d.audience IN ('student', 'all_affiliates')
+  ) INTO v_domain_ok;
+  IF NOT v_domain_ok THEN
+    UPDATE public.institution_verification_challenges SET status = 'revoked' WHERE id = v_c.id;
+    UPDATE public.profile_affiliations SET status = 'unverified' WHERE user_id = v_uid AND status = 'pending_email';
+    RETURN QUERY SELECT 'DOMAIN_NOT_VERIFIABLE'::text, 0;
+    RETURN;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM public.profile_affiliations a
+    WHERE a.institutional_email_hash = v_c.email_hash AND a.status = 'verified' AND a.user_id <> v_uid
+  ) THEN
+    UPDATE public.institution_verification_challenges SET status = 'conflict', consumed_at = now() WHERE id = v_c.id;
+    UPDATE public.profile_affiliations SET status = 'manual_review', status_reason = 'email_in_use'
+    WHERE user_id = v_uid AND status <> 'verified';
+    PERFORM public.log_verification_event(v_uid, v_c.id, 'conflict', '{}');
+    RETURN QUERY SELECT 'MANUAL_REVIEW'::text, 0;
+    RETURN;
+  END IF;
+
+  BEGIN
+    UPDATE public.institution_verification_challenges SET status = 'verified', consumed_at = now() WHERE id = v_c.id;
+
+    INSERT INTO public.profile_affiliations (
+      user_id, university_id, campus_id, status, institutional_email_hash, institutional_email_masked,
+      email_domain_id, verification_method, verified_at)
+    VALUES (v_uid, v_c.university_id, v_c.campus_id, 'verified', v_c.email_hash, v_c.email_masked,
+      v_c.email_domain_id, 'institutional_email_otp', now())
+    ON CONFLICT (user_id) DO UPDATE SET
+      university_id = EXCLUDED.university_id,
+      campus_id = coalesce(EXCLUDED.campus_id, profile_affiliations.campus_id),
+      status = 'verified', status_reason = NULL,
+      institutional_email_hash = EXCLUDED.institutional_email_hash,
+      institutional_email_masked = EXCLUDED.institutional_email_masked,
+      email_domain_id = EXCLUDED.email_domain_id,
+      verification_method = 'institutional_email_otp', verified_at = now();
+  EXCEPTION WHEN unique_violation THEN
+    UPDATE public.institution_verification_challenges SET status = 'conflict', consumed_at = now() WHERE id = v_c.id;
+    UPDATE public.profile_affiliations SET status = 'manual_review', status_reason = 'email_in_use' WHERE user_id = v_uid;
+    RETURN QUERY SELECT 'MANUAL_REVIEW'::text, 0;
+    RETURN;
+  END;
+
+  UPDATE public.profiles
+  SET campus_id = coalesce(campus_id, v_c.campus_id),
+      student_id = coalesce(student_id, v_c.student_id_input)
+  WHERE id = v_uid;
+
+  PERFORM public.log_verification_event(v_uid, v_c.id, 'verified', '{"method":"institutional_email_otp"}');
+  RETURN QUERY SELECT 'VERIFIED'::text, 0;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.confirm_institution_verification(text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.confirm_institution_verification(text) TO authenticated;
+
+-- Lo que la app necesita saber de la propia verificacion. Sin hash, sin
+-- correo completo, sin codigo.
+CREATE OR REPLACE FUNCTION public.my_institution_verification()
+RETURNS TABLE (
+  status            text,
+  status_reason     text,
+  university_id     uuid,
+  university_name   text,
+  institution_type  text,
+  campus_id         uuid,
+  campus_name       text,
+  email_masked      text,
+  verification_method text,
+  verified_at       timestamptz,
+  pending_email_masked text,
+  pending_expires_at   timestamptz,
+  pending_resend_after timestamptz,
+  pending_attempts_left integer,
+  verification_available boolean
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  WITH me AS (
+    SELECT p.id, p.campus_id, i.university_id AS profile_university
+    FROM public.profiles p LEFT JOIN public.institutions i ON i.id = p.campus_id
+    WHERE p.id = auth.uid()
+  ), a AS (
+    SELECT * FROM public.profile_affiliations WHERE user_id = auth.uid()
+  ), c AS (
+    SELECT * FROM public.institution_verification_challenges
+    WHERE user_id = auth.uid() AND status = 'pending' AND expires_at > now()
+    ORDER BY created_at DESC LIMIT 1
+  )
+  SELECT
+    coalesce((SELECT a.status FROM a), 'unverified'),
+    (SELECT a.status_reason FROM a),
+    coalesce((SELECT a.university_id FROM a WHERE a.status IN ('verified', 'pending_email')), me.profile_university),
+    u.name,
+    u.institution_type,
+    me.campus_id,
+    coalesce(i.campus_name, i.name),
+    (SELECT a.institutional_email_masked FROM a WHERE a.status = 'verified'),
+    (SELECT a.verification_method FROM a WHERE a.status = 'verified'),
+    (SELECT a.verified_at FROM a WHERE a.status = 'verified'),
+    (SELECT c.email_masked FROM c),
+    (SELECT c.expires_at FROM c),
+    (SELECT c.resend_after FROM c),
+    (SELECT c.max_attempts - c.attempts FROM c),
+    EXISTS (
+      SELECT 1 FROM public.institution_email_domains d
+      WHERE d.university_id = u.id AND d.is_active AND d.verification_enabled
+    )
+  FROM me
+  LEFT JOIN public.institutions i ON i.id = me.campus_id
+  LEFT JOIN public.universities u
+    ON u.id = coalesce((SELECT a.university_id FROM a WHERE a.status IN ('verified', 'pending_email')), me.profile_university);
+$$;
+REVOKE EXECUTE ON FUNCTION public.my_institution_verification() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.my_institution_verification() TO authenticated;
+
+-- Retirar verificaciones cuando un dominio resulta no ser valido. No se hace
+-- sola al desactivar el dominio: una verificacion hecha con evidencia vigente
+-- sigue siendo cierta hasta que alguien decida lo contrario.
+CREATE OR REPLACE FUNCTION public.revoke_verifications_for_domain(_domain_id uuid, _reason text)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  n integer;
+BEGIN
+  UPDATE public.profile_affiliations
+  SET status = 'revoked', status_reason = coalesce(_reason, 'domain_revoked')
+  WHERE email_domain_id = _domain_id AND status = 'verified';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  PERFORM public.log_verification_event(NULL, NULL, 'domain_revoked',
+    jsonb_build_object('domain_id', _domain_id, 'count', n, 'reason', _reason));
+  RETURN n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.revoke_verifications_for_domain(uuid, text) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.revoke_verifications_for_domain(uuid, text) TO service_role;
+
+-- ------------------------------------------------------------
+-- 12. Solicitudes desde la app
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.request_institution(
+  _kind text,
+  _institution_name text DEFAULT NULL,
+  _country_code text DEFAULT NULL,
+  _city text DEFAULT NULL,
+  _website_url text DEFAULT NULL,
+  _notes text DEFAULT NULL,
+  _university_id uuid DEFAULT NULL,
+  _campus_id uuid DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_id  uuid;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED';
+  END IF;
+  IF _kind NOT IN ('add_institution', 'manual_verification') THEN
+    RAISE EXCEPTION 'INVALID_REQUEST';
+  END IF;
+  IF _kind = 'add_institution' AND length(btrim(coalesce(_institution_name, ''))) < 3 THEN
+    RAISE EXCEPTION 'INVALID_REQUEST';
+  END IF;
+  IF (SELECT count(*) FROM public.institution_requests r
+      WHERE r.user_id = v_uid AND r.created_at > now() - interval '1 day') >= 5 THEN
+    RAISE EXCEPTION 'REQUEST_RATE_LIMIT';
+  END IF;
+
+  INSERT INTO public.institution_requests (user_id, kind, institution_name, country_code, city, website_url, notes, university_id, campus_id)
+  VALUES (v_uid, _kind, nullif(btrim(_institution_name), ''), nullif(upper(btrim(_country_code)), ''),
+    nullif(btrim(_city), ''), nullif(btrim(_website_url), ''), nullif(btrim(_notes), ''), _university_id, _campus_id)
+  RETURNING id INTO v_id;
+
+  IF _kind = 'manual_verification' THEN
+    INSERT INTO public.profile_affiliations (user_id, university_id, campus_id, status, status_reason)
+    VALUES (v_uid, _university_id, _campus_id, 'manual_review', 'user_request')
+    ON CONFLICT (user_id) DO UPDATE SET status = 'manual_review', status_reason = 'user_request'
+    WHERE profile_affiliations.status <> 'verified';
+  END IF;
+  RETURN v_id;
+EXCEPTION WHEN check_violation THEN
+  RAISE EXCEPTION 'INVALID_REQUEST';
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.request_institution(text, text, text, text, text, text, uuid, uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.request_institution(text, text, text, text, text, text, uuid, uuid) TO authenticated;
+
+-- ------------------------------------------------------------
+-- 13. Buscar instituciones (selector del alta)
+--
+-- Una fila por campus. Sin texto: las mas usadas, o las mas cercanas si se
+-- pasan coordenadas. Nunca se autoasigna nada: solo se ordena.
+-- Con correo de acceso verificable, solo esa universidad (la base rechazaria
+-- cualquier otra al guardar).
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.search_institutions(
+  _query        text DEFAULT NULL,
+  _country_code text DEFAULT NULL,
+  _type         text DEFAULT NULL,
+  _limit        integer DEFAULT 20,
+  _offset       integer DEFAULT 0,
+  _lat          double precision DEFAULT NULL,
+  _lng          double precision DEFAULT NULL
+)
+RETURNS TABLE (
+  campus_id        uuid,
+  campus_name      text,
+  campus_city      text,
+  university_id    uuid,
+  university_name  text,
+  short_name       text,
+  institution_type text,
+  country_code     text,
+  state_region     text,
+  city             text,
+  campus_count     integer,
+  verification_available boolean,
+  email_verified   boolean
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_q     text := public.search_normalize(left(coalesce(_query, ''), 100));
+  v_mine  uuid;
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED';
+  END IF;
+  v_mine := public.my_email_university();
+
+  RETURN QUERY
+  WITH base AS (
+    SELECT i.id AS cid, i.campus_name AS cname, i.city AS ccity, i.lat, i.lng,
+           u.id AS uid, u.name AS uname, u.short_name AS ushort, u.institution_type AS utype,
+           u.country_code AS ucountry, u.state_region AS ustate, u.city AS ucity,
+           (u.search_document || ' ' || i.search_document) AS doc
+    FROM public.institutions i
+    JOIN public.universities u ON u.id = i.university_id
+    WHERE i.is_active AND u.is_active
+      AND (v_mine IS NULL OR u.id = v_mine)
+      AND (_country_code IS NULL OR u.country_code = upper(_country_code))
+      AND (_type IS NULL OR u.institution_type = _type)
+  ), matched AS (
+    SELECT b.*,
+      CASE
+        WHEN v_q = '' THEN 3
+        WHEN public.search_normalize(b.ushort) = v_q OR public.search_normalize(b.uname) = v_q THEN 0
+        WHEN public.search_normalize(b.uname) LIKE v_q || '%' OR public.search_normalize(b.ushort) LIKE v_q || '%' THEN 1
+        WHEN (' ' || b.doc) LIKE '% ' || v_q || '%' THEN 2
+        ELSE 3
+      END AS rank
+    FROM base b
+    WHERE v_q = ''
+       OR NOT EXISTS (
+         SELECT 1 FROM unnest(string_to_array(v_q, ' ')) t
+         WHERE t <> '' AND position(t IN b.doc) = 0)
+  )
+  SELECT m.cid, m.cname, m.ccity, m.uid, m.uname, m.ushort, m.utype, m.ucountry, m.ustate, m.ucity,
+    (SELECT count(*)::int FROM public.institutions x WHERE x.university_id = m.uid AND x.is_active),
+    EXISTS (SELECT 1 FROM public.institution_email_domains d
+            WHERE d.university_id = m.uid AND d.is_active AND d.verification_enabled),
+    v_mine IS NOT NULL
+  FROM matched m
+  ORDER BY m.rank,
+    CASE WHEN v_q = '' AND _lat IS NOT NULL AND _lng IS NOT NULL AND m.lat IS NOT NULL
+         THEN (m.lat - _lat) ^ 2 + (m.lng - _lng) ^ 2 END NULLS LAST,
+    CASE WHEN v_q = '' THEN (SELECT count(*) FROM public.profiles p WHERE p.campus_id = m.cid) END DESC NULLS LAST,
+    m.uname, m.cname NULLS FIRST, m.cid
+  LIMIT  least(greatest(coalesce(_limit, 20), 1), 50)
+  OFFSET least(greatest(coalesce(_offset, 0), 0), 1000);
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.search_institutions(text, text, text, integer, integer, double precision, double precision) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.search_institutions(text, text, text, integer, integer, double precision, double precision) TO authenticated;
+
+-- ------------------------------------------------------------
+-- 14. Perfil publico: institucion y campus, nunca matricula ni correo
+--
+-- CREATE OR REPLACE conserva las columnas existentes en su orden y anade las
+-- nuevas al final.
+-- ------------------------------------------------------------
+CREATE OR REPLACE VIEW public.public_profiles
+WITH (security_invoker = false) AS
+SELECT
+  p.id,
+  p.name,
+  p.avatar_url,
+  p.major,
+  p.semester,
+  p.residence_type,
+  p.interests,
+  p.languages,
+  p.campus_id,
+  p.points,
+  p.reputation,
+  p.created_at,
+  p.origin,
+  p.institution_verified,
+  u.name             AS university_name,
+  u.short_name       AS university_short_name,
+  u.institution_type AS institution_type,
+  i.campus_name      AS campus_name
+FROM public.profiles p
+LEFT JOIN public.institutions i ON i.id = p.campus_id
+LEFT JOIN public.universities u ON u.id = i.university_id
+WHERE auth.uid() IS NOT NULL
+  AND NOT public.is_blocked(auth.uid(), p.id)
+  AND (p.id = auth.uid() OR public.same_institution(auth.uid(), p.id));
+
+GRANT SELECT ON public.public_profiles TO authenticated;
+
+-- ------------------------------------------------------------
+-- 15. Cuentas que ya estaban verificadas
+-- ------------------------------------------------------------
+INSERT INTO public.profile_affiliations (
+  user_id, university_id, campus_id, status, institutional_email_hash, institutional_email_masked,
+  email_domain_id, verification_method, verified_at, status_reason)
+SELECT
+  p.id,
+  i.university_id,
+  p.campus_id,
+  CASE WHEN d.id IS NOT NULL AND au.email_confirmed_at IS NULL THEN 'pending_email' ELSE 'verified' END,
+  CASE WHEN d.id IS NOT NULL AND au.email_confirmed_at IS NOT NULL
+       THEN public.institution_hmac(public.normalize_email_address(au.email)) END,
+  CASE WHEN d.id IS NOT NULL THEN public.mask_email(public.normalize_email_address(au.email)) END,
+  d.id,
+  CASE WHEN d.id IS NOT NULL AND au.email_confirmed_at IS NULL THEN NULL
+       WHEN d.id IS NOT NULL THEN 'legacy_auth_email'
+       ELSE 'legacy_manual' END,
+  CASE WHEN d.id IS NOT NULL AND au.email_confirmed_at IS NULL THEN NULL ELSE p.created_at END,
+  CASE WHEN d.id IS NOT NULL AND au.email_confirmed_at IS NULL THEN 'legacy_unconfirmed_auth_email' END
+FROM public.profiles p
+JOIN auth.users au ON au.id = p.id
+LEFT JOIN public.institutions i ON i.id = p.campus_id
+LEFT JOIN public.institution_email_domains d
+  ON d.domain = public.email_domain(public.normalize_email_address(au.email))
+ AND d.university_id = i.university_id
+WHERE p.institution_verified
+  AND i.university_id IS NOT NULL
+ON CONFLICT (user_id) DO NOTHING;
+
+COMMIT;
+
+-- >>> 20260917010000_catalogo-instituciones-datos.sql <<<
+-- ============================================================
+-- Catalogo de instituciones: datos (GENERADO, no editar a mano)
+--
+-- Generado por scripts/import-institutions/import.mjs a partir de
+-- scripts/import-institutions/data/catalog.json y email-domains.json.
+-- Fuentes: SEP formato 911 (MX), SNIES del MEN (CO), IPEDS/NCES (US).
+--
+-- Upsert por slug; nunca borra. Falla si un id conocido cambiaria, si un
+-- campus cambiaria de institucion o si algun perfil o evento cambia de
+-- campus. En los registros que ya existian solo rellena lo vacio.
+-- Requiere 20260917000000_verificacion-institucional.sql.
+-- ============================================================
+
+BEGIN;
+
+CREATE TEMP TABLE _before_profiles ON COMMIT DROP AS
+  SELECT campus_id, count(*) AS n FROM public.profiles GROUP BY campus_id;
+CREATE TEMP TABLE _before_events ON COMMIT DROP AS
+  SELECT institution_id, count(*) AS n FROM public.events GROUP BY institution_id;
+
+-- 1. Ids que no pueden cambiar
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM public.universities WHERE slug = 'tec' AND id <> '2c931b2c-9449-4ba7-b701-2a57c2ae2f62') THEN
+    RAISE EXCEPTION 'ID_CHANGED universities.tec';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.universities WHERE slug = 'icesi' AND id <> '24ba682b-945a-4355-865a-dc65ec118861') THEN
+    RAISE EXCEPTION 'ID_CHANGED universities.icesi';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.universities WHERE slug = 'javeriana' AND id <> '9fa36a6f-f113-4788-90b2-5fc69430c851') THEN
+    RAISE EXCEPTION 'ID_CHANGED universities.javeriana';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.universities WHERE slug = 'cesa' AND id <> '5ef91efd-a109-48d3-8f68-2a9308ce8c5e') THEN
+    RAISE EXCEPTION 'ID_CHANGED universities.cesa';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.universities WHERE slug = 'purdue' AND id <> 'bcda7873-6322-4d24-8b49-428e6706ee7d') THEN
+    RAISE EXCEPTION 'ID_CHANGED universities.purdue';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.universities WHERE slug = 'florida-state' AND id <> 'd8700f55-9fd3-42d1-a199-fba956e5d78d') THEN
+    RAISE EXCEPTION 'ID_CHANGED universities.florida-state';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'tec-queretaro' AND id <> '1a898a3a-53c0-4468-8dc6-b03bef169a6e') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.tec-queretaro';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'tec-guadalajara' AND id <> '9269e0c2-1704-4264-8e26-294c7fddbf8a') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.tec-guadalajara';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'tec-monterrey' AND id <> 'a77a918e-5b0b-45b2-9a01-acdd4d61d08a') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.tec-monterrey';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'tec-ciudad-de-mexico' AND id <> '1fe414c7-3136-4696-ac67-2b07a416e9cf') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.tec-ciudad-de-mexico';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'florida-state' AND id <> 'be062ad6-1a5d-4687-a71d-21c2ac7a8ad0') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.florida-state';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'purdue' AND id <> '3869753e-03d4-4ad9-ae96-2b7605117f4b') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.purdue';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'icesi' AND id <> '2d5e3036-eed0-4398-92db-f92cb5f4dd4e') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.icesi';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'javeriana' AND id <> '91eb1307-a047-436b-ba78-8c6eca58c4fe') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.javeriana';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'cesa' AND id <> '62cd4de7-26c3-49e4-b4f4-7b5e3efd0617') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.cesa';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'unam' AND id <> '9aa57d8a-732e-4293-aa8a-bab741523796') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.unam';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'ipn' AND id <> 'a7463fb5-c938-4743-87cf-51f43edae71b') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.ipn';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'udg' AND id <> 'c32b35f0-6177-4488-bb3c-cfa2e0985164') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.udg';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'uanl' AND id <> 'd54d915b-c7a1-4e6d-a2b5-bb7ff3a6f603') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.uanl';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'buap' AND id <> '31744f31-49df-466f-bab4-f4527afde0f5') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.buap';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'uam' AND id <> 'e843d37b-5c82-42c0-b853-654807a41042') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.uam';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'uaemex' AND id <> '948cbbe0-8a83-4e6c-a4b6-e0aeb1d7f090') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.uaemex';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'uaslp' AND id <> '713927e5-430e-4325-af3f-0333d410b5d1') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.uaslp';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'uaq' AND id <> 'eaa4cd40-0566-42a6-ac91-e652b1137151') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.uaq';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'ibero' AND id <> '46a080c1-c6d2-4ee9-ba04-db520d6ef99e') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.ibero';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'itam' AND id <> 'f5d3ed89-6d29-4fbe-9470-44cd6ce0db26') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.itam';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'anahuac' AND id <> '60786e59-f502-4f49-824c-7509b8e2a400') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.anahuac';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'udlap' AND id <> '35a6dfa2-32e4-4286-ac5b-22241ecf3065') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.udlap';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'up' AND id <> '026f4553-90bf-46b6-b17f-5784dbff1b7f') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.up';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'colmex' AND id <> '9be8685c-ae88-4a73-ba4f-14b835d9b66b') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.colmex';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.institutions WHERE slug = 'cide' AND id <> 'e592d5a8-f8e9-41e9-b285-68c5f5f858e1') THEN
+    RAISE EXCEPTION 'ID_CHANGED institutions.cide';
+  END IF;
+END $$;
+
+-- 2. Instituciones
+CREATE TEMP TABLE _u (slug text, country_code text, name text, short_name text, institution_type text, control text,
+  state_region text, city text, website_url text, aliases text[], source_name text, source_ref text, source_url text,
+  source_checked_at date, preserve boolean) ON COMMIT DROP;
+INSERT INTO _u VALUES
+  ('colegio-bolivar', 'CO', U&'Colegio Bol\00EDvar', NULL, 'school', 'private', 'Valle del Cauca', 'Cali', 'https://www.colegiobolivar.edu.co', ARRAY['Colegio Bolivar Cali']::text[], 'MEN-ESTABLECIMIENTOS', '376001001221', 'https://www.datos.gov.co/d/upkm-vdjb', '2026-09-14', false),
+  ('cesa', 'CO', U&'Colegio de Estudios Superiores de Administraci\00F3n', 'CESA', 'university_institution', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.cesa.edu.co', ARRAY[]::text[], 'SNIES', '2704', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', true),
+  ('colegio-mayor-de-antioquia', 'CO', 'Colegio Mayor de Antioquia', NULL, 'university_institution', 'public', 'Antioquia', U&'Medell\00EDn', 'https://www.colmayor.edu.co', ARRAY[]::text[], 'SNIES', '2110', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('escuela-colombiana-de-ingenieria-julio-garavito', 'CO', U&'Escuela Colombiana de Ingenier\00EDa Julio Garavito', U&'Escuela de Ingenier\00EDa', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.escuelaing.edu.co', ARRAY[]::text[], 'SNIES', '2811', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('fundacion-universidad-autonoma-de-colombia', 'CO', U&'Fundaci\00F3n Universidad Aut\00F3noma de Colombia', 'FUAC', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.fuac.edu.co', ARRAY[]::text[], 'SNIES', '1725', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('fundacion-universidad-de-america', 'CO', U&'Fundaci\00F3n Universidad de Am\00E9rica', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.uamerica.edu.co', ARRAY[]::text[], 'SNIES', '1715', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('fundacion-universitaria-antonio-de-arevalo', 'CO', U&'Fundaci\00F3n Universitaria Antonio de Ar\00E9valo', 'Unitecnar', 'university_institution', 'private', U&'Bol\00EDvar', 'Cartagena de Indias', 'https://www.tecnar.edu.co', ARRAY[]::text[], 'SNIES', '3710', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('fundacion-universitaria-ceipa', 'CO', U&'Fundaci\00F3n Universitaria CEIPA', 'CEIPA', 'university_institution', 'private', 'Antioquia', 'Sabaneta', 'https://www.ceipa.edu.co', ARRAY[]::text[], 'SNIES', '2727', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('fundacion-universitaria-de-ciencias-de-la-salud', 'CO', U&'Fundaci\00F3n Universitaria de Ciencias de la Salud', NULL, 'university_institution', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.fucsalud.edu.co', ARRAY[]::text[], 'SNIES', '2702', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('fundacion-universitaria-del-area-andina', 'CO', U&'Fundaci\00F3n Universitaria del \00C1rea Andina', NULL, 'university_institution', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.areandina.edu.co', ARRAY[]::text[], 'SNIES', '2728', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('fundacion-universitaria-juan-n-corpas', 'CO', U&'Fundaci\00F3n Universitaria Juan N. Corpas', NULL, 'university_institution', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.juancorpas.edu.co', ARRAY[]::text[], 'SNIES', '2707', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('fundacion-universitaria-konrad-lorenz', 'CO', U&'Fundaci\00F3n Universitaria Konrad Lorenz', NULL, 'university_institution', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.konradlorenz.edu.co', ARRAY[]::text[], 'SNIES', '2712', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('instituto-tecnologico-metropolitano', 'CO', U&'Instituto Tecnol\00F3gico Metropolitano', NULL, 'university_institution', 'public', 'Antioquia', U&'Medell\00EDn', 'https://www.itm.edu.co', ARRAY[]::text[], 'SNIES', '3302', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('javeriana', 'CO', 'Pontificia Universidad Javeriana', 'Javeriana', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.javeriana.edu.co', ARRAY[]::text[], 'SNIES', '1701', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', true),
+  ('tecnologico-de-antioquia', 'CO', U&'Tecnol\00F3gico de Antioquia', NULL, 'university_institution', 'public', 'Antioquia', U&'Medell\00EDn', 'https://www.tdea.edu.co', ARRAY[]::text[], 'SNIES', '3204', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-antonio-narino', 'CO', U&'Universidad Antonio Nari\00F1o', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.uan.edu.co', ARRAY[]::text[], 'SNIES', '1826', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-autonoma-de-bucaramanga', 'CO', U&'Universidad Aut\00F3noma de Bucaramanga', 'UNAB', 'university', 'private', 'Santander', 'Bucaramanga', 'https://www.unab.edu.co', ARRAY[]::text[], 'SNIES', '1823', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-autonoma-de-manizales', 'CO', U&'Universidad Aut\00F3noma de Manizales', NULL, 'university', 'private', 'Caldas', 'Manizales', 'https://www.autonoma.edu.co', ARRAY[]::text[], 'SNIES', '1825', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-autonoma-de-occidente-co', 'CO', U&'Universidad Aut\00F3noma de Occidente', 'UAO', 'university', 'private', 'Valle del Cauca', 'Cali', 'https://www.uao.edu.co', ARRAY[]::text[], 'SNIES', '1830', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-autonoma-del-caribe', 'CO', U&'Universidad Aut\00F3noma del Caribe', U&'Uniaut\00F3noma', 'university', 'private', U&'Atl\00E1ntico', 'Barranquilla', 'https://www.uac.edu.co', ARRAY[]::text[], 'SNIES', '1804', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-autonoma-indigena-intercultural', 'CO', U&'Universidad Aut\00F3noma Ind\00EDgena Intercultural', 'UAIIN', 'university', 'public', 'Cauca', U&'Popay\00E1n', 'https://www.uaiinpebi-cric.edu.co', ARRAY[]::text[], 'SNIES', '9929', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-autonoma-latinoamericana', 'CO', U&'Universidad Aut\00F3noma Latinoamericana', 'UNAULA', 'university', 'private', 'Antioquia', U&'Medell\00EDn', 'https://www.unaula.edu.co', ARRAY[]::text[], 'SNIES', '1814', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-catolica-de-colombia', 'CO', U&'Universidad Cat\00F3lica de Colombia', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.ucatolica.edu.co', ARRAY[]::text[], 'SNIES', '1719', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-catolica-de-manizales', 'CO', U&'Universidad Cat\00F3lica de Manizales', NULL, 'university', 'private', 'Caldas', 'Manizales', 'https://www.ucm.edu.co', ARRAY[]::text[], 'SNIES', '1827', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-catolica-de-oriente', 'CO', U&'Universidad Cat\00F3lica de Oriente', 'UCO', 'university', 'private', 'Antioquia', 'Rionegro', 'https://www.uco.edu.co', ARRAY[]::text[], 'SNIES', '1726', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-catolica-de-pereira', 'CO', U&'Universidad Cat\00F3lica de Pereira', NULL, 'university', 'private', 'Risaralda', 'Pereira', 'https://www.ucp.edu.co', ARRAY[]::text[], 'SNIES', '2711', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-catolica-luis-amigo', 'CO', U&'Universidad Cat\00F3lica Luis Amig\00F3', NULL, 'university', 'private', 'Antioquia', U&'Medell\00EDn', 'https://www.ucatolicaluisamigo.edu.co', ARRAY[]::text[], 'SNIES', '2719', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-central', 'CO', 'Universidad Central', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.ucentral.edu.co', ARRAY[]::text[], 'SNIES', '1709', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-ces', 'CO', 'Universidad CES', NULL, 'university', 'private', 'Antioquia', U&'Medell\00EDn', 'https://www.ces.edu.co', ARRAY[]::text[], 'SNIES', '2708', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-cesmag', 'CO', 'Universidad CESMAG', 'Unicesmag', 'university', 'private', U&'Nari\00F1o', 'Pasto', 'https://www.iucesmag.edu.co', ARRAY[]::text[], 'SNIES', '2744', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-colegio-mayor-de-cundinamarca', 'CO', 'Universidad Colegio Mayor de Cundinamarca', NULL, 'university', 'public', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.unicolmayor.edu.co', ARRAY[]::text[], 'SNIES', '1121', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-cooperativa-de-colombia', 'CO', 'Universidad Cooperativa de Colombia', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.ucc.edu.co', ARRAY[]::text[], 'SNIES', '1818', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-antioquia', 'CO', 'Universidad de Antioquia', 'UdeA', 'university', 'public', 'Antioquia', U&'Medell\00EDn', 'https://www.udea.edu.co', ARRAY[]::text[], 'SNIES', '1201', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-bogota-jorge-tadeo-lozano', 'CO', U&'Universidad de Bogot\00E1 Jorge Tadeo Lozano', 'Utadeo', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.utadeo.edu.co', ARRAY[]::text[], 'SNIES', '1707', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-boyaca', 'CO', U&'Universidad de Boyac\00E1', U&'Uniboyac\00E1', 'university', 'private', U&'Boyac\00E1', 'Tunja', 'https://www.uniboyaca.edu.co', ARRAY[]::text[], 'SNIES', '1734', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-caldas', 'CO', 'Universidad de Caldas', NULL, 'university', 'public', 'Caldas', 'Manizales', 'https://www.ucaldas.edu.co', ARRAY[]::text[], 'SNIES', '1112', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-cartagena', 'CO', 'Universidad de Cartagena', NULL, 'university', 'public', U&'Bol\00EDvar', 'Cartagena de Indias', 'https://www.unicartagena.edu.co', ARRAY[]::text[], 'SNIES', '1205', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-ciencias-aplicadas-y-ambientales', 'CO', 'Universidad de Ciencias Aplicadas y Ambientales', 'UDCA', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.udca.edu.co', ARRAY[]::text[], 'SNIES', '1835', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-cordoba', 'CO', U&'Universidad de C\00F3rdoba', NULL, 'university', 'public', U&'C\00F3rdoba', U&'Monter\00EDa', 'https://www.unicordoba.edu.co', ARRAY[]::text[], 'SNIES', '1113', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-cundinamarca', 'CO', 'Universidad de Cundinamarca', 'UDEC', 'university', 'public', 'Cundinamarca', U&'Fusagasug\00E1', 'https://www.ucundinamarca.edu.co', ARRAY[]::text[], 'SNIES', '1214', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-ibague', 'CO', U&'Universidad de Ibagu\00E9', NULL, 'university', 'private', 'Tolima', U&'Ibagu\00E9', 'https://www.unibague.edu.co', ARRAY[]::text[], 'SNIES', '1831', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-investigacion-y-desarrollo', 'CO', U&'Universidad de Investigaci\00F3n y Desarrollo', 'UDI', 'university', 'private', 'Santander', 'Bucaramanga', 'https://www.udi.edu.co', ARRAY[]::text[], 'SNIES', '2847', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-la-amazonia', 'CO', 'Universidad de la Amazonia', NULL, 'university', 'public', U&'Caquet\00E1', 'Florencia', 'https://www.uniamazonia.edu.co', ARRAY[]::text[], 'SNIES', '1115', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-la-costa', 'CO', 'Universidad de la Costa', 'CUC', 'university', 'private', U&'Atl\00E1ntico', 'Barranquilla', 'https://www.cuc.edu.co', ARRAY[]::text[], 'SNIES', '2810', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-la-guajira', 'CO', 'Universidad de la Guajira', NULL, 'university', 'public', 'La Guajira', 'Riohacha', 'https://www.uniguajira.edu.co', ARRAY[]::text[], 'SNIES', '1218', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-la-sabana', 'CO', 'Universidad de la Sabana', 'Unisabana', 'university', 'private', 'Cundinamarca', U&'Ch\00EDa', 'https://www.unisabana.edu.co', ARRAY[]::text[], 'SNIES', '1711', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-la-salle', 'CO', 'Universidad de La Salle', 'La Salle', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.lasalle.edu.co', ARRAY[]::text[], 'SNIES', '1803', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-los-andes', 'CO', 'Universidad de los Andes', 'Uniandes', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.uniandes.edu.co', ARRAY[]::text[], 'SNIES', '1813', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-los-llanos', 'CO', 'Universidad de los Llanos', NULL, 'university', 'public', 'Meta', 'Villavicencio', NULL, ARRAY[]::text[], 'SNIES', '1119', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-manizales', 'CO', 'Universidad de Manizales', NULL, 'university', 'private', 'Caldas', 'Manizales', 'https://www.umanizales.edu.co', ARRAY[]::text[], 'SNIES', '1722', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-medellin', 'CO', U&'Universidad de Medell\00EDn', NULL, 'university', 'private', 'Antioquia', U&'Medell\00EDn', 'https://www.udem.edu.co', ARRAY[]::text[], 'SNIES', '1812', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-narino', 'CO', U&'Universidad de Nari\00F1o', NULL, 'university', 'public', U&'Nari\00F1o', 'Pasto', 'https://www.udenar.edu.co', ARRAY[]::text[], 'SNIES', '1206', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-pamplona', 'CO', 'Universidad de Pamplona', NULL, 'university', 'public', 'Norte de Santander', 'Pamplona', 'https://www.unipamplona.edu.co', ARRAY[]::text[], 'SNIES', '1212', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-san-buenaventura', 'CO', 'Universidad de San Buenaventura', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.usbbog.edu.co', ARRAY[]::text[], 'SNIES', '1718', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-santander', 'CO', 'Universidad de Santander', 'UDES', 'university', 'private', 'Santander', 'Bucaramanga', 'https://www.udes.edu.co', ARRAY[]::text[], 'SNIES', '2832', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-de-sucre', 'CO', 'Universidad de Sucre', NULL, 'university', 'public', 'Sucre', 'Sincelejo', 'https://www.unisucre.edu.co', ARRAY[]::text[], 'SNIES', '1217', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-atlantico-co', 'CO', U&'Universidad del Atl\00E1ntico', NULL, 'university', 'public', U&'Atl\00E1ntico', 'Puerto Colombia', 'https://www.uniatlantico.edu.co', ARRAY[]::text[], 'SNIES', '1202', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-cauca', 'CO', 'Universidad del Cauca', NULL, 'university', 'public', 'Cauca', U&'Popay\00E1n', 'https://www.unicauca.edu.co', ARRAY[]::text[], 'SNIES', '1110', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-magdalena', 'CO', 'Universidad del Magdalena', 'Unimagdalena', 'university', 'public', 'Magdalena', 'Santa Marta', 'https://unimagdalena.edu.co', ARRAY[]::text[], 'SNIES', '1213', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-norte', 'CO', 'Universidad del Norte', 'Uninorte', 'university', 'private', U&'Atl\00E1ntico', 'Barranquilla', 'https://www.uninorte.edu.co', ARRAY[]::text[], 'SNIES', '1713', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-pacifico', 'CO', U&'Universidad del Pac\00EDfico', NULL, 'university', 'public', 'Valle del Cauca', 'Buenaventura', 'https://www.unipacifico.edu.co', ARRAY[]::text[], 'SNIES', '1122', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-quindio', 'CO', U&'Universidad del Quind\00EDo', NULL, 'university', 'public', U&'Quind\00EDo', 'Armenia', 'https://www.uniquindio.edu.co', ARRAY[]::text[], 'SNIES', '1208', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-rosario', 'CO', 'Universidad del Rosario', 'URosario', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.urosario.edu.co', ARRAY[U&'Colegio Mayor de Nuestra Se\00F1ora del Rosario']::text[], 'SNIES', '1714', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-sinu-elias-bechara-zainum', 'CO', U&'Universidad del Sin\00FA El\00EDas Bechara Zainum', U&'Unisin\00FA', 'university', 'private', U&'C\00F3rdoba', U&'Monter\00EDa', 'https://www.unisinu.edu.co', ARRAY[]::text[], 'SNIES', '1833', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-tolima', 'CO', 'Universidad del Tolima', NULL, 'university', 'public', 'Tolima', U&'Ibagu\00E9', 'https://www.ut.edu.co', ARRAY[]::text[], 'SNIES', '1207', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-del-valle', 'CO', 'Universidad del Valle', 'Univalle', 'university', 'public', 'Valle del Cauca', 'Cali', 'https://www.univalle.edu.co', ARRAY[]::text[], 'SNIES', '1203', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-distrital-francisco-jose-de-caldas', 'CO', U&'Universidad Distrital Francisco Jos\00E9 de Caldas', 'UDistrital', 'university', 'public', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.udistrital.edu.co', ARRAY[]::text[], 'SNIES', '1301', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-eafit', 'CO', 'Universidad EAFIT', 'EAFIT', 'university', 'private', 'Antioquia', U&'Medell\00EDn', 'https://www.eafit.edu.co', ARRAY[]::text[], 'SNIES', '1712', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-ean', 'CO', 'Universidad EAN', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.ean.edu.co', ARRAY[]::text[], 'SNIES', '2812', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-ecci', 'CO', 'Universidad ECCI', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.ecci.edu.co', ARRAY[]::text[], 'SNIES', '5802', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-eia', 'CO', 'Universidad EIA', NULL, 'university', 'private', 'Antioquia', 'Envigado', 'https://www.eia.edu.co', ARRAY[]::text[], 'SNIES', '2813', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-el-bosque', 'CO', 'Universidad El Bosque', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.unbosque.edu.co', ARRAY[]::text[], 'SNIES', '1729', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-externado-de-colombia', 'CO', 'Universidad Externado de Colombia', 'Externado', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.uexternado.edu.co', ARRAY[]::text[], 'SNIES', '1706', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-francisco-de-paula-santander', 'CO', 'Universidad Francisco de Paula Santander', NULL, 'university', 'public', 'Norte de Santander', U&'San Jos\00E9 de C\00FAcuta', 'https://www.ufps.edu.co', ARRAY[]::text[], 'SNIES', '1209', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('icesi', 'CO', 'Universidad Icesi', 'Icesi', 'university', 'private', 'Valle del Cauca', 'Cali', 'https://www.icesi.edu.co', ARRAY[]::text[], 'SNIES', '1828', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', true),
+  ('universidad-incca-de-colombia', 'CO', 'Universidad INCCA de Colombia', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.unincca.edu.co', ARRAY[]::text[], 'SNIES', '1703', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-industrial-de-santander', 'CO', 'Universidad Industrial de Santander', 'UIS', 'university', 'public', 'Santander', 'Bucaramanga', 'https://www.uis.edu.co', ARRAY[]::text[], 'SNIES', '1204', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-internacional-del-tropico-americano', 'CO', U&'Universidad Internacional del Tr\00F3pico Americano', NULL, 'university', 'public', 'Casanare', 'Yopal', 'https://www.unitropico.edu.co', ARRAY[]::text[], 'SNIES', '2743', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-la-gran-colombia', 'CO', 'Universidad La Gran Colombia', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.ugc.edu.co', ARRAY[]::text[], 'SNIES', '1801', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-libre', 'CO', 'Universidad Libre', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.unilibre.edu.co', ARRAY[]::text[], 'SNIES', '1806', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-manuela-beltran', 'CO', U&'Universidad Manuela Beltr\00E1n', 'UMB', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.umb.edu.co', ARRAY[]::text[], 'SNIES', '1735', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-mariana', 'CO', 'Universidad Mariana', NULL, 'university', 'private', U&'Nari\00F1o', 'Pasto', 'https://www.umariana.edu.co', ARRAY[]::text[], 'SNIES', '1720', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-metropolitana', 'CO', 'Universidad Metropolitana', NULL, 'university', 'private', U&'Atl\00E1ntico', 'Barranquilla', 'https://www.unimetro.edu.co', ARRAY[]::text[], 'SNIES', '1824', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-militar-nueva-granada', 'CO', 'Universidad Militar Nueva Granada', 'UMNG', 'university', 'public', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.umng.edu.co', ARRAY[]::text[], 'SNIES', '1117', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-nacional-abierta-y-a-distancia', 'CO', 'Universidad Nacional Abierta y a Distancia', 'UNAD', 'university', 'public', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.unad.edu.co', ARRAY[]::text[], 'SNIES', '2102', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-nacional-de-colombia', 'CO', 'Universidad Nacional de Colombia', 'UNAL', 'university', 'public', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.unal.edu.co', ARRAY[]::text[], 'SNIES', '1101', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-pedagogica-nacional', 'CO', U&'Universidad Pedag\00F3gica Nacional', NULL, 'university', 'public', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.pedagogica.edu.co', ARRAY[]::text[], 'SNIES', '1105', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-pedagogica-y-tecnologica-de-colombia', 'CO', U&'Universidad Pedag\00F3gica y Tecnol\00F3gica de Colombia', 'UPTC', 'university', 'public', U&'Boyac\00E1', 'Tunja', 'https://www.uptc.edu.co', ARRAY[]::text[], 'SNIES', '1106', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-piloto-de-colombia', 'CO', 'Universidad Piloto de Colombia', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.unipiloto.edu.co', ARRAY[]::text[], 'SNIES', '1815', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-pontificia-bolivariana', 'CO', 'Universidad Pontificia Bolivariana', 'UPB', 'university', 'private', 'Antioquia', U&'Medell\00EDn', 'https://www.upb.edu.co', ARRAY[]::text[], 'SNIES', '1710', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-popular-del-cesar', 'CO', 'Universidad Popular del Cesar', NULL, 'university', 'public', 'Cesar', 'Valledupar', 'https://www.unicesar.edu.co', ARRAY[]::text[], 'SNIES', '1120', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-santiago-de-cali', 'CO', 'Universidad Santiago de Cali', 'USC', 'university', 'private', 'Valle del Cauca', 'Cali', 'https://www.usc.edu.co', ARRAY[]::text[], 'SNIES', '1805', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-santo-tomas', 'CO', U&'Universidad Santo Tom\00E1s', 'USTA', 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.usta.edu.co', ARRAY[]::text[], 'SNIES', '1704', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-sergio-arboleda', 'CO', 'Universidad Sergio Arboleda', NULL, 'university', 'private', U&'Bogot\00E1 D.C.', U&'Bogot\00E1', 'https://www.usergioarboleda.edu.co', ARRAY[]::text[], 'SNIES', '1728', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-simon-bolivar', 'CO', U&'Universidad Sim\00F3n Bol\00EDvar', NULL, 'university', 'private', U&'Atl\00E1ntico', 'Barranquilla', 'https://www.unisimonbolivar.edu.co', ARRAY[]::text[], 'SNIES', '2805', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-surcolombiana', 'CO', 'Universidad Surcolombiana', NULL, 'university', 'public', 'Huila', 'Neiva', 'https://www.usco.edu.co', ARRAY[]::text[], 'SNIES', '1114', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-tecnologica-de-bolivar', 'CO', U&'Universidad Tecnol\00F3gica de Bol\00EDvar', NULL, 'university', 'private', U&'Bol\00EDvar', 'Cartagena de Indias', 'https://www.unitecnologica.edu.co', ARRAY[]::text[], 'SNIES', '1832', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-tecnologica-de-pereira', 'CO', U&'Universidad Tecnol\00F3gica de Pereira', 'UTP', 'university', 'public', 'Risaralda', 'Pereira', 'https://www.utp.edu.co', ARRAY[]::text[], 'SNIES', '1111', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('universidad-tecnologica-del-choco-diego-luis-cordoba', 'CO', U&'Universidad Tecnol\00F3gica del Choc\00F3 Diego Luis C\00F3rdoba', 'UTCH', 'university', 'public', U&'Choc\00F3', U&'Quibd\00F3', 'https://www.utch.edu.co', ARRAY[]::text[], 'SNIES', '1118', 'https://www.datos.gov.co/d/n5yy-8nav', '2026-09-14', false),
+  ('buap', 'MX', U&'Benem\00E9rita Universidad Aut\00F3noma de Puebla', 'BUAP', 'university', 'public', 'Puebla', 'Puebla', NULL, ARRAY[]::text[], 'SEP-911', '21MSU0014E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('centro-de-ensenanza-tecnica-y-superior', 'MX', U&'Centro de Ense\00F1anza T\00E9cnica y Superior', NULL, 'university_institution', 'private', 'Baja California', 'Mexicali', NULL, ARRAY[]::text[], 'SEP-911', '02MSU0021Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('centro-de-estudios-del-mayab', 'MX', 'Centro de Estudios del Mayab', NULL, 'university_institution', 'private', U&'Yucat\00E1n', U&'M\00E9rida', NULL, ARRAY[]::text[], 'SEP-911', '31MSU0038V', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('centro-de-estudios-superiores-del-bajio', 'MX', U&'Centro de Estudios Superiores del Baj\00EDo', NULL, 'university_institution', 'private', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, ARRAY[]::text[], 'SEP-911', '22MSU0030V', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('centro-de-estudios-superiores-en-ciencias-juridicas-y-criminologicas', 'MX', U&'Centro de Estudios Superiores en Ciencias Jur\00EDdicas y Criminol\00F3gicas', NULL, 'university_institution', 'private', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU0073Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('cide', 'MX', U&'Centro de Investigaci\00F3n y Docencia Econ\00F3micas', 'CIDE', 'university_institution', 'public', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU3470S', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('centro-universitario-de-tijuana', 'MX', 'Centro Universitario de Tijuana', NULL, 'university_institution', 'private', 'Baja California', 'Tijuana', NULL, ARRAY[]::text[], 'SEP-911', '02MSU0003K', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('centro-universitario-metropolitano-hidalgo', 'MX', 'Centro Universitario Metropolitano Hidalgo', NULL, 'university_institution', 'private', 'Hidalgo', 'Mineral de la Reforma', NULL, ARRAY[]::text[], 'SEP-911', '13MSU0286N', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('centro-universitario-siglo-xxi', 'MX', 'Centro Universitario Siglo XXI', NULL, 'university_institution', 'private', 'Hidalgo', 'Pachuca de Soto', NULL, ARRAY[]::text[], 'SEP-911', '13MSU0009K', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('colmex', 'MX', U&'El Colegio de M\00E9xico', 'Colmex', 'university_institution', 'public', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU0132Y', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-de-ciencias-y-estudios-superiores-de-tamaulipas', 'MX', 'Instituto de Ciencias y Estudios Superiores de Tamaulipas', NULL, 'university_institution', 'private', 'Tamaulipas', 'Tampico', NULL, ARRAY[]::text[], 'SEP-911', '28MSU0730I', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-de-estudios-superiores-isima', 'MX', 'Instituto de Estudios Superiores ISIMA', NULL, 'university_institution', 'private', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, ARRAY[]::text[], 'SEP-911', '22MSU0046W', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('ipn', 'MX', U&'Instituto Polit\00E9cnico Nacional', 'IPN', 'university', 'public', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', 'https://www.ipn.mx', ARRAY[]::text[], 'SEP-911', '09MSU0027N', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-profesional-de-emprendedores', 'MX', 'Instituto Profesional de Emprendedores', NULL, 'university_institution', 'private', 'Chiapas', U&'Tuxtla Guti\00E9rrez', NULL, ARRAY[]::text[], 'SEP-911', '07MSU0170C', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('itam', 'MX', U&'Instituto Tecnol\00F3gico Aut\00F3nomo de M\00E9xico', 'ITAM', 'university', 'private', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU0124P', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-acapulco', 'MX', U&'Instituto Tecnol\00F3gico de Acapulco', NULL, 'technological_institute', 'public', 'Guerrero', U&'Acapulco de Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '12MSU0276H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-aguascalientes', 'MX', U&'Instituto Tecnol\00F3gico de Aguascalientes', NULL, 'technological_institute', 'public', 'Aguascalientes', 'Aguascalientes', NULL, ARRAY[]::text[], 'SEP-911', '01MSU0029T', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-apizaco', 'MX', U&'Instituto Tecnol\00F3gico de Apizaco', NULL, 'technological_institute', 'public', 'Tlaxcala', 'Tzompantepec', NULL, ARRAY[]::text[], 'SEP-911', '29MSU0009L', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-campeche', 'MX', U&'Instituto Tecnol\00F3gico de Campeche', NULL, 'technological_institute', 'public', 'Campeche', 'Campeche', NULL, ARRAY[]::text[], 'SEP-911', '04MSU0220X', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-cancun', 'MX', U&'Instituto Tecnol\00F3gico de Canc\00FAn', NULL, 'technological_institute', 'public', 'Quintana Roo', U&'Benito Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '23MSU0105U', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-chilpancingo', 'MX', U&'Instituto Tecnol\00F3gico de Chilpancingo', NULL, 'technological_institute', 'public', 'Guerrero', 'Chilpancingo de los Bravo', NULL, ARRAY[]::text[], 'SEP-911', '12MSU0050B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-ciudad-juarez', 'MX', U&'Instituto Tecnol\00F3gico de Ciudad Ju\00E1rez', NULL, 'technological_institute', 'public', 'Chihuahua', U&'Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '08MSU0041H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-ciudad-madero', 'MX', U&'Instituto Tecnol\00F3gico de Ciudad Madero', NULL, 'technological_institute', 'public', 'Tamaulipas', 'Ciudad Madero', NULL, ARRAY[]::text[], 'SEP-911', '28MSU0028A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-colima', 'MX', U&'Instituto Tecnol\00F3gico de Colima', NULL, 'technological_institute', 'public', 'Colima', U&'Villa de \00C1lvarez', NULL, ARRAY[]::text[], 'SEP-911', '06MSU0020X', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-culiacan', 'MX', U&'Instituto Tecnol\00F3gico de Culiac\00E1n', NULL, 'technological_institute', 'public', 'Sinaloa', U&'Culiac\00E1n', NULL, ARRAY[]::text[], 'SEP-911', '25MSU0021K', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-durango', 'MX', U&'Instituto Tecnol\00F3gico de Durango', NULL, 'technological_institute', 'public', 'Durango', 'Durango', NULL, ARRAY[]::text[], 'SEP-911', '10MSU0028B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-estudios-superiores-de-zamora', 'MX', U&'Instituto Tecnol\00F3gico de Estudios Superiores de Zamora', NULL, 'technological_institute', 'public', U&'Michoac\00E1n', 'Zamora', NULL, ARRAY[]::text[], 'SEP-911', '16MSU0074H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-estudios-superiores-los-cabos', 'MX', U&'Instituto Tecnol\00F3gico de Estudios Superiores Los Cabos', NULL, 'technological_institute', 'public', 'Baja California Sur', 'Los Cabos', NULL, ARRAY[]::text[], 'SEP-911', '03MSU0046H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-hermosillo', 'MX', U&'Instituto Tecnol\00F3gico de Hermosillo', NULL, 'technological_institute', 'public', 'Sonora', 'Hermosillo', NULL, ARRAY[]::text[], 'SEP-911', '26MSU0404P', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-la-laguna', 'MX', U&'Instituto Tecnol\00F3gico de La Laguna', NULL, 'technological_institute', 'public', 'Coahuila', U&'Torre\00F3n', NULL, ARRAY[]::text[], 'SEP-911', '05MSU0069Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-la-paz', 'MX', U&'Instituto Tecnol\00F3gico de La Paz', NULL, 'technological_institute', 'public', 'Baja California Sur', 'La Paz', NULL, ARRAY[]::text[], 'SEP-911', '03MSU0023X', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-los-mochis', 'MX', U&'Instituto Tecnol\00F3gico de Los Mochis', NULL, 'technological_institute', 'public', 'Sinaloa', 'Ahome', NULL, ARRAY[]::text[], 'SEP-911', '25MSU0389O', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-matamoros', 'MX', U&'Instituto Tecnol\00F3gico de Matamoros', NULL, 'technological_institute', 'public', 'Tamaulipas', 'Matamoros', NULL, ARRAY[]::text[], 'SEP-911', '28MSU0044S', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-merida', 'MX', U&'Instituto Tecnol\00F3gico de M\00E9rida', NULL, 'technological_institute', 'public', U&'Yucat\00E1n', U&'M\00E9rida', NULL, ARRAY[]::text[], 'SEP-911', '31MSU0023T', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-morelia', 'MX', U&'Instituto Tecnol\00F3gico de Morelia', NULL, 'technological_institute', 'public', U&'Michoac\00E1n', 'Morelia', NULL, ARRAY[]::text[], 'SEP-911', '16MSU0022B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-nuevo-leon', 'MX', U&'Instituto Tecnol\00F3gico de Nuevo Le\00F3n', NULL, 'technological_institute', 'public', U&'Nuevo Le\00F3n', 'Guadalupe', NULL, ARRAY[]::text[], 'SEP-911', '19MSU1082U', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-oaxaca', 'MX', U&'Instituto Tecnol\00F3gico de Oaxaca', NULL, 'technological_institute', 'public', 'Oaxaca', U&'Oaxaca de Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '20MSU0037Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-pachuca', 'MX', U&'Instituto Tecnol\00F3gico de Pachuca', NULL, 'technological_institute', 'public', 'Hidalgo', 'Pachuca de Soto', NULL, ARRAY[]::text[], 'SEP-911', '13MSU0025B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-puebla', 'MX', U&'Instituto Tecnol\00F3gico de Puebla', NULL, 'technological_institute', 'public', 'Puebla', 'Puebla', NULL, ARRAY[]::text[], 'SEP-911', '21MSU0615Y', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-queretaro', 'MX', U&'Instituto Tecnol\00F3gico de Quer\00E9taro', NULL, 'technological_institute', 'public', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, ARRAY[U&'TecNM Campus Quer\00E9taro', U&'Tecnol\00F3gico Nacional de M\00E9xico, Campus Quer\00E9taro']::text[], 'SEP-911', '22MSU0024K', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-saltillo', 'MX', U&'Instituto Tecnol\00F3gico de Saltillo', NULL, 'technological_institute', 'public', 'Coahuila', 'Saltillo', NULL, ARRAY[]::text[], 'SEP-911', '05MSU0051R', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-san-luis-potosi', 'MX', U&'Instituto Tecnol\00F3gico de San Luis Potos\00ED', NULL, 'technological_institute', 'public', U&'San Luis Potos\00ED', U&'Soledad de Graciano S\00E1nchez', NULL, ARRAY[]::text[], 'SEP-911', '24MSU0223H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-sonora', 'MX', U&'Instituto Tecnol\00F3gico de Sonora', 'ITSON', 'university', 'public', 'Sonora', 'Cajeme', NULL, ARRAY[]::text[], 'SEP-911', '26MSU0023H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-tepic', 'MX', U&'Instituto Tecnol\00F3gico de Tepic', NULL, 'technological_institute', 'public', 'Nayarit', 'Tepic', NULL, ARRAY[]::text[], 'SEP-911', '18MSU0254Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-tijuana', 'MX', U&'Instituto Tecnol\00F3gico de Tijuana', NULL, 'technological_institute', 'public', 'Baja California', 'Tijuana', NULL, ARRAY[]::text[], 'SEP-911', '02MSU0023Y', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-tuxtla-gutierrez', 'MX', U&'Instituto Tecnol\00F3gico de Tuxtla Guti\00E9rrez', NULL, 'technological_institute', 'public', 'Chiapas', U&'Tuxtla Guti\00E9rrez', NULL, ARRAY[]::text[], 'SEP-911', '07MSU0003F', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-villahermosa', 'MX', U&'Instituto Tecnol\00F3gico de Villahermosa', NULL, 'technological_institute', 'public', 'Tabasco', 'Centro', NULL, ARRAY[]::text[], 'SEP-911', '27MSU0180X', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-zacatecas', 'MX', U&'Instituto Tecnol\00F3gico de Zacatecas', NULL, 'technological_institute', 'public', 'Zacatecas', 'Zacatecas', NULL, ARRAY[]::text[], 'SEP-911', '32MSU0025Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-de-zacatepec', 'MX', U&'Instituto Tecnol\00F3gico de Zacatepec', NULL, 'technological_institute', 'public', 'Morelos', 'Zacatepec', NULL, ARRAY[]::text[], 'SEP-911', '17MSU0237A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-del-istmo', 'MX', U&'Instituto Tecnol\00F3gico del Istmo', NULL, 'technological_institute', 'public', 'Oaxaca', U&'Juchit\00E1n de Zaragoza', NULL, ARRAY[]::text[], 'SEP-911', '20MSU0052I', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-mario-molina', 'MX', U&'Instituto Tecnol\00F3gico Mario Molina', NULL, 'technological_institute', 'public', 'Jalisco', 'Zapopan', NULL, ARRAY[]::text[], 'SEP-911', '14MSU0295U', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-superior-de-calkini-en-el-estado-de-campeche', 'MX', U&'Instituto Tecnol\00F3gico Superior de Calkin\00ED en el Estado de Campeche', NULL, 'technological_institute', 'public', 'Campeche', U&'Calkin\00ED', NULL, ARRAY[]::text[], 'SEP-911', '04MSU0013P', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-superior-de-irapuato', 'MX', U&'Instituto Tecnol\00F3gico Superior de Irapuato', NULL, 'technological_institute', 'public', 'Guanajuato', 'Irapuato', NULL, ARRAY[]::text[], 'SEP-911', '11MSU0038H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-superior-de-lerdo', 'MX', U&'Instituto Tecnol\00F3gico Superior de Lerdo', NULL, 'technological_institute', 'public', 'Durango', 'Lerdo', NULL, ARRAY[]::text[], 'SEP-911', '10MSU0012A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-tecnologico-superior-de-xalapa', 'MX', U&'Instituto Tecnol\00F3gico Superior de Xalapa', NULL, 'technological_institute', 'public', 'Veracruz', 'Xalapa', NULL, ARRAY[]::text[], 'SEP-911', '30MSU0215J', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-universitario-del-centro-de-mexico', 'MX', U&'Instituto Universitario del Centro de M\00E9xico', NULL, 'university_institution', 'private', 'Guanajuato', U&'Le\00F3n', NULL, ARRAY[]::text[], 'SEP-911', '11MSU0151A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('instituto-universitario-del-norte', 'MX', 'Instituto Universitario del Norte', NULL, 'university_institution', 'private', 'Coahuila', 'Saltillo', NULL, ARRAY[]::text[], 'SEP-911', '05MSU0047E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('ites-rene-descartes', 'MX', U&'ITES Ren\00E9 Descartes', NULL, 'university_institution', 'private', 'Campeche', 'Campeche', NULL, ARRAY[]::text[], 'SEP-911', '04MSU0005G', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('iteso-universidad-jesuita-de-guadalajara', 'MX', 'ITESO, Universidad Jesuita de Guadalajara', 'ITESO', 'university', 'private', 'Jalisco', 'San Pedro Tlaquepaque', NULL, ARRAY[]::text[], 'SEP-911', '14MSU0044P', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('tecnologico-de-estudios-superiores-de-ecatepec', 'MX', U&'Tecnol\00F3gico de Estudios Superiores de Ecatepec', NULL, 'technological_institute', 'public', U&'Estado de M\00E9xico', 'Ecatepec de Morelos', NULL, ARRAY[]::text[], 'SEP-911', '15MSU0180S', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('tec', 'MX', U&'Tecnol\00F3gico de Monterrey', 'Tec', 'university', 'private', U&'Nuevo Le\00F3n', 'Monterrey', 'https://tec.mx', ARRAY['ITESM', U&'Instituto Tecnol\00F3gico y de Estudios Superiores de Monterrey']::text[], 'SEP-911', '19MSU0029S', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', true),
+  ('universidad-alfa-y-omega', 'MX', 'Universidad Alfa y Omega', NULL, 'university', 'private', 'Tabasco', 'Centro', NULL, ARRAY[]::text[], 'SEP-911', '27MSU0004S', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('anahuac', 'MX', U&'Universidad An\00E1huac', U&'An\00E1huac', 'university', 'private', U&'Estado de M\00E9xico', 'Huixquilucan', NULL, ARRAY[]::text[], 'SEP-911', '15MSU0038D', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-anahuac-de-cancun', 'MX', U&'Universidad An\00E1huac de Canc\00FAn', NULL, 'university', 'private', 'Quintana Roo', U&'Benito Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '23MSU0010G', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-agraria-antonio-narro', 'MX', U&'Universidad Aut\00F3noma Agraria Antonio Narro', NULL, 'university', 'public', 'Coahuila', 'Saltillo', NULL, ARRAY[]::text[], 'SEP-911', '05MSU0645A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-benito-juarez-de-oaxaca', 'MX', U&'Universidad Aut\00F3noma Benito Ju\00E1rez de Oaxaca', 'UABJO', 'university', 'public', 'Oaxaca', U&'Oaxaca de Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '20MSU0011I', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-chapingo', 'MX', U&'Universidad Aut\00F3noma Chapingo', NULL, 'university', 'public', U&'Estado de M\00E9xico', 'Texcoco', NULL, ARRAY[]::text[], 'SEP-911', '15MSU0020E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-aguascalientes', 'MX', U&'Universidad Aut\00F3noma de Aguascalientes', 'UAA', 'university', 'public', 'Aguascalientes', 'Aguascalientes', NULL, ARRAY[]::text[], 'SEP-911', '01MSU0215O', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-baja-california', 'MX', U&'Universidad Aut\00F3noma de Baja California', 'UABC', 'university', 'public', 'Baja California', 'Tijuana', NULL, ARRAY[]::text[], 'SEP-911', '02MSU0020A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-baja-california-sur', 'MX', U&'Universidad Aut\00F3noma de Baja California Sur', NULL, 'university', 'public', 'Baja California Sur', 'La Paz', NULL, ARRAY[]::text[], 'SEP-911', '03MSU0064X', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-campeche', 'MX', U&'Universidad Aut\00F3noma de Campeche', NULL, 'university', 'public', 'Campeche', 'Campeche', NULL, ARRAY[]::text[], 'SEP-911', '04MSU0018K', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-chiapas', 'MX', U&'Universidad Aut\00F3noma de Chiapas', 'UNACH', 'university', 'public', 'Chiapas', U&'Tuxtla Guti\00E9rrez', NULL, ARRAY[]::text[], 'SEP-911', '07MSU0001H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-chihuahua', 'MX', U&'Universidad Aut\00F3noma de Chihuahua', 'UACH', 'university', 'public', 'Chihuahua', 'Chihuahua', NULL, ARRAY[]::text[], 'SEP-911', '08MSU0017H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-ciudad-juarez', 'MX', U&'Universidad Aut\00F3noma de Ciudad Ju\00E1rez', 'UACJ', 'university', 'public', 'Chihuahua', U&'Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '08MSU0245B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-coahuila', 'MX', U&'Universidad Aut\00F3noma de Coahuila', 'UAdeC', 'university', 'public', 'Coahuila', U&'Torre\00F3n', NULL, ARRAY[]::text[], 'SEP-911', '05MSU0010R', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-durango', 'MX', U&'Universidad Aut\00F3noma de Durango', NULL, 'university', 'private', 'Durango', 'Durango', NULL, ARRAY[]::text[], 'SEP-911', '10MSU0060K', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-guadalajara', 'MX', U&'Universidad Aut\00F3noma de Guadalajara', 'UAG', 'university', 'private', 'Jalisco', 'Zapopan', NULL, ARRAY[]::text[], 'SEP-911', '14MSU0028Y', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-guerrero', 'MX', U&'Universidad Aut\00F3noma de Guerrero', 'UAGro', 'university', 'public', 'Guerrero', U&'Acapulco de Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '12MSU0015W', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-la-ciudad-de-mexico', 'MX', U&'Universidad Aut\00F3noma de la Ciudad de M\00E9xico', 'UACM', 'university', 'public', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU0075X', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-nayarit', 'MX', U&'Universidad Aut\00F3noma de Nayarit', 'UAN', 'university', 'public', 'Nayarit', 'Tepic', NULL, ARRAY[]::text[], 'SEP-911', '18MSU0019M', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('uanl', 'MX', U&'Universidad Aut\00F3noma de Nuevo Le\00F3n', 'UANL', 'university', 'public', U&'Nuevo Le\00F3n', U&'San Nicol\00E1s de los Garza', 'https://www.uanl.mx', ARRAY[]::text[], 'SEP-911', '19MSU0011T', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-occidente', 'MX', U&'Universidad Aut\00F3noma de Occidente', NULL, 'university', 'public', 'Sinaloa', U&'Culiac\00E1n', NULL, ARRAY[]::text[], 'SEP-911', '25MSU0370Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('uaq', 'MX', U&'Universidad Aut\00F3noma de Quer\00E9taro', 'UAQ', 'university', 'public', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, ARRAY[]::text[], 'SEP-911', '22MSU0016B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('uaslp', 'MX', U&'Universidad Aut\00F3noma de San Luis Potos\00ED', 'UASLP', 'university', 'public', U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, ARRAY[]::text[], 'SEP-911', '24MSU0011E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-sinaloa', 'MX', U&'Universidad Aut\00F3noma de Sinaloa', 'UAS', 'university', 'public', 'Sinaloa', U&'Culiac\00E1n', NULL, ARRAY[]::text[], 'SEP-911', '25MSU0013B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-tamaulipas', 'MX', U&'Universidad Aut\00F3noma de Tamaulipas', 'UAT', 'university', 'public', 'Tamaulipas', 'Tampico', NULL, ARRAY[]::text[], 'SEP-911', '28MSU0010B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-tlaxcala', 'MX', U&'Universidad Aut\00F3noma de Tlaxcala', 'UATx', 'university', 'public', 'Tlaxcala', 'Tlaxcala', NULL, ARRAY[]::text[], 'SEP-911', '29MSU0013Y', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-yucatan', 'MX', U&'Universidad Aut\00F3noma de Yucat\00E1n', 'UADY', 'university', 'public', U&'Yucat\00E1n', U&'M\00E9rida', NULL, ARRAY[]::text[], 'SEP-911', '31MSU0098J', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-de-zacatecas', 'MX', U&'Universidad Aut\00F3noma de Zacatecas', 'UAZ', 'university', 'public', 'Zacatecas', 'Zacatecas', NULL, ARRAY[]::text[], 'SEP-911', '32MSU0017H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-del-carmen', 'MX', U&'Universidad Aut\00F3noma del Carmen', NULL, 'university', 'public', 'Campeche', 'Carmen', NULL, ARRAY[]::text[], 'SEP-911', '04MSU0238W', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-del-estado-de-hidalgo', 'MX', U&'Universidad Aut\00F3noma del Estado de Hidalgo', 'UAEH', 'university', 'public', 'Hidalgo', U&'San Agust\00EDn Tlaxiaca', NULL, ARRAY[]::text[], 'SEP-911', '13MSU0017T', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('uaemex', 'MX', U&'Universidad Aut\00F3noma del Estado de M\00E9xico', U&'UAEM\00E9x', 'university', 'public', U&'Estado de M\00E9xico', 'Toluca', NULL, ARRAY[]::text[], 'SEP-911', '15MSU0012W', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-del-estado-de-morelos', 'MX', U&'Universidad Aut\00F3noma del Estado de Morelos', 'UAEM', 'university', 'public', 'Morelos', 'Cuernavaca', NULL, ARRAY[]::text[], 'SEP-911', '17MSU0017P', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-del-estado-de-quintana-roo', 'MX', U&'Universidad Aut\00F3noma del Estado de Quintana Roo', NULL, 'university', 'public', 'Quintana Roo', U&'Oth\00F3n P. Blanco', NULL, ARRAY[]::text[], 'SEP-911', '23MSU0140Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-autonoma-del-noreste', 'MX', U&'Universidad Aut\00F3noma del Noreste', NULL, 'university', 'private', 'Coahuila', 'Saltillo', NULL, ARRAY[]::text[], 'SEP-911', '05MSU0652K', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('uam', 'MX', U&'Universidad Aut\00F3noma Metropolitana', 'UAM', 'university', 'public', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU0084E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-britanica-de-mexico', 'MX', U&'Universidad Brit\00E1nica de M\00E9xico', NULL, 'university', 'private', 'Aguascalientes', 'Aguascalientes', NULL, ARRAY[]::text[], 'SEP-911', '01MSU0028U', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-cristobal-colon', 'MX', U&'Universidad Crist\00F3bal Col\00F3n', NULL, 'university', 'private', 'Veracruz', 'Veracruz', NULL, ARRAY[]::text[], 'SEP-911', '30MSU0832U', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-cuauhtemoc', 'MX', U&'Universidad Cuauht\00E9moc', NULL, 'university', 'private', 'Aguascalientes', U&'Jes\00FAs Mar\00EDa', NULL, ARRAY[]::text[], 'SEP-911', '01MSU0060C', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-cultural', 'MX', 'Universidad Cultural', NULL, 'university', 'private', 'Chihuahua', U&'Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '08MSU0684Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-ciencias-y-artes-de-chiapas', 'MX', 'Universidad de Ciencias y Artes de Chiapas', NULL, 'university', 'public', 'Chiapas', U&'Tuxtla Guti\00E9rrez', NULL, ARRAY[]::text[], 'SEP-911', '07MSU0002G', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-colima', 'MX', 'Universidad de Colima', 'UdeC', 'university', 'public', 'Colima', 'Colima', NULL, ARRAY[]::text[], 'SEP-911', '06MSU0012O', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('udg', 'MX', 'Universidad de Guadalajara', 'UdeG', 'university', 'public', 'Jalisco', 'Guadalajara', 'https://www.udg.mx', ARRAY[]::text[], 'SEP-911', '14MSU0010Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-guanajuato', 'MX', 'Universidad de Guanajuato', 'UG', 'university', 'public', 'Guanajuato', 'Guanajuato', NULL, ARRAY[]::text[], 'SEP-911', '11MSU0013Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-la-salud', 'MX', 'Universidad de la Salud', NULL, 'university', 'public', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU0349W', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('udlap', 'MX', U&'Universidad de las Am\00E9ricas Puebla', 'UDLAP', 'university', 'private', 'Puebla', U&'San Andr\00E9s Cholula', NULL, ARRAY[]::text[], 'SEP-911', '21MSU0649O', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-leon', 'MX', U&'Universidad de Le\00F3n', NULL, 'university', 'private', 'Guanajuato', U&'Le\00F3n', NULL, ARRAY[]::text[], 'SEP-911', '11MSU0047P', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-los-mochis', 'MX', 'Universidad de Los Mochis', NULL, 'university', 'private', 'Sinaloa', 'Ahome', NULL, ARRAY[]::text[], 'SEP-911', '25MSU0058Y', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-monterrey', 'MX', 'Universidad de Monterrey', 'UDEM', 'university', 'private', U&'Nuevo Le\00F3n', U&'San Pedro Garza Garc\00EDa', NULL, ARRAY[]::text[], 'SEP-911', '19MSU0037A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-oriente-veracruz', 'MX', 'Universidad de Oriente - Veracruz', NULL, 'university', 'private', 'Veracruz', 'Veracruz', NULL, ARRAY[]::text[], 'SEP-911', '30MSU0250P', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-de-sonora', 'MX', 'Universidad de Sonora', 'Unison', 'university', 'public', 'Sonora', 'Hermosillo', NULL, ARRAY[]::text[], 'SEP-911', '26MSU0015Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-del-atlantico', 'MX', U&'Universidad del Atl\00E1ntico', NULL, 'university', 'private', 'Tamaulipas', 'Reynosa', NULL, ARRAY[]::text[], 'SEP-911', '28MSU0011A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-del-caribe', 'MX', 'Universidad del Caribe', NULL, 'university', 'public', 'Quintana Roo', U&'Benito Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '23MSU0012E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-del-desarrollo-profesional', 'MX', 'Universidad del Desarrollo Profesional', NULL, 'university', 'private', 'Sonora', 'Hermosillo', NULL, ARRAY[]::text[], 'SEP-911', '26MSU0011C', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-del-golfo-de-california', 'MX', 'Universidad del Golfo de California', 'UGC', 'university', 'private', 'Baja California Sur', 'Los Cabos', NULL, ARRAY[]::text[], 'SEP-911', '03MSU0009D', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-del-valle-de-cuernavaca', 'MX', 'Universidad del Valle de Cuernavaca', NULL, 'university', 'private', 'Morelos', 'Cuernavaca', NULL, ARRAY[]::text[], 'SEP-911', '17MSU0333D', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-del-valle-de-mexico', 'MX', U&'Universidad del Valle de M\00E9xico', 'UVM', 'university', 'private', U&'Estado de M\00E9xico', U&'Coacalco de Berrioz\00E1bal', NULL, ARRAY[]::text[], 'SEP-911', '15MSU0100Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-estatal-de-sonora', 'MX', 'Universidad Estatal de Sonora', NULL, 'university', 'public', 'Sonora', 'Hermosillo', NULL, ARRAY[]::text[], 'SEP-911', '26MSU0430N', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-hipocrates', 'MX', U&'Universidad Hip\00F3crates', NULL, 'university', 'private', 'Guerrero', U&'Acapulco de Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '12MSU0026B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('ibero', 'MX', 'Universidad Iberoamericana', 'Ibero', 'university', 'private', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU0035W', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-iberoamericana-puebla', 'MX', 'Universidad Iberoamericana Puebla', NULL, 'university', 'private', 'Puebla', U&'San Andr\00E9s Cholula', NULL, ARRAY[]::text[], 'SEP-911', '21MSU0989M', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-internacional', 'MX', 'Universidad Internacional', NULL, 'university', 'private', 'Morelos', 'Cuernavaca', NULL, ARRAY[]::text[], 'SEP-911', '17MSU0332E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-juarez-autonoma-de-tabasco', 'MX', U&'Universidad Ju\00E1rez Aut\00F3noma de Tabasco', 'UJAT', 'university', 'public', 'Tabasco', 'Centro', NULL, ARRAY[]::text[], 'SEP-911', '27MSU0018V', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-juarez-del-estado-de-durango', 'MX', U&'Universidad Ju\00E1rez del Estado de Durango', 'UJED', 'university', 'public', 'Durango', 'Durango', NULL, ARRAY[]::text[], 'SEP-911', '10MSU0010C', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-la-salle-cancun', 'MX', U&'Universidad La Salle Canc\00FAn', NULL, 'university', 'private', 'Quintana Roo', U&'Benito Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '23MSU0135O', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-la-salle-chihuahua', 'MX', 'Universidad La Salle Chihuahua', NULL, 'university', 'private', 'Chihuahua', 'Chihuahua', NULL, ARRAY[]::text[], 'SEP-911', '08MSU0029M', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-la-salle-laguna', 'MX', 'Universidad La Salle Laguna', NULL, 'university', 'private', 'Durango', U&'G\00F3mez Palacio', NULL, ARRAY[]::text[], 'SEP-911', '10MSU0182V', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-la-salle-noroeste', 'MX', 'Universidad La Salle Noroeste', NULL, 'university', 'private', 'Sonora', 'Cajeme', NULL, ARRAY[]::text[], 'SEP-911', '26MSU0090F', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-la-salle-oaxaca', 'MX', 'Universidad La Salle Oaxaca', NULL, 'university', 'private', 'Oaxaca', U&'Santa Cruz Xoxocotl\00E1n', NULL, ARRAY[]::text[], 'SEP-911', '20MSU0059B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-marista-de-merida', 'MX', U&'Universidad Marista de M\00E9rida', NULL, 'university', 'private', U&'Yucat\00E1n', U&'M\00E9rida', NULL, ARRAY[]::text[], 'SEP-911', '31MSU0008A', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-metropolitana-de-monterrey', 'MX', 'Universidad Metropolitana de Monterrey', NULL, 'university', 'private', U&'Nuevo Le\00F3n', 'Monterrey', NULL, ARRAY[]::text[], 'SEP-911', '19MSU0110T', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-mexiquense-del-bicentenario', 'MX', 'Universidad Mexiquense del Bicentenario', NULL, 'university', 'public', U&'Estado de M\00E9xico', 'Ecatepec de Morelos', NULL, ARRAY[]::text[], 'SEP-911', '15MSU0945E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-michoacana-de-san-nicolas-de-hidalgo', 'MX', U&'Universidad Michoacana de San Nicol\00E1s de Hidalgo', 'UMSNH', 'university', 'public', U&'Michoac\00E1n', 'Morelia', NULL, ARRAY[]::text[], 'SEP-911', '16MSU0014T', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-montrer', 'MX', 'Universidad Montrer', NULL, 'university', 'private', U&'Michoac\00E1n', 'Morelia', NULL, ARRAY[]::text[], 'SEP-911', '16MSU0047K', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-mundo-maya', 'MX', 'Universidad Mundo Maya', NULL, 'university', 'private', 'Tabasco', 'Centro', NULL, ARRAY[]::text[], 'SEP-911', '27MSU0003T', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('unam', 'MX', U&'Universidad Nacional Aut\00F3noma de M\00E9xico', 'UNAM', 'university', 'public', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', 'https://www.unam.mx', ARRAY[]::text[], 'SEP-911', '09MSU0019E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-olmeca', 'MX', 'Universidad Olmeca', NULL, 'university', 'private', 'Tabasco', 'Centro', NULL, ARRAY[]::text[], 'SEP-911', '27MSU0002U', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-pablo-guardado-chavez', 'MX', U&'Universidad Pablo Guardado Ch\00E1vez', NULL, 'university', 'private', 'Chiapas', U&'Tuxtla Guti\00E9rrez', NULL, ARRAY[]::text[], 'SEP-911', '07MSU0019G', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('up', 'MX', 'Universidad Panamericana', 'UP', 'university', 'private', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, ARRAY[]::text[], 'SEP-911', '09MSU2515R', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-politecnica-de-san-luis-potosi', 'MX', U&'Universidad Polit\00E9cnica de San Luis Potos\00ED', NULL, 'polytechnic_university', 'public', U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, ARRAY[]::text[], 'SEP-911', '24MSU0240Y', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-politecnica-de-tlaxcala', 'MX', U&'Universidad Polit\00E9cnica de Tlaxcala', NULL, 'polytechnic_university', 'public', 'Tlaxcala', 'Tepeyanco', NULL, ARRAY[]::text[], 'SEP-911', '29MSU0029Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-popular-autonoma-del-estado-de-puebla', 'MX', U&'Universidad Popular Aut\00F3noma del Estado de Puebla', 'UPAEP', 'university', 'private', 'Puebla', 'Puebla', NULL, ARRAY[]::text[], 'SEP-911', '21MSU0931M', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-popular-de-la-chontalpa', 'MX', 'Universidad Popular de la Chontalpa', NULL, 'university', 'public', 'Tabasco', U&'C\00E1rdenas', NULL, ARRAY[]::text[], 'SEP-911', '27MSU0025E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-potosina', 'MX', 'Universidad Potosina', NULL, 'university', 'private', U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, ARRAY[]::text[], 'SEP-911', '24MSU0021L', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-regional-del-sureste', 'MX', 'Universidad Regional del Sureste', NULL, 'university', 'private', 'Oaxaca', U&'San Sebasti\00E1n Tutla', NULL, ARRAY[]::text[], 'SEP-911', '20MSU0549Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tangamanga', 'MX', 'Universidad Tangamanga', NULL, 'university', 'private', U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, ARRAY[]::text[], 'SEP-911', '24MSU0150F', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tec-milenio-a-c', 'MX', 'Universidad Tec Milenio A.c', NULL, 'university', 'private', 'Sinaloa', U&'Culiac\00E1n', NULL, ARRAY[]::text[], 'SEP-911', '25MSU0085V', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-aguascalientes', 'MX', U&'Universidad Tecnol\00F3gica de Aguascalientes', NULL, 'technological_university', 'public', 'Aguascalientes', 'Aguascalientes', NULL, ARRAY[]::text[], 'SEP-911', '01MSU0050W', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-ciudad-juarez', 'MX', U&'Universidad Tecnol\00F3gica de Ciudad Ju\00E1rez', NULL, 'technological_university', 'public', 'Chihuahua', U&'Ju\00E1rez', NULL, ARRAY[]::text[], 'SEP-911', '08MSU0016I', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-jalisco', 'MX', U&'Universidad Tecnol\00F3gica de Jalisco', NULL, 'technological_university', 'public', 'Jalisco', 'Guadalajara', NULL, ARRAY[]::text[], 'SEP-911', '14MSU0021E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-leon', 'MX', U&'Universidad Tecnol\00F3gica de Le\00F3n', NULL, 'technological_university', 'public', 'Guanajuato', U&'Le\00F3n', NULL, ARRAY[]::text[], 'SEP-911', '11MSU0034L', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-manzanillo', 'MX', U&'Universidad Tecnol\00F3gica de Manzanillo', NULL, 'technological_university', 'public', 'Colima', 'Manzanillo', NULL, ARRAY[]::text[], 'SEP-911', '06MSU0010Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-mexico', 'MX', U&'Universidad Tecnol\00F3gica de M\00E9xico', 'UNITEC', 'university', 'private', U&'Estado de M\00E9xico', U&'Atizap\00E1n de Zaragoza', NULL, ARRAY[]::text[], 'SEP-911', '15MSU2012J', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-nayarit', 'MX', U&'Universidad Tecnol\00F3gica de Nayarit', NULL, 'technological_university', 'public', 'Nayarit', 'Xalisco', NULL, ARRAY[]::text[], 'SEP-911', '18MSU8888C', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-puebla', 'MX', U&'Universidad Tecnol\00F3gica de Puebla', NULL, 'technological_university', 'public', 'Puebla', 'Puebla', NULL, ARRAY[]::text[], 'SEP-911', '21MSU1001H', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-queretaro', 'MX', U&'Universidad Tecnol\00F3gica de Quer\00E9taro', NULL, 'technological_university', 'public', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, ARRAY[]::text[], 'SEP-911', '22MSU0003Y', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-de-tijuana', 'MX', U&'Universidad Tecnol\00F3gica de Tijuana', NULL, 'technological_university', 'public', 'Baja California', 'Tijuana', NULL, ARRAY[]::text[], 'SEP-911', '02MSU0045J', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-del-centro-de-veracruz', 'MX', U&'Universidad Tecnol\00F3gica del Centro de Veracruz', NULL, 'technological_university', 'public', 'Veracruz', U&'Cuitl\00E1huac', NULL, ARRAY[]::text[], 'SEP-911', '30MSU9027Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-del-estado-de-zacatecas', 'MX', U&'Universidad Tecnol\00F3gica del Estado de Zacatecas', NULL, 'technological_university', 'public', 'Zacatecas', 'Guadalupe', NULL, ARRAY[]::text[], 'SEP-911', '32MSU0003E', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-emiliano-zapata-del-estado-de-morelos', 'MX', U&'Universidad Tecnol\00F3gica Emiliano Zapata del Estado de Morelos', NULL, 'technological_university', 'public', 'Morelos', 'Emiliano Zapata', NULL, ARRAY[]::text[], 'SEP-911', '17MSU0024Z', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-metropolitana', 'MX', U&'Universidad Tecnol\00F3gica Metropolitana', NULL, 'technological_university', 'public', U&'Yucat\00E1n', U&'M\00E9rida', NULL, ARRAY[]::text[], 'SEP-911', '31MSU0026Q', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-santa-catarina', 'MX', U&'Universidad Tecnol\00F3gica Santa Catarina', NULL, 'technological_university', 'public', U&'Nuevo Le\00F3n', 'Santa Catarina', NULL, ARRAY[]::text[], 'SEP-911', '19MSU0025W', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-tecnologica-tula-tepeji', 'MX', U&'Universidad Tecnol\00F3gica Tula-Tepeji', NULL, 'technological_university', 'public', 'Hidalgo', 'Tula de Allende', NULL, ARRAY[]::text[], 'SEP-911', '13MSU0006N', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-univer-milenium', 'MX', 'Universidad Univer Milenium', NULL, 'university', 'private', U&'Estado de M\00E9xico', 'Toluca', NULL, ARRAY[]::text[], 'SEP-911', '15MSU0979V', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-vasco-de-quiroga', 'MX', 'Universidad Vasco de Quiroga', NULL, 'university', 'private', U&'Michoac\00E1n', 'Morelia', NULL, ARRAY[]::text[], 'SEP-911', '16MSU0567T', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-veracruzana', 'MX', 'Universidad Veracruzana', 'UV', 'university', 'public', 'Veracruz', 'Xalapa', NULL, ARRAY[]::text[], 'SEP-911', '30MSU0940B', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('universidad-vizcaya-de-las-americas', 'MX', U&'Universidad Vizcaya de las Am\00E9ricas', NULL, 'university', 'private', U&'Yucat\00E1n', U&'M\00E9rida', NULL, ARRAY[]::text[], 'SEP-911', '31MSU0660R', 'https://www.datos.gob.mx/dataset/registro_alumnado_personal_docente_educacion_basica_media_superior_formato_911', '2026-09-14', false),
+  ('american-river-college', 'US', 'American River College', NULL, 'community_college', 'public', 'California', 'Sacramento', 'https://www.arc.losrios.edu', ARRAY['American River', 'ARC']::text[], 'IPEDS', '109208', 'https://nces.ed.gov/collegenavigator/?id=109208', '2026-09-14', false),
+  ('anderson-university', 'US', 'Anderson University', NULL, 'university', 'private', 'South Carolina', 'Anderson', 'https://www.andersonuniversity.edu', ARRAY['AU']::text[], 'IPEDS', '217633', 'https://nces.ed.gov/collegenavigator/?id=217633', '2026-09-14', false),
+  ('anne-arundel-community-college', 'US', 'Anne Arundel Community College', NULL, 'community_college', 'public', 'Maryland', 'Arnold', 'https://www.aacc.edu', ARRAY['AACC']::text[], 'IPEDS', '161767', 'https://nces.ed.gov/collegenavigator/?id=161767', '2026-09-14', false),
+  ('anoka-ramsey-community-college', 'US', 'Anoka-Ramsey Community College', NULL, 'community_college', 'public', 'Minnesota', 'Coon Rapids', 'https://www.anokaramsey.edu', ARRAY['Anoka-Ramsey Community College-Coon Rapids Campus', 'Anoka-Ramsey Community College-Cambridge Campus', 'ARCC', 'AR', 'Anoka Ramsey']::text[], 'IPEDS', '172963', 'https://nces.ed.gov/collegenavigator/?id=172963', '2026-09-14', false),
+  ('arizona-christian-university', 'US', 'Arizona Christian University', NULL, 'university', 'private', 'Arizona', 'Glendale', 'https://arizonachristian.edu', ARRAY[]::text[], 'IPEDS', '105899', 'https://nces.ed.gov/collegenavigator/?id=105899', '2026-09-14', false),
+  ('arizona-state-university', 'US', 'Arizona State University', NULL, 'university', 'public', 'Arizona', 'Tempe', 'https://www.asu.edu', ARRAY['ASU Tempe']::text[], 'IPEDS', '104151', 'https://nces.ed.gov/collegenavigator/?id=104151', '2026-09-14', false),
+  ('arkansas-state-university', 'US', 'Arkansas State University', NULL, 'university', 'public', 'Arkansas', 'Jonesboro', 'https://www.astate.edu', ARRAY['A-State', 'AState']::text[], 'IPEDS', '106458', 'https://nces.ed.gov/collegenavigator/?id=106458', '2026-09-14', false),
+  ('auburn-university', 'US', 'Auburn University', NULL, 'university', 'public', 'Alabama', 'Auburn', 'https://www.auburn.edu', ARRAY[]::text[], 'IPEDS', '100858', 'https://nces.ed.gov/collegenavigator/?id=100858', '2026-09-14', false),
+  ('augustana-university', 'US', 'Augustana University', NULL, 'university', 'private', 'South Dakota', 'Sioux Falls', 'https://www.augie.edu', ARRAY['Augie  Augustana College(SD)  Augustana University']::text[], 'IPEDS', '219000', 'https://nces.ed.gov/collegenavigator/?id=219000', '2026-09-14', false),
+  ('baker-university', 'US', 'Baker University', NULL, 'university', 'private', 'Kansas', 'Baldwin City', 'https://www.bakeru.edu', ARRAY['Baker', 'BU', 'Baker U']::text[], 'IPEDS', '154688', 'https://nces.ed.gov/collegenavigator/?id=154688', '2026-09-14', false),
+  ('ball-state-university', 'US', 'Ball State University', NULL, 'university', 'public', 'Indiana', 'Muncie', 'https://www.bsu.edu', ARRAY['BSU', 'Ball U']::text[], 'IPEDS', '150136', 'https://nces.ed.gov/collegenavigator/?id=150136', '2026-09-14', false),
+  ('bates-technical-college', 'US', 'Bates Technical College', NULL, 'community_college', 'public', 'Washington', 'Tacoma', 'https://www.batestech.edu', ARRAY[]::text[], 'IPEDS', '235671', 'https://nces.ed.gov/collegenavigator/?id=235671', '2026-09-14', false),
+  ('baton-rouge-community-college', 'US', 'Baton Rouge Community College', NULL, 'community_college', 'public', 'Louisiana', 'Baton Rouge', 'https://www.mybrcc.edu', ARRAY['BRCC']::text[], 'IPEDS', '437103', 'https://nces.ed.gov/collegenavigator/?id=437103', '2026-09-14', false),
+  ('baylor-university', 'US', 'Baylor University', NULL, 'university', 'private', 'Texas', 'Waco', 'https://www.baylor.edu', ARRAY[]::text[], 'IPEDS', '223232', 'https://nces.ed.gov/collegenavigator/?id=223232', '2026-09-14', false),
+  ('bellevue-university', 'US', 'Bellevue University', NULL, 'university', 'private', 'Nebraska', 'Bellevue', 'https://www.bellevue.edu', ARRAY[]::text[], 'IPEDS', '180814', 'https://nces.ed.gov/collegenavigator/?id=180814', '2026-09-14', false),
+  ('bergen-community-college', 'US', 'Bergen Community College', NULL, 'community_college', 'public', 'New Jersey', 'Paramus', 'https://www.bergen.edu', ARRAY[]::text[], 'IPEDS', '183743', 'https://nces.ed.gov/collegenavigator/?id=183743', '2026-09-14', false),
+  ('blue-ridge-community-and-technical-college', 'US', 'Blue Ridge Community and Technical College', NULL, 'community_college', 'public', 'West Virginia', 'Martinsburg', 'https://www.blueridgectc.edu', ARRAY[]::text[], 'IPEDS', '446774', 'https://nces.ed.gov/collegenavigator/?id=446774', '2026-09-14', false),
+  ('bluegrass-community-and-technical-college', 'US', 'Bluegrass Community and Technical College', NULL, 'community_college', 'public', 'Kentucky', 'Lexington', 'https://bluegrass.kctcs.edu', ARRAY[]::text[], 'IPEDS', '156392', 'https://nces.ed.gov/collegenavigator/?id=156392', '2026-09-14', false),
+  ('boise-state-university', 'US', 'Boise State University', NULL, 'university', 'public', 'Idaho', 'Boise', 'https://www.boisestate.edu', ARRAY['Boise State']::text[], 'IPEDS', '142115', 'https://nces.ed.gov/collegenavigator/?id=142115', '2026-09-14', false),
+  ('boston-university', 'US', 'Boston University', NULL, 'university', 'private', 'Massachusetts', 'Boston', 'https://www.bu.edu', ARRAY['BU', 'Boston U']::text[], 'IPEDS', '164988', 'https://nces.ed.gov/collegenavigator/?id=164988', '2026-09-14', false),
+  ('brigham-young-university', 'US', 'Brigham Young University', NULL, 'university', 'private', 'Utah', 'Provo', 'https://byu.edu', ARRAY['BYU']::text[], 'IPEDS', '230038', 'https://nces.ed.gov/collegenavigator/?id=230038', '2026-09-14', false),
+  ('brigham-young-university-hawaii', 'US', 'Brigham Young University-Hawaii', NULL, 'university', 'private', 'Hawaii', 'Laie', 'https://www.byuh.edu', ARRAY[]::text[], 'IPEDS', '230047', 'https://nces.ed.gov/collegenavigator/?id=230047', '2026-09-14', false),
+  ('brigham-young-university-idaho', 'US', 'Brigham Young University-Idaho', NULL, 'university', 'private', 'Idaho', 'Rexburg', 'https://www.byui.edu', ARRAY['BYU-I']::text[], 'IPEDS', '142522', 'https://nces.ed.gov/collegenavigator/?id=142522', '2026-09-14', false),
+  ('bristol-community-college', 'US', 'Bristol Community College', NULL, 'community_college', 'public', 'Massachusetts', 'Fall River', 'https://www.bristolcc.edu', ARRAY['Bristol']::text[], 'IPEDS', '165033', 'https://nces.ed.gov/collegenavigator/?id=165033', '2026-09-14', false),
+  ('brown-university', 'US', 'Brown University', NULL, 'university', 'private', 'Rhode Island', 'Providence', 'https://www.brown.edu', ARRAY[]::text[], 'IPEDS', '217156', 'https://nces.ed.gov/collegenavigator/?id=217156', '2026-09-14', false),
+  ('buena-vista-university', 'US', 'Buena Vista University', NULL, 'university', 'private', 'Iowa', 'Storm Lake', 'https://www.bvu.edu', ARRAY[]::text[], 'IPEDS', '153001', 'https://nces.ed.gov/collegenavigator/?id=153001', '2026-09-14', false),
+  ('carroll-college', 'US', 'Carroll College', NULL, 'college', 'private', 'Montana', 'Helena', 'https://www.carroll.edu', ARRAY['Carroll Montana  CC']::text[], 'IPEDS', '180106', 'https://nces.ed.gov/collegenavigator/?id=180106', '2026-09-14', false),
+  ('case-western-reserve-university', 'US', 'Case Western Reserve University', NULL, 'university', 'private', 'Ohio', 'Cleveland', 'https://www.case.edu', ARRAY['CWRU', 'Case', 'Case Western Reserve']::text[], 'IPEDS', '201645', 'https://nces.ed.gov/collegenavigator/?id=201645', '2026-09-14', false),
+  ('casper-college', 'US', 'Casper College', NULL, 'community_college', 'public', 'Wyoming', 'Casper', 'https://www.caspercollege.edu', ARRAY[]::text[], 'IPEDS', '240505', 'https://nces.ed.gov/collegenavigator/?id=240505', '2026-09-14', false),
+  ('central-connecticut-state-university', 'US', 'Central Connecticut State University', NULL, 'university', 'public', 'Connecticut', 'New Britain', 'https://www.ccsu.edu', ARRAY['CCSU']::text[], 'IPEDS', '128771', 'https://nces.ed.gov/collegenavigator/?id=128771', '2026-09-14', false),
+  ('central-georgia-technical-college', 'US', 'Central Georgia Technical College', NULL, 'community_college', 'public', 'Georgia', 'Warner Robins', 'https://www.centralgatech.edu', ARRAY['CGTC']::text[], 'IPEDS', '483045', 'https://nces.ed.gov/collegenavigator/?id=483045', '2026-09-14', false),
+  ('central-new-mexico-community-college', 'US', 'Central New Mexico Community College', NULL, 'community_college', 'public', 'New Mexico', 'Albuquerque', 'https://www.cnm.edu', ARRAY['CNM']::text[], 'IPEDS', '187532', 'https://nces.ed.gov/collegenavigator/?id=187532', '2026-09-14', false),
+  ('central-wyoming-college', 'US', 'Central Wyoming College', NULL, 'college', 'public', 'Wyoming', 'Riverton', 'https://www.cwc.edu', ARRAY['CWC', 'Central Wyoming Community College', 'Central']::text[], 'IPEDS', '240514', 'https://nces.ed.gov/collegenavigator/?id=240514', '2026-09-14', false),
+  ('champlain-college', 'US', 'Champlain College', NULL, 'college', 'private', 'Vermont', 'Burlington', 'https://www.champlain.edu', ARRAY[]::text[], 'IPEDS', '230852', 'https://nces.ed.gov/collegenavigator/?id=230852', '2026-09-14', false),
+  ('chandler-gilbert-community-college', 'US', 'Chandler-Gilbert Community College', NULL, 'community_college', 'public', 'Arizona', 'Chandler', 'https://www.cgc.maricopa.edu', ARRAY[]::text[], 'IPEDS', '364025', 'https://nces.ed.gov/collegenavigator/?id=364025', '2026-09-14', false),
+  ('chattanooga-state-community-college', 'US', 'Chattanooga State Community College', NULL, 'community_college', 'public', 'Tennessee', 'Chattanooga', 'https://www.chattanoogastate.edu', ARRAY[]::text[], 'IPEDS', '219824', 'https://nces.ed.gov/collegenavigator/?id=219824', '2026-09-14', false),
+  ('clemson-university', 'US', 'Clemson University', NULL, 'university', 'public', 'South Carolina', 'Clemson', 'https://www.clemson.edu', ARRAY[]::text[], 'IPEDS', '217882', 'https://nces.ed.gov/collegenavigator/?id=217882', '2026-09-14', false),
+  ('coastal-alabama-community-college', 'US', 'Coastal Alabama Community College', NULL, 'community_college', 'public', 'Alabama', 'Bay Minette', 'https://www.coastalalabama.edu', ARRAY[]::text[], 'IPEDS', '101161', 'https://nces.ed.gov/collegenavigator/?id=101161', '2026-09-14', false),
+  ('college-of-dupage', 'US', 'College of DuPage', NULL, 'community_college', 'public', 'Illinois', 'Glen Ellyn', 'https://www.cod.edu', ARRAY['COD']::text[], 'IPEDS', '144865', 'https://nces.ed.gov/collegenavigator/?id=144865', '2026-09-14', false),
+  ('college-of-western-idaho', 'US', 'College of Western Idaho', NULL, 'community_college', 'public', 'Idaho', 'Nampa', 'https://cwi.edu', ARRAY['CWI']::text[], 'IPEDS', '455114', 'https://nces.ed.gov/collegenavigator/?id=455114', '2026-09-14', false),
+  ('colorado-state-university-fort-collins', 'US', 'Colorado State University-Fort Collins', NULL, 'university', 'public', 'Colorado', 'Fort Collins', 'https://colostate.edu', ARRAY[]::text[], 'IPEDS', '126818', 'https://nces.ed.gov/collegenavigator/?id=126818', '2026-09-14', false),
+  ('columbus-state-community-college', 'US', 'Columbus State Community College', NULL, 'community_college', 'public', 'Ohio', 'Columbus', 'https://www.cscc.edu', ARRAY['Columbus State', 'CSCC', 'C-State']::text[], 'IPEDS', '202222', 'https://nces.ed.gov/collegenavigator/?id=202222', '2026-09-14', false),
+  ('community-college-of-allegheny-county', 'US', 'Community College of Allegheny County', NULL, 'community_college', 'public', 'Pennsylvania', 'Pittsburgh', 'https://www.ccac.edu', ARRAY['CCAC']::text[], 'IPEDS', '210605', 'https://nces.ed.gov/collegenavigator/?id=210605', '2026-09-14', false),
+  ('community-college-of-aurora', 'US', 'Community College of Aurora', NULL, 'community_college', 'public', 'Colorado', 'Aurora', 'https://www.ccaurora.edu', ARRAY[]::text[], 'IPEDS', '126863', 'https://nces.ed.gov/collegenavigator/?id=126863', '2026-09-14', false),
+  ('community-college-of-rhode-island', 'US', 'Community College of Rhode Island', NULL, 'community_college', 'public', 'Rhode Island', 'Warwick', 'https://www.ccri.edu', ARRAY['CCRI']::text[], 'IPEDS', '217475', 'https://nces.ed.gov/collegenavigator/?id=217475', '2026-09-14', false),
+  ('community-college-of-vermont', 'US', 'Community College of Vermont', NULL, 'community_college', 'public', 'Vermont', 'Montpelier', 'https://www.ccv.edu', ARRAY['CCV']::text[], 'IPEDS', '230861', 'https://nces.ed.gov/collegenavigator/?id=230861', '2026-09-14', false),
+  ('concordia-university-saint-paul', 'US', 'Concordia University-Saint Paul', NULL, 'university', 'private', 'Minnesota', 'Saint Paul', 'https://www.csp.edu', ARRAY['Concordia-St. Paul']::text[], 'IPEDS', '173328', 'https://nces.ed.gov/collegenavigator/?id=173328', '2026-09-14', false),
+  ('connecticut-state-community-college', 'US', 'Connecticut State Community College', NULL, 'community_college', 'public', 'Connecticut', 'Hartford', 'https://ctstate.edu', ARRAY['CT State']::text[], 'IPEDS', '129367', 'https://nces.ed.gov/collegenavigator/?id=129367', '2026-09-14', false),
+  ('cornell-university', 'US', 'Cornell University', NULL, 'university', 'private', 'New York', 'Ithaca', 'https://www.cornell.edu', ARRAY[]::text[], 'IPEDS', '190415', 'https://nces.ed.gov/collegenavigator/?id=190415', '2026-09-14', false),
+  ('dakota-college-at-bottineau', 'US', 'Dakota College at Bottineau', NULL, 'community_college', 'public', 'North Dakota', 'Bottineau', 'https://www.dakotacollege.edu', ARRAY['MSU-Bottineau']::text[], 'IPEDS', '200314', 'https://nces.ed.gov/collegenavigator/?id=200314', '2026-09-14', false),
+  ('delaware-technical-community-college-terry', 'US', 'Delaware Technical Community College-Terry', NULL, 'college', 'public', 'Delaware', 'Dover', 'https://www.dtcc.edu', ARRAY['Delaware Tech']::text[], 'IPEDS', '130907', 'https://nces.ed.gov/collegenavigator/?id=130907', '2026-09-14', false),
+  ('des-moines-area-community-college', 'US', 'Des Moines Area Community College', NULL, 'community_college', 'public', 'Iowa', 'Ankeny', 'https://www.dmacc.edu', ARRAY['DMACC']::text[], 'IPEDS', '153214', 'https://nces.ed.gov/collegenavigator/?id=153214', '2026-09-14', false),
+  ('drexel-university', 'US', 'Drexel University', NULL, 'university', 'private', 'Pennsylvania', 'Philadelphia', 'https://drexel.edu', ARRAY['Drexel']::text[], 'IPEDS', '212054', 'https://nces.ed.gov/collegenavigator/?id=212054', '2026-09-14', false),
+  ('duke-university', 'US', 'Duke University', NULL, 'university', 'private', 'North Carolina', 'Durham', 'https://www.duke.edu', ARRAY[]::text[], 'IPEDS', '198419', 'https://nces.ed.gov/collegenavigator/?id=198419', '2026-09-14', false),
+  ('el-paso-community-college', 'US', 'El Paso Community College', NULL, 'community_college', 'public', 'Texas', 'El Paso', 'https://www.epcc.edu', ARRAY[]::text[], 'IPEDS', '224642', 'https://nces.ed.gov/collegenavigator/?id=224642', '2026-09-14', false),
+  ('emory-university', 'US', 'Emory University', NULL, 'university', 'private', 'Georgia', 'Atlanta', 'https://www.emory.edu', ARRAY[]::text[], 'IPEDS', '139658', 'https://nces.ed.gov/collegenavigator/?id=139658', '2026-09-14', false),
+  ('flathead-valley-community-college', 'US', 'Flathead Valley Community College', NULL, 'community_college', 'public', 'Montana', 'Kalispell', 'https://www.fvcc.edu', ARRAY[]::text[], 'IPEDS', '180197', 'https://nces.ed.gov/collegenavigator/?id=180197', '2026-09-14', false),
+  ('florida-international-university', 'US', 'Florida International University', NULL, 'university', 'public', 'Florida', 'Miami', 'https://www.fiu.edu', ARRAY['FIU']::text[], 'IPEDS', '133951', 'https://nces.ed.gov/collegenavigator/?id=133951', '2026-09-14', false),
+  ('florida-state', 'US', 'Florida State University', 'FSU', 'university', 'public', 'Florida', 'Tallahassee', 'https://www.fsu.edu', ARRAY['Florida State', 'F.S.U.', 'FSU', 'F. S. U.', 'Fla. State University']::text[], 'IPEDS', '134097', 'https://nces.ed.gov/collegenavigator/?id=134097', '2026-09-14', true),
+  ('fox-valley-technical-college', 'US', 'Fox Valley Technical College', NULL, 'community_college', 'public', 'Wisconsin', 'Appleton', 'https://www.fvtc.edu', ARRAY['FVTC']::text[], 'IPEDS', '238722', 'https://nces.ed.gov/collegenavigator/?id=238722', '2026-09-14', false),
+  ('george-fox-university', 'US', 'George Fox University', NULL, 'university', 'private', 'Oregon', 'Newberg', 'https://www.georgefox.edu', ARRAY['GFU']::text[], 'IPEDS', '208822', 'https://nces.ed.gov/collegenavigator/?id=208822', '2026-09-14', false),
+  ('george-mason-university', 'US', 'George Mason University', NULL, 'university', 'public', 'Virginia', 'Fairfax', 'https://www2.gmu.edu', ARRAY['Mason']::text[], 'IPEDS', '232186', 'https://nces.ed.gov/collegenavigator/?id=232186', '2026-09-14', false),
+  ('george-washington-university', 'US', 'George Washington University', NULL, 'university', 'private', 'District of Columbia', 'Washington', 'https://www.gwu.edu', ARRAY['GWU', 'GW']::text[], 'IPEDS', '131469', 'https://nces.ed.gov/collegenavigator/?id=131469', '2026-09-14', false),
+  ('georgia-institute-of-technology', 'US', 'Georgia Institute of Technology', NULL, 'university', 'public', 'Georgia', 'Atlanta', 'https://www.gatech.edu', ARRAY['Georgia Tech']::text[], 'IPEDS', '139755', 'https://nces.ed.gov/collegenavigator/?id=139755', '2026-09-14', false),
+  ('gonzaga-university', 'US', 'Gonzaga University', NULL, 'university', 'private', 'Washington', 'Spokane', 'https://www.gonzaga.edu', ARRAY[]::text[], 'IPEDS', '235316', 'https://nces.ed.gov/collegenavigator/?id=235316', '2026-09-14', false),
+  ('grand-rapids-community-college', 'US', 'Grand Rapids Community College', NULL, 'community_college', 'public', 'Michigan', 'Grand Rapids', 'https://www.grcc.edu', ARRAY[]::text[], 'IPEDS', '170055', 'https://nces.ed.gov/collegenavigator/?id=170055', '2026-09-14', false),
+  ('great-bay-community-college', 'US', 'Great Bay Community College', NULL, 'community_college', 'public', 'New Hampshire', 'Portsmouth', 'https://www.greatbay.edu', ARRAY['Great Bay Community College']::text[], 'IPEDS', '183150', 'https://nces.ed.gov/collegenavigator/?id=183150', '2026-09-14', false),
+  ('harding-university', 'US', 'Harding University', NULL, 'university', 'private', 'Arkansas', 'Searcy', 'https://www.harding.edu', ARRAY[]::text[], 'IPEDS', '107044', 'https://nces.ed.gov/collegenavigator/?id=107044', '2026-09-14', false),
+  ('hinds-community-college', 'US', 'Hinds Community College', NULL, 'community_college', 'public', 'Mississippi', 'Raymond', 'https://www.hindscc.edu', ARRAY[]::text[], 'IPEDS', '175786', 'https://nces.ed.gov/collegenavigator/?id=175786', '2026-09-14', false),
+  ('indiana-university-bloomington', 'US', 'Indiana University-Bloomington', NULL, 'university', 'public', 'Indiana', 'Bloomington', 'https://www.indiana.edu', ARRAY['IUB', 'IU Bloomington']::text[], 'IPEDS', '151351', 'https://nces.ed.gov/collegenavigator/?id=151351', '2026-09-14', false),
+  ('iowa-state-university', 'US', 'Iowa State University', NULL, 'university', 'public', 'Iowa', 'Ames', 'https://www.iastate.edu', ARRAY['ISU']::text[], 'IPEDS', '153603', 'https://nces.ed.gov/collegenavigator/?id=153603', '2026-09-14', false),
+  ('ivy-tech-community-college', 'US', 'Ivy Tech Community College', NULL, 'community_college', 'public', 'Indiana', 'Indianapolis', 'https://www.ivytech.edu', ARRAY[]::text[], 'IPEDS', '150987', 'https://nces.ed.gov/collegenavigator/?id=150987', '2026-09-14', false),
+  ('johns-hopkins-university', 'US', 'Johns Hopkins University', NULL, 'university', 'private', 'Maryland', 'Baltimore', 'https://www.jhu.edu', ARRAY['Johns Hopkins']::text[], 'IPEDS', '162928', 'https://nces.ed.gov/collegenavigator/?id=162928', '2026-09-14', false),
+  ('johnson-county-community-college', 'US', 'Johnson County Community College', NULL, 'community_college', 'public', 'Kansas', 'Overland Park', 'https://www.jccc.edu', ARRAY['JCCC']::text[], 'IPEDS', '155210', 'https://nces.ed.gov/collegenavigator/?id=155210', '2026-09-14', false),
+  ('kansas-state-university', 'US', 'Kansas State University', NULL, 'university', 'public', 'Kansas', 'Manhattan', 'https://www.k-state.edu', ARRAY['K-State']::text[], 'IPEDS', '155399', 'https://nces.ed.gov/collegenavigator/?id=155399', '2026-09-14', false),
+  ('kapiolani-community-college', 'US', 'Kapiolani Community College', NULL, 'community_college', 'public', 'Hawaii', 'Honolulu', 'https://www.kapiolani.hawaii.edu', ARRAY['Kapiolani CC / KCC']::text[], 'IPEDS', '141796', 'https://nces.ed.gov/collegenavigator/?id=141796', '2026-09-14', false),
+  ('keene-state-college', 'US', 'Keene State College', NULL, 'college', 'public', 'New Hampshire', 'Keene', 'https://www.keene.edu', ARRAY['KSC']::text[], 'IPEDS', '183062', 'https://nces.ed.gov/collegenavigator/?id=183062', '2026-09-14', false),
+  ('kent-state-university-at-kent', 'US', 'Kent State University at Kent', NULL, 'university', 'public', 'Ohio', 'Kent', 'https://www.kent.edu', ARRAY[]::text[], 'IPEDS', '203517', 'https://nces.ed.gov/collegenavigator/?id=203517', '2026-09-14', false),
+  ('lake-area-technical-college', 'US', 'Lake Area Technical College', NULL, 'community_college', 'public', 'South Dakota', 'Watertown', 'https://www.lakeareatech.edu', ARRAY['LATC/Lake Area Tech']::text[], 'IPEDS', '219143', 'https://nces.ed.gov/collegenavigator/?id=219143', '2026-09-14', false),
+  ('liberty-university', 'US', 'Liberty University', NULL, 'university', 'private', 'Virginia', 'Lynchburg', 'https://www.liberty.edu', ARRAY[]::text[], 'IPEDS', '232557', 'https://nces.ed.gov/collegenavigator/?id=232557', '2026-09-14', false),
+  ('louisiana-state-university-and-agricultural-mechanical-college', 'US', 'Louisiana State University and Agricultural & Mechanical College', NULL, 'university', 'public', 'Louisiana', 'Baton Rouge', 'https://www.lsu.edu', ARRAY['Louisiana State University', 'LSU']::text[], 'IPEDS', '159391', 'https://nces.ed.gov/collegenavigator/?id=159391', '2026-09-14', false),
+  ('marquette-university', 'US', 'Marquette University', NULL, 'university', 'private', 'Wisconsin', 'Milwaukee', 'https://www.marquette.edu', ARRAY[]::text[], 'IPEDS', '239105', 'https://nces.ed.gov/collegenavigator/?id=239105', '2026-09-14', false),
+  ('marshall-university', 'US', 'Marshall University', NULL, 'university', 'public', 'West Virginia', 'Huntington', 'https://www.marshall.edu', ARRAY[]::text[], 'IPEDS', '237525', 'https://nces.ed.gov/collegenavigator/?id=237525', '2026-09-14', false),
+  ('metropolitan-community-college-area', 'US', 'Metropolitan Community College Area', NULL, 'community_college', 'public', 'Nebraska', 'Omaha', 'https://www.mccneb.edu', ARRAY[]::text[], 'IPEDS', '181303', 'https://nces.ed.gov/collegenavigator/?id=181303', '2026-09-14', false),
+  ('metropolitan-community-college-kansas-city', 'US', 'Metropolitan Community College-Kansas City', NULL, 'community_college', 'public', 'Missouri', 'Kansas City', 'https://www.mcckc.edu', ARRAY['MCC-KC']::text[], 'IPEDS', '177995', 'https://nces.ed.gov/collegenavigator/?id=177995', '2026-09-14', false),
+  ('michigan-state-university', 'US', 'Michigan State University', NULL, 'university', 'public', 'Michigan', 'East Lansing', 'https://www.msu.edu', ARRAY['MSU', 'Spartans', 'MI State University', 'State', 'MI State U']::text[], 'IPEDS', '171100', 'https://nces.ed.gov/collegenavigator/?id=171100', '2026-09-14', false),
+  ('minnesota-state-university-mankato', 'US', 'Minnesota State University-Mankato', NULL, 'university', 'public', 'Minnesota', 'Mankato', 'https://mnsu.edu', ARRAY[]::text[], 'IPEDS', '173920', 'https://nces.ed.gov/collegenavigator/?id=173920', '2026-09-14', false),
+  ('mississippi-state-university', 'US', 'Mississippi State University', NULL, 'university', 'public', 'Mississippi', 'Mississippi State', 'https://www.msstate.edu', ARRAY[]::text[], 'IPEDS', '176080', 'https://nces.ed.gov/collegenavigator/?id=176080', '2026-09-14', false),
+  ('missouri-state-university-springfield', 'US', 'Missouri State University-Springfield', NULL, 'university', 'public', 'Missouri', 'Springfield', 'https://www.missouristate.edu', ARRAY[]::text[], 'IPEDS', '179566', 'https://nces.ed.gov/collegenavigator/?id=179566', '2026-09-14', false),
+  ('montana-state-university', 'US', 'Montana State University', NULL, 'university', 'public', 'Montana', 'Bozeman', 'https://www.montana.edu', ARRAY['MSU']::text[], 'IPEDS', '180461', 'https://nces.ed.gov/collegenavigator/?id=180461', '2026-09-14', false),
+  ('montclair-state-university', 'US', 'Montclair State University', NULL, 'university', 'public', 'New Jersey', 'Montclair', 'https://www.montclair.edu', ARRAY[]::text[], 'IPEDS', '185590', 'https://nces.ed.gov/collegenavigator/?id=185590', '2026-09-14', false),
+  ('new-mexico-state-university', 'US', 'New Mexico State University', NULL, 'university', 'public', 'New Mexico', 'Las Cruces', 'https://www.nmsu.edu', ARRAY['NMSU']::text[], 'IPEDS', '188030', 'https://nces.ed.gov/collegenavigator/?id=188030', '2026-09-14', false),
+  ('north-carolina-state-university-at-raleigh', 'US', 'North Carolina State University at Raleigh', NULL, 'university', 'public', 'North Carolina', 'Raleigh', 'https://www.ncsu.edu', ARRAY['NC State University', 'NC State', 'N C State University', 'N C State', 'NCSU']::text[], 'IPEDS', '199193', 'https://nces.ed.gov/collegenavigator/?id=199193', '2026-09-14', false),
+  ('north-dakota-state-university', 'US', 'North Dakota State University', NULL, 'university', 'public', 'North Dakota', 'Fargo', 'https://www.ndsu.edu', ARRAY['North Dakota State University', 'NDSU']::text[], 'IPEDS', '200332', 'https://nces.ed.gov/collegenavigator/?id=200332', '2026-09-14', false),
+  ('northern-virginia-community-college', 'US', 'Northern Virginia Community College', NULL, 'community_college', 'public', 'Virginia', 'Annandale', 'https://www.nvcc.edu', ARRAY[]::text[], 'IPEDS', '232946', 'https://nces.ed.gov/collegenavigator/?id=232946', '2026-09-14', false),
+  ('northwest-arkansas-community-college', 'US', 'NorthWest Arkansas Community College', NULL, 'community_college', 'public', 'Arkansas', 'Bentonville', 'https://www.nwacc.edu', ARRAY['NWACC']::text[], 'IPEDS', '367459', 'https://nces.ed.gov/collegenavigator/?id=367459', '2026-09-14', false),
+  ('northwestern-university', 'US', 'Northwestern University', NULL, 'university', 'private', 'Illinois', 'Evanston', 'https://www.northwestern.edu', ARRAY[]::text[], 'IPEDS', '147767', 'https://nces.ed.gov/collegenavigator/?id=147767', '2026-09-14', false),
+  ('nova-southeastern-university', 'US', 'Nova Southeastern University', NULL, 'university', 'private', 'Florida', 'Fort Lauderdale', 'https://www.nova.edu', ARRAY[]::text[], 'IPEDS', '136215', 'https://nces.ed.gov/collegenavigator/?id=136215', '2026-09-14', false),
+  ('ohio-state-university', 'US', 'Ohio State University', NULL, 'university', 'public', 'Ohio', 'Columbus', 'https://www.osu.edu', ARRAY[]::text[], 'IPEDS', '204796', 'https://nces.ed.gov/collegenavigator/?id=204796', '2026-09-14', false),
+  ('oklahoma-city-community-college', 'US', 'Oklahoma City Community College', NULL, 'community_college', 'public', 'Oklahoma', 'Oklahoma City', 'https://www.occc.edu', ARRAY['OCCC', 'O Triple C', 'O Trip', 'O Trip C']::text[], 'IPEDS', '207449', 'https://nces.ed.gov/collegenavigator/?id=207449', '2026-09-14', false),
+  ('oklahoma-state-university', 'US', 'Oklahoma State University', NULL, 'university', 'public', 'Oklahoma', 'Stillwater', 'https://www.okstate.edu', ARRAY[]::text[], 'IPEDS', '207388', 'https://nces.ed.gov/collegenavigator/?id=207388', '2026-09-14', false),
+  ('oral-roberts-university', 'US', 'Oral Roberts University', NULL, 'university', 'private', 'Oklahoma', 'Tulsa', 'https://oru.edu', ARRAY['ORU']::text[], 'IPEDS', '207582', 'https://nces.ed.gov/collegenavigator/?id=207582', '2026-09-14', false),
+  ('oregon-state-university', 'US', 'Oregon State University', NULL, 'university', 'public', 'Oregon', 'Corvallis', 'https://oregonstate.edu', ARRAY[]::text[], 'IPEDS', '209542', 'https://nces.ed.gov/collegenavigator/?id=209542', '2026-09-14', false),
+  ('pennsylvania-state-university', 'US', 'Pennsylvania State University', NULL, 'university', 'public', 'Pennsylvania', 'University Park', 'https://www.psu.edu', ARRAY[]::text[], 'IPEDS', '214777', 'https://nces.ed.gov/collegenavigator/?id=214777', '2026-09-14', false),
+  ('portland-community-college', 'US', 'Portland Community College', NULL, 'community_college', 'public', 'Oregon', 'Portland', 'https://www.pcc.edu', ARRAY[]::text[], 'IPEDS', '209746', 'https://nces.ed.gov/collegenavigator/?id=209746', '2026-09-14', false),
+  ('princeton-university', 'US', 'Princeton University', NULL, 'university', 'private', 'New Jersey', 'Princeton', 'https://www.princeton.edu', ARRAY[]::text[], 'IPEDS', '186131', 'https://nces.ed.gov/collegenavigator/?id=186131', '2026-09-14', false),
+  ('purdue', 'US', 'Purdue University', 'Purdue', 'university', 'public', 'Indiana', 'West Lafayette', 'https://www.purdue.edu', ARRAY['Purdue-West Lafayette', 'Purdue', 'PU', 'Purdue-WL']::text[], 'IPEDS', '243780', 'https://nces.ed.gov/collegenavigator/?id=243780', '2026-09-14', true),
+  ('rhode-island-college', 'US', 'Rhode Island College', NULL, 'college', 'public', 'Rhode Island', 'Providence', 'https://www.ric.edu', ARRAY['RIC', 'RI College', 'R.I. College']::text[], 'IPEDS', '217420', 'https://nces.ed.gov/collegenavigator/?id=217420', '2026-09-14', false),
+  ('roseman-university-of-health-sciences', 'US', 'Roseman University of Health Sciences', NULL, 'university', 'private', 'Nevada', 'Henderson', 'https://www.roseman.edu', ARRAY[]::text[], 'IPEDS', '445735', 'https://nces.ed.gov/collegenavigator/?id=445735', '2026-09-14', false),
+  ('rutgers-university-new-brunswick', 'US', 'Rutgers University-New Brunswick', NULL, 'university', 'public', 'New Jersey', 'New Brunswick', 'https://newbrunswick.rutgers.edu', ARRAY['Rutgers', 'The State University of New Jersey', 'Rutgers', 'The State University', 'Rutgers University']::text[], 'IPEDS', '186380', 'https://nces.ed.gov/collegenavigator/?id=186380', '2026-09-14', false),
+  ('salt-lake-community-college', 'US', 'Salt Lake Community College', NULL, 'community_college', 'public', 'Utah', 'Salt Lake City', 'https://www.slcc.edu', ARRAY[]::text[], 'IPEDS', '230746', 'https://nces.ed.gov/collegenavigator/?id=230746', '2026-09-14', false),
+  ('samford-university', 'US', 'Samford University', NULL, 'university', 'private', 'Alabama', 'Birmingham', 'https://www.samford.edu', ARRAY[]::text[], 'IPEDS', '102049', 'https://nces.ed.gov/collegenavigator/?id=102049', '2026-09-14', false),
+  ('south-dakota-state-university', 'US', 'South Dakota State University', NULL, 'university', 'public', 'South Dakota', 'Brookings', 'https://www.sdstate.edu', ARRAY[]::text[], 'IPEDS', '219356', 'https://nces.ed.gov/collegenavigator/?id=219356', '2026-09-14', false),
+  ('southern-maine-community-college', 'US', 'Southern Maine Community College', NULL, 'community_college', 'public', 'Maine', 'South Portland', 'https://www.smccme.edu', ARRAY['SMCC']::text[], 'IPEDS', '161545', 'https://nces.ed.gov/collegenavigator/?id=161545', '2026-09-14', false),
+  ('southern-new-hampshire-university', 'US', 'Southern New Hampshire University', NULL, 'university', 'private', 'New Hampshire', 'Manchester', 'https://www.snhu.edu', ARRAY['SNHU']::text[], 'IPEDS', '183026', 'https://nces.ed.gov/collegenavigator/?id=183026', '2026-09-14', false),
+  ('stony-brook-university', 'US', 'Stony Brook University', NULL, 'university', 'public', 'New York', 'Stony Brook', 'https://www.stonybrook.edu', ARRAY['SUNY Stony Brook State University of New York at Stony Brook']::text[], 'IPEDS', '196097', 'https://nces.ed.gov/collegenavigator/?id=196097', '2026-09-14', false),
+  ('suffolk-county-community-college', 'US', 'Suffolk County Community College', NULL, 'community_college', 'public', 'New York', 'Selden', 'https://www.sunysuffolk.edu', ARRAY[]::text[], 'IPEDS', '366395', 'https://nces.ed.gov/collegenavigator/?id=366395', '2026-09-14', false),
+  ('temple-university', 'US', 'Temple University', NULL, 'university', 'public', 'Pennsylvania', 'Philadelphia', 'https://www.temple.edu', ARRAY['Temple']::text[], 'IPEDS', '216339', 'https://nces.ed.gov/collegenavigator/?id=216339', '2026-09-14', false),
+  ('texas-a-m-university-college-station', 'US', 'Texas A&M University-College Station', NULL, 'university', 'public', 'Texas', 'College Station', 'https://www.tamu.edu', ARRAY['Texas A&M University']::text[], 'IPEDS', '228723', 'https://nces.ed.gov/collegenavigator/?id=228723', '2026-09-14', false),
+  ('texas-tech-university', 'US', 'Texas Tech University', NULL, 'university', 'public', 'Texas', 'Lubbock', 'https://www.ttu.edu', ARRAY[]::text[], 'IPEDS', '229115', 'https://nces.ed.gov/collegenavigator/?id=229115', '2026-09-14', false),
+  ('the-university-of-alabama', 'US', 'The University of Alabama', NULL, 'university', 'public', 'Alabama', 'Tuscaloosa', 'https://www.ua.edu', ARRAY[]::text[], 'IPEDS', '100751', 'https://nces.ed.gov/collegenavigator/?id=100751', '2026-09-14', false),
+  ('the-university-of-montana', 'US', 'The University of Montana', NULL, 'university', 'public', 'Montana', 'Missoula', 'https://www.umt.edu', ARRAY['University of Montana']::text[], 'IPEDS', '180489', 'https://nces.ed.gov/collegenavigator/?id=180489', '2026-09-14', false),
+  ('the-university-of-tennessee-knoxville', 'US', 'The University of Tennessee-Knoxville', NULL, 'university', 'public', 'Tennessee', 'Knoxville', 'https://www.utk.edu', ARRAY[]::text[], 'IPEDS', '221759', 'https://nces.ed.gov/collegenavigator/?id=221759', '2026-09-14', false),
+  ('trident-technical-college', 'US', 'Trident Technical College', NULL, 'community_college', 'public', 'South Carolina', 'Charleston', 'https://www.tridenttech.edu', ARRAY[]::text[], 'IPEDS', '218894', 'https://nces.ed.gov/collegenavigator/?id=218894', '2026-09-14', false),
+  ('tulane-university-of-louisiana', 'US', 'Tulane University of Louisiana', NULL, 'university', 'private', 'Louisiana', 'New Orleans', 'https://tulane.edu', ARRAY['Tulane University']::text[], 'IPEDS', '160755', 'https://nces.ed.gov/collegenavigator/?id=160755', '2026-09-14', false),
+  ('university-at-buffalo', 'US', 'University at Buffalo', NULL, 'university', 'public', 'New York', 'Buffalo', 'https://www.buffalo.edu', ARRAY['University at Buffalo', 'UB', 'State University of New York at Buffalo', 'SUNY Buffalo', 'University of Buffalo']::text[], 'IPEDS', '196088', 'https://nces.ed.gov/collegenavigator/?id=196088', '2026-09-14', false),
+  ('university-of-alaska-anchorage', 'US', 'University of Alaska Anchorage', NULL, 'university', 'public', 'Alaska', 'Anchorage', 'https://www.uaa.alaska.edu', ARRAY['UAA']::text[], 'IPEDS', '102553', 'https://nces.ed.gov/collegenavigator/?id=102553', '2026-09-14', false),
+  ('university-of-alaska-fairbanks', 'US', 'University of Alaska Fairbanks', NULL, 'university', 'public', 'Alaska', 'Fairbanks', 'https://www.uaf.edu', ARRAY['UAF']::text[], 'IPEDS', '102614', 'https://nces.ed.gov/collegenavigator/?id=102614', '2026-09-14', false),
+  ('university-of-arizona', 'US', 'University of Arizona', NULL, 'university', 'public', 'Arizona', 'Tucson', 'https://www.arizona.edu', ARRAY['The University of Arizona', 'UArizona', 'U of A', 'UofA', 'UA']::text[], 'IPEDS', '104179', 'https://nces.ed.gov/collegenavigator/?id=104179', '2026-09-14', false),
+  ('university-of-arkansas', 'US', 'University of Arkansas', NULL, 'university', 'public', 'Arkansas', 'Fayetteville', 'https://www.uark.edu', ARRAY['University of Arkansas', 'Arkansas']::text[], 'IPEDS', '106397', 'https://nces.ed.gov/collegenavigator/?id=106397', '2026-09-14', false),
+  ('university-of-california-berkeley', 'US', 'University of California-Berkeley', NULL, 'university', 'public', 'California', 'Berkeley', 'https://www.berkeley.edu', ARRAY['UC Berkeley']::text[], 'IPEDS', '110635', 'https://nces.ed.gov/collegenavigator/?id=110635', '2026-09-14', false),
+  ('university-of-california-davis', 'US', 'University of California-Davis', NULL, 'university', 'public', 'California', 'Davis', 'https://ucdavis.edu', ARRAY['UC Davis']::text[], 'IPEDS', '110644', 'https://nces.ed.gov/collegenavigator/?id=110644', '2026-09-14', false),
+  ('university-of-charleston', 'US', 'University of Charleston', NULL, 'university', 'private', 'West Virginia', 'Charleston', 'https://www.ucwv.edu', ARRAY[]::text[], 'IPEDS', '237312', 'https://nces.ed.gov/collegenavigator/?id=237312', '2026-09-14', false),
+  ('university-of-colorado-boulder', 'US', 'University of Colorado Boulder', NULL, 'university', 'public', 'Colorado', 'Boulder', 'https://www.colorado.edu', ARRAY['U of Colorado', 'Univ of Colorado', 'University of Colorado', 'U of CO', 'Univ of CO']::text[], 'IPEDS', '126614', 'https://nces.ed.gov/collegenavigator/?id=126614', '2026-09-14', false),
+  ('university-of-connecticut', 'US', 'University of Connecticut', NULL, 'university', 'public', 'Connecticut', 'Storrs', 'https://uconn.edu', ARRAY[]::text[], 'IPEDS', '129020', 'https://nces.ed.gov/collegenavigator/?id=129020', '2026-09-14', false),
+  ('university-of-delaware', 'US', 'University of Delaware', NULL, 'university', 'public', 'Delaware', 'Newark', 'https://www.udel.edu', ARRAY['UD']::text[], 'IPEDS', '130943', 'https://nces.ed.gov/collegenavigator/?id=130943', '2026-09-14', false),
+  ('university-of-denver', 'US', 'University of Denver', NULL, 'university', 'private', 'Colorado', 'Denver', 'https://www.du.edu', ARRAY['DU', 'Colorado Seminary']::text[], 'IPEDS', '127060', 'https://nces.ed.gov/collegenavigator/?id=127060', '2026-09-14', false),
+  ('university-of-detroit-mercy', 'US', 'University of Detroit Mercy', NULL, 'university', 'private', 'Michigan', 'Detroit', 'https://www.udmercy.edu', ARRAY['Detroit Mercy', 'UDM', 'U of D', 'University of Detroit']::text[], 'IPEDS', '169716', 'https://nces.ed.gov/collegenavigator/?id=169716', '2026-09-14', false),
+  ('university-of-florida', 'US', 'University of Florida', NULL, 'university', 'public', 'Florida', 'Gainesville', 'https://www.ufl.edu', ARRAY[]::text[], 'IPEDS', '134130', 'https://nces.ed.gov/collegenavigator/?id=134130', '2026-09-14', false),
+  ('university-of-georgia', 'US', 'University of Georgia', NULL, 'university', 'public', 'Georgia', 'Athens', 'https://www.uga.edu', ARRAY[]::text[], 'IPEDS', '139959', 'https://nces.ed.gov/collegenavigator/?id=139959', '2026-09-14', false),
+  ('university-of-hawaii-at-hilo', 'US', 'University of Hawaii at Hilo', NULL, 'university', 'public', 'Hawaii', 'Hilo', 'https://hilo.hawaii.edu', ARRAY['UH Hilo / UHH']::text[], 'IPEDS', '141565', 'https://nces.ed.gov/collegenavigator/?id=141565', '2026-09-14', false),
+  ('university-of-hawaii-at-manoa', 'US', 'University of Hawaii at Manoa', NULL, 'university', 'public', 'Hawaii', 'Honolulu', 'https://manoa.hawaii.edu', ARRAY['UH Manoa / UHM']::text[], 'IPEDS', '141574', 'https://nces.ed.gov/collegenavigator/?id=141574', '2026-09-14', false),
+  ('university-of-idaho', 'US', 'University of Idaho', NULL, 'university', 'public', 'Idaho', 'Moscow', 'https://www.uidaho.edu', ARRAY['UIdaho']::text[], 'IPEDS', '142285', 'https://nces.ed.gov/collegenavigator/?id=142285', '2026-09-14', false),
+  ('university-of-illinois-chicago', 'US', 'University of Illinois Chicago', NULL, 'university', 'public', 'Illinois', 'Chicago', 'https://www.uic.edu', ARRAY['UIC', 'U of I-Chicago', 'Illinois-Chicago', 'U of I-Medical Center', 'University of Illinois-Medical Center']::text[], 'IPEDS', '145600', 'https://nces.ed.gov/collegenavigator/?id=145600', '2026-09-14', false),
+  ('university-of-illinois-urbana-champaign', 'US', 'University of Illinois Urbana-Champaign', NULL, 'university', 'public', 'Illinois', 'Champaign', 'https://www.illinois.edu', ARRAY['Illinois', 'Illinios', 'Ilinois', 'Ilinios', 'Urbana']::text[], 'IPEDS', '145637', 'https://nces.ed.gov/collegenavigator/?id=145637', '2026-09-14', false),
+  ('university-of-iowa', 'US', 'University of Iowa', NULL, 'university', 'public', 'Iowa', 'Iowa City', 'https://uiowa.edu', ARRAY['Iowa']::text[], 'IPEDS', '153658', 'https://nces.ed.gov/collegenavigator/?id=153658', '2026-09-14', false),
+  ('university-of-jamestown', 'US', 'University of Jamestown', NULL, 'university', 'private', 'North Dakota', 'Jamestown', 'https://www.uj.edu', ARRAY['UJ Jimmies']::text[], 'IPEDS', '200156', 'https://nces.ed.gov/collegenavigator/?id=200156', '2026-09-14', false),
+  ('university-of-kansas', 'US', 'University of Kansas', NULL, 'university', 'public', 'Kansas', 'Lawrence', 'https://ku.edu', ARRAY['University of Kansas', 'Univ of Kansas', 'Kansas University', 'KU', 'Kansas Jayhawks']::text[], 'IPEDS', '155317', 'https://nces.ed.gov/collegenavigator/?id=155317', '2026-09-14', false),
+  ('university-of-kentucky', 'US', 'University of Kentucky', NULL, 'university', 'public', 'Kentucky', 'Lexington', 'https://www.uky.edu', ARRAY[]::text[], 'IPEDS', '157085', 'https://nces.ed.gov/collegenavigator/?id=157085', '2026-09-14', false),
+  ('university-of-louisiana-at-lafayette', 'US', 'University of Louisiana at Lafayette', NULL, 'university', 'public', 'Louisiana', 'Lafayette', 'https://www.louisiana.edu', ARRAY['UL Lafayette']::text[], 'IPEDS', '160658', 'https://nces.ed.gov/collegenavigator/?id=160658', '2026-09-14', false),
+  ('university-of-louisville', 'US', 'University of Louisville', NULL, 'university', 'public', 'Kentucky', 'Louisville', 'https://www.louisville.edu', ARRAY[]::text[], 'IPEDS', '157289', 'https://nces.ed.gov/collegenavigator/?id=157289', '2026-09-14', false),
+  ('university-of-maine', 'US', 'University of Maine', NULL, 'university', 'public', 'Maine', 'Orono', 'https://www.umaine.edu', ARRAY[]::text[], 'IPEDS', '161253', 'https://nces.ed.gov/collegenavigator/?id=161253', '2026-09-14', false),
+  ('university-of-maryland-global-campus', 'US', 'University of Maryland Global Campus', NULL, 'university', 'public', 'Maryland', 'Adelphi', 'https://www.umgc.edu', ARRAY['UMGC']::text[], 'IPEDS', '163204', 'https://nces.ed.gov/collegenavigator/?id=163204', '2026-09-14', false),
+  ('university-of-maryland-college-park', 'US', 'University of Maryland-College Park', NULL, 'university', 'public', 'Maryland', 'College Park', 'https://www.umd.edu', ARRAY[]::text[], 'IPEDS', '163286', 'https://nces.ed.gov/collegenavigator/?id=163286', '2026-09-14', false),
+  ('university-of-massachusetts-amherst', 'US', 'University of Massachusetts-Amherst', NULL, 'university', 'public', 'Massachusetts', 'Amherst', 'https://www.umass.edu', ARRAY['UMass Amherst']::text[], 'IPEDS', '166629', 'https://nces.ed.gov/collegenavigator/?id=166629', '2026-09-14', false),
+  ('university-of-massachusetts-boston', 'US', 'University of Massachusetts-Boston', NULL, 'university', 'public', 'Massachusetts', 'Boston', 'https://www.umb.edu', ARRAY[]::text[], 'IPEDS', '166638', 'https://nces.ed.gov/collegenavigator/?id=166638', '2026-09-14', false),
+  ('university-of-memphis', 'US', 'University of Memphis', NULL, 'university', 'public', 'Tennessee', 'Memphis', 'https://www.memphis.edu', ARRAY[]::text[], 'IPEDS', '220862', 'https://nces.ed.gov/collegenavigator/?id=220862', '2026-09-14', false),
+  ('university-of-michigan-ann-arbor', 'US', 'University of Michigan-Ann Arbor', NULL, 'university', 'public', 'Michigan', 'Ann Arbor', 'https://umich.edu', ARRAY['U of Michigan', 'U of M', 'Univ of Michigan', 'U Michigan Ann Arbor', 'University of Michigan Ann Arbor']::text[], 'IPEDS', '170976', 'https://nces.ed.gov/collegenavigator/?id=170976', '2026-09-14', false),
+  ('university-of-minnesota-twin-cities', 'US', 'University of Minnesota-Twin Cities', NULL, 'university', 'public', 'Minnesota', 'Minneapolis', 'https://twin-cities.umn.edu', ARRAY[]::text[], 'IPEDS', '174066', 'https://nces.ed.gov/collegenavigator/?id=174066', '2026-09-14', false),
+  ('university-of-mississippi', 'US', 'University of Mississippi', NULL, 'university', 'public', 'Mississippi', 'University', 'https://www.olemiss.edu', ARRAY['Ole Miss']::text[], 'IPEDS', '176017', 'https://nces.ed.gov/collegenavigator/?id=176017', '2026-09-14', false),
+  ('university-of-missouri-columbia', 'US', 'University of Missouri-Columbia', NULL, 'university', 'public', 'Missouri', 'Columbia', 'https://missouri.edu', ARRAY[]::text[], 'IPEDS', '178396', 'https://nces.ed.gov/collegenavigator/?id=178396', '2026-09-14', false),
+  ('university-of-nebraska-at-omaha', 'US', 'University of Nebraska at Omaha', NULL, 'university', 'public', 'Nebraska', 'Omaha', 'https://www.unomaha.edu', ARRAY['UNOMAHA']::text[], 'IPEDS', '181394', 'https://nces.ed.gov/collegenavigator/?id=181394', '2026-09-14', false),
+  ('university-of-nebraska-lincoln', 'US', 'University of Nebraska-Lincoln', NULL, 'university', 'public', 'Nebraska', 'Lincoln', 'https://www.unl.edu', ARRAY[]::text[], 'IPEDS', '181464', 'https://nces.ed.gov/collegenavigator/?id=181464', '2026-09-14', false),
+  ('university-of-nevada-las-vegas', 'US', 'University of Nevada-Las Vegas', NULL, 'university', 'public', 'Nevada', 'Las Vegas', 'https://www.unlv.edu', ARRAY['UNLV']::text[], 'IPEDS', '182281', 'https://nces.ed.gov/collegenavigator/?id=182281', '2026-09-14', false),
+  ('university-of-nevada-reno', 'US', 'University of Nevada-Reno', NULL, 'university', 'public', 'Nevada', 'Reno', 'https://www.unr.edu', ARRAY[]::text[], 'IPEDS', '182290', 'https://nces.ed.gov/collegenavigator/?id=182290', '2026-09-14', false),
+  ('university-of-new-england', 'US', 'University of New England', NULL, 'university', 'private', 'Maine', 'Biddeford', 'https://www.une.edu', ARRAY['UNE']::text[], 'IPEDS', '161457', 'https://nces.ed.gov/collegenavigator/?id=161457', '2026-09-14', false),
+  ('university-of-new-hampshire', 'US', 'University of New Hampshire', NULL, 'university', 'public', 'New Hampshire', 'Durham', 'https://www.unh.edu', ARRAY[]::text[], 'IPEDS', '183044', 'https://nces.ed.gov/collegenavigator/?id=183044', '2026-09-14', false),
+  ('university-of-new-mexico', 'US', 'University of New Mexico', NULL, 'university', 'public', 'New Mexico', 'Albuquerque', 'https://www.unm.edu', ARRAY['UNM']::text[], 'IPEDS', '187985', 'https://nces.ed.gov/collegenavigator/?id=187985', '2026-09-14', false),
+  ('university-of-north-carolina-at-chapel-hill', 'US', 'University of North Carolina at Chapel Hill', NULL, 'university', 'public', 'North Carolina', 'Chapel Hill', 'https://www.unc.edu', ARRAY[]::text[], 'IPEDS', '199120', 'https://nces.ed.gov/collegenavigator/?id=199120', '2026-09-14', false),
+  ('university-of-north-dakota', 'US', 'University of North Dakota', NULL, 'university', 'public', 'North Dakota', 'Grand Forks', 'https://und.edu', ARRAY[]::text[], 'IPEDS', '200280', 'https://nces.ed.gov/collegenavigator/?id=200280', '2026-09-14', false),
+  ('university-of-notre-dame', 'US', 'University of Notre Dame', NULL, 'university', 'private', 'Indiana', 'Notre Dame', 'https://www.nd.edu', ARRAY['Notre Dame', 'Fighting Irish', 'ND']::text[], 'IPEDS', '152080', 'https://nces.ed.gov/collegenavigator/?id=152080', '2026-09-14', false),
+  ('university-of-oklahoma', 'US', 'University of Oklahoma', NULL, 'university', 'public', 'Oklahoma', 'Norman', 'https://www.ou.edu', ARRAY['University of Oklahoma', 'Oklahoma University', 'OU', 'Oklahoma']::text[], 'IPEDS', '207500', 'https://nces.ed.gov/collegenavigator/?id=207500', '2026-09-14', false),
+  ('university-of-oregon', 'US', 'University of Oregon', NULL, 'university', 'public', 'Oregon', 'Eugene', 'https://www.uoregon.edu', ARRAY['UO']::text[], 'IPEDS', '209551', 'https://nces.ed.gov/collegenavigator/?id=209551', '2026-09-14', false),
+  ('university-of-rhode-island', 'US', 'University of Rhode Island', NULL, 'university', 'public', 'Rhode Island', 'Kingston', 'https://web.uri.edu', ARRAY['URI']::text[], 'IPEDS', '217484', 'https://nces.ed.gov/collegenavigator/?id=217484', '2026-09-14', false),
+  ('university-of-south-carolina-columbia', 'US', 'University of South Carolina-Columbia', NULL, 'university', 'public', 'South Carolina', 'Columbia', 'https://www.sc.edu', ARRAY[]::text[], 'IPEDS', '218663', 'https://nces.ed.gov/collegenavigator/?id=218663', '2026-09-14', false),
+  ('university-of-south-dakota', 'US', 'University of South Dakota', NULL, 'university', 'public', 'South Dakota', 'Vermillion', 'https://www.usd.edu', ARRAY['USD']::text[], 'IPEDS', '219471', 'https://nces.ed.gov/collegenavigator/?id=219471', '2026-09-14', false),
+  ('university-of-southern-california', 'US', 'University of Southern California', NULL, 'university', 'private', 'California', 'Los Angeles', 'https://www.usc.edu', ARRAY['USC']::text[], 'IPEDS', '123961', 'https://nces.ed.gov/collegenavigator/?id=123961', '2026-09-14', false),
+  ('university-of-southern-maine', 'US', 'University of Southern Maine', NULL, 'university', 'public', 'Maine', 'Portland', 'https://usm.maine.edu', ARRAY[]::text[], 'IPEDS', '161554', 'https://nces.ed.gov/collegenavigator/?id=161554', '2026-09-14', false),
+  ('university-of-the-cumberlands', 'US', 'University of the Cumberlands', NULL, 'university', 'private', 'Kentucky', 'Williamsburg', 'https://www.ucumberlands.edu', ARRAY['Cumberland College']::text[], 'IPEDS', '156541', 'https://nces.ed.gov/collegenavigator/?id=156541', '2026-09-14', false),
+  ('university-of-the-district-of-columbia', 'US', 'University of the District of Columbia', NULL, 'university', 'public', 'District of Columbia', 'Washington', 'https://www.udc.edu', ARRAY[]::text[], 'IPEDS', '131399', 'https://nces.ed.gov/collegenavigator/?id=131399', '2026-09-14', false),
+  ('university-of-the-southwest', 'US', 'University of the Southwest', NULL, 'university', 'private', 'New Mexico', 'Hobbs', 'https://www.usw.edu', ARRAY['USW']::text[], 'IPEDS', '188182', 'https://nces.ed.gov/collegenavigator/?id=188182', '2026-09-14', false),
+  ('university-of-utah', 'US', 'University of Utah', NULL, 'university', 'public', 'Utah', 'Salt Lake City', 'https://www.utah.edu', ARRAY['The U']::text[], 'IPEDS', '230764', 'https://nces.ed.gov/collegenavigator/?id=230764', '2026-09-14', false),
+  ('university-of-vermont', 'US', 'University of Vermont', NULL, 'university', 'public', 'Vermont', 'Burlington', 'https://www.uvm.edu', ARRAY['UVM']::text[], 'IPEDS', '231174', 'https://nces.ed.gov/collegenavigator/?id=231174', '2026-09-14', false),
+  ('university-of-washington', 'US', 'University of Washington', NULL, 'university', 'public', 'Washington', 'Seattle', 'https://www.washington.edu', ARRAY['UW-Seattle', 'UDub', 'UW', 'Washington']::text[], 'IPEDS', '236948', 'https://nces.ed.gov/collegenavigator/?id=236948', '2026-09-14', false),
+  ('university-of-wisconsin-madison', 'US', 'University of Wisconsin-Madison', NULL, 'university', 'public', 'Wisconsin', 'Madison', 'https://www.wisc.edu', ARRAY[]::text[], 'IPEDS', '240444', 'https://nces.ed.gov/collegenavigator/?id=240444', '2026-09-14', false),
+  ('university-of-wisconsin-milwaukee', 'US', 'University of Wisconsin-Milwaukee', NULL, 'university', 'public', 'Wisconsin', 'Milwaukee', 'https://uwm.edu', ARRAY['UWM']::text[], 'IPEDS', '240453', 'https://nces.ed.gov/collegenavigator/?id=240453', '2026-09-14', false),
+  ('university-of-wyoming', 'US', 'University of Wyoming', NULL, 'university', 'public', 'Wyoming', 'Laramie', 'https://www.uwyo.edu', ARRAY['UW']::text[], 'IPEDS', '240727', 'https://nces.ed.gov/collegenavigator/?id=240727', '2026-09-14', false),
+  ('utah-state-university', 'US', 'Utah State University', NULL, 'university', 'public', 'Utah', 'Logan', 'https://www.usu.edu', ARRAY[]::text[], 'IPEDS', '230728', 'https://nces.ed.gov/collegenavigator/?id=230728', '2026-09-14', false),
+  ('vanderbilt-university', 'US', 'Vanderbilt University', NULL, 'university', 'private', 'Tennessee', 'Nashville', 'https://www.vanderbilt.edu', ARRAY[]::text[], 'IPEDS', '221999', 'https://nces.ed.gov/collegenavigator/?id=221999', '2026-09-14', false),
+  ('vermont-state-university', 'US', 'Vermont State University', NULL, 'university', 'public', 'Vermont', 'Randolph', 'https://vermontstate.edu', ARRAY[]::text[], 'IPEDS', '231165', 'https://nces.ed.gov/collegenavigator/?id=231165', '2026-09-14', false),
+  ('virginia-polytechnic-institute-and-state-university', 'US', 'Virginia Polytechnic Institute and State University', NULL, 'university', 'public', 'Virginia', 'Blacksburg', 'https://www.vt.edu', ARRAY['Virginia Tech']::text[], 'IPEDS', '233921', 'https://nces.ed.gov/collegenavigator/?id=233921', '2026-09-14', false),
+  ('wake-technical-community-college', 'US', 'Wake Technical Community College', NULL, 'community_college', 'public', 'North Carolina', 'Raleigh', 'https://www.waketech.edu', ARRAY[]::text[], 'IPEDS', '199856', 'https://nces.ed.gov/collegenavigator/?id=199856', '2026-09-14', false),
+  ('washington-state-university', 'US', 'Washington State University', NULL, 'university', 'public', 'Washington', 'Pullman', 'https://wsu.edu', ARRAY[]::text[], 'IPEDS', '236939', 'https://nces.ed.gov/collegenavigator/?id=236939', '2026-09-14', false),
+  ('washington-university-in-st-louis', 'US', 'Washington University in St Louis', NULL, 'university', 'private', 'Missouri', 'Saint Louis', 'https://wustl.edu', ARRAY['WashU']::text[], 'IPEDS', '179867', 'https://nces.ed.gov/collegenavigator/?id=179867', '2026-09-14', false),
+  ('west-virginia-university', 'US', 'West Virginia University', NULL, 'university', 'public', 'West Virginia', 'Morgantown', 'https://www.wvu.edu', ARRAY[]::text[], 'IPEDS', '238032', 'https://nces.ed.gov/collegenavigator/?id=238032', '2026-09-14', false),
+  ('william-carey-university', 'US', 'William Carey University', NULL, 'university', 'private', 'Mississippi', 'Hattiesburg', 'https://www.wmcarey.edu', ARRAY[]::text[], 'IPEDS', '176479', 'https://nces.ed.gov/collegenavigator/?id=176479', '2026-09-14', false),
+  ('wilmington-university', 'US', 'Wilmington University', NULL, 'university', 'private', 'Delaware', 'New Castle', 'https://www.wilmu.edu', ARRAY[]::text[], 'IPEDS', '131113', 'https://nces.ed.gov/collegenavigator/?id=131113', '2026-09-14', false),
+  ('yale-university', 'US', 'Yale University', NULL, 'university', 'private', 'Connecticut', 'New Haven', 'https://www.yale.edu', ARRAY[]::text[], 'IPEDS', '130794', 'https://nces.ed.gov/collegenavigator/?id=130794', '2026-09-14', false);
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM _u JOIN public.universities u USING (slug) WHERE u.country_code <> _u.country_code) THEN
+    RAISE EXCEPTION 'SLUG_COUNTRY_CONFLICT';
+  END IF;
+END $$;
+
+CREATE TEMP TABLE _report (entity text, action text, n integer) ON COMMIT DROP;
+
+WITH upd AS (
+  UPDATE public.universities u SET
+    name             = CASE WHEN s.preserve THEN u.name ELSE s.name END,
+    short_name       = CASE WHEN s.preserve THEN coalesce(u.short_name, s.short_name) ELSE s.short_name END,
+    institution_type = s.institution_type,
+    control          = coalesce(u.control, s.control),
+    state_region     = CASE WHEN s.preserve THEN coalesce(u.state_region, s.state_region) ELSE s.state_region END,
+    city             = CASE WHEN s.preserve THEN coalesce(u.city, s.city) ELSE s.city END,
+    website_url      = coalesce(u.website_url, s.website_url),
+    aliases          = ARRAY(SELECT DISTINCT a FROM unnest(u.aliases || s.aliases) a ORDER BY a),
+    source_name = s.source_name, source_ref = s.source_ref, source_url = s.source_url,
+    source_checked_at = s.source_checked_at
+  FROM _u s
+  WHERE u.slug = s.slug
+    AND (u.name, u.short_name, u.institution_type, u.control, u.state_region, u.city, u.website_url, u.source_ref, u.source_checked_at)
+        IS DISTINCT FROM
+        (CASE WHEN s.preserve THEN u.name ELSE s.name END,
+         CASE WHEN s.preserve THEN coalesce(u.short_name, s.short_name) ELSE s.short_name END,
+         s.institution_type, coalesce(u.control, s.control),
+         CASE WHEN s.preserve THEN coalesce(u.state_region, s.state_region) ELSE s.state_region END,
+         CASE WHEN s.preserve THEN coalesce(u.city, s.city) ELSE s.city END,
+         coalesce(u.website_url, s.website_url), s.source_ref, s.source_checked_at)
+  RETURNING 1
+) INSERT INTO _report SELECT 'universities', 'updated', count(*) FROM upd;
+
+WITH ins AS (
+  INSERT INTO public.universities (slug, country_code, name, short_name, institution_type, control, state_region, city,
+    website_url, aliases, source_name, source_ref, source_url, source_checked_at, email_domains, is_active)
+  SELECT s.slug, s.country_code, s.name, s.short_name, s.institution_type, s.control, s.state_region, s.city,
+    s.website_url, s.aliases, s.source_name, s.source_ref, s.source_url, s.source_checked_at, '{}', true
+  FROM _u s
+  WHERE NOT EXISTS (SELECT 1 FROM public.universities u WHERE u.slug = s.slug)
+  RETURNING 1
+) INSERT INTO _report SELECT 'universities', 'inserted', count(*) FROM ins;
+INSERT INTO _report SELECT 'universities', 'in_catalog', count(*) FROM _u;
+
+-- 3. Campus
+CREATE TEMP TABLE _c (slug text, university_slug text, campus_slug text, name text, campus_name text, city text,
+  state_region text, lat double precision, lng double precision, preserve boolean) ON COMMIT DROP;
+INSERT INTO _c VALUES
+  ('colegio-bolivar', 'colegio-bolivar', 'principal', U&'Colegio Bol\00EDvar', NULL, 'Cali', 'Valle del Cauca', NULL, NULL, false),
+  ('cesa', 'cesa', 'principal', U&'CESA \2014 Colegio de Estudios Superiores de Administraci\00F3n', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, true),
+  ('colegio-mayor-de-antioquia', 'colegio-mayor-de-antioquia', 'principal', 'Colegio Mayor de Antioquia', NULL, U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('escuela-colombiana-de-ingenieria-julio-garavito', 'escuela-colombiana-de-ingenieria-julio-garavito', 'principal', U&'Escuela Colombiana de Ingenier\00EDa Julio Garavito', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('fundacion-universidad-autonoma-de-colombia', 'fundacion-universidad-autonoma-de-colombia', 'principal', U&'Fundaci\00F3n Universidad Aut\00F3noma de Colombia', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('fundacion-universidad-de-america', 'fundacion-universidad-de-america', 'principal', U&'Fundaci\00F3n Universidad de Am\00E9rica', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('fundacion-universitaria-antonio-de-arevalo', 'fundacion-universitaria-antonio-de-arevalo', 'principal', U&'Fundaci\00F3n Universitaria Antonio de Ar\00E9valo', NULL, 'Cartagena de Indias', U&'Bol\00EDvar', NULL, NULL, false),
+  ('fundacion-universitaria-ceipa', 'fundacion-universitaria-ceipa', 'principal', U&'Fundaci\00F3n Universitaria CEIPA', NULL, 'Sabaneta', 'Antioquia', NULL, NULL, false),
+  ('fundacion-universitaria-de-ciencias-de-la-salud', 'fundacion-universitaria-de-ciencias-de-la-salud', 'principal', U&'Fundaci\00F3n Universitaria de Ciencias de la Salud', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('fundacion-universitaria-del-area-andina-bogota', 'fundacion-universitaria-del-area-andina', 'bogota', U&'Fundaci\00F3n Universitaria del \00C1rea Andina, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('fundacion-universitaria-del-area-andina-pereira', 'fundacion-universitaria-del-area-andina', 'pereira', U&'Fundaci\00F3n Universitaria del \00C1rea Andina, Campus Pereira', 'Pereira', 'Pereira', 'Risaralda', NULL, NULL, false),
+  ('fundacion-universitaria-juan-n-corpas', 'fundacion-universitaria-juan-n-corpas', 'principal', U&'Fundaci\00F3n Universitaria Juan N. Corpas', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('fundacion-universitaria-konrad-lorenz', 'fundacion-universitaria-konrad-lorenz', 'principal', U&'Fundaci\00F3n Universitaria Konrad Lorenz', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('instituto-tecnologico-metropolitano', 'instituto-tecnologico-metropolitano', 'principal', U&'Instituto Tecnol\00F3gico Metropolitano', NULL, U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('javeriana', 'javeriana', 'principal', 'Pontificia Universidad Javeriana', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, true),
+  ('javeriana-cali', 'javeriana', 'cali', 'Pontificia Universidad Javeriana, Campus Cali', 'Cali', 'Cali', 'Valle del Cauca', NULL, NULL, false),
+  ('tecnologico-de-antioquia', 'tecnologico-de-antioquia', 'principal', U&'Tecnol\00F3gico de Antioquia', NULL, U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-antonio-narino-bogota', 'universidad-antonio-narino', 'bogota', U&'Universidad Antonio Nari\00F1o, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-antonio-narino-neiva', 'universidad-antonio-narino', 'neiva', U&'Universidad Antonio Nari\00F1o, Campus Neiva', 'Neiva', 'Neiva', 'Huila', NULL, NULL, false),
+  ('universidad-autonoma-de-bucaramanga', 'universidad-autonoma-de-bucaramanga', 'principal', U&'Universidad Aut\00F3noma de Bucaramanga', NULL, 'Bucaramanga', 'Santander', NULL, NULL, false),
+  ('universidad-autonoma-de-manizales', 'universidad-autonoma-de-manizales', 'principal', U&'Universidad Aut\00F3noma de Manizales', NULL, 'Manizales', 'Caldas', NULL, NULL, false),
+  ('universidad-autonoma-de-occidente-co', 'universidad-autonoma-de-occidente-co', 'principal', U&'Universidad Aut\00F3noma de Occidente (CO)', NULL, 'Cali', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-autonoma-del-caribe', 'universidad-autonoma-del-caribe', 'principal', U&'Universidad Aut\00F3noma del Caribe', NULL, 'Barranquilla', U&'Atl\00E1ntico', NULL, NULL, false),
+  ('universidad-autonoma-indigena-intercultural', 'universidad-autonoma-indigena-intercultural', 'principal', U&'Universidad Aut\00F3noma Ind\00EDgena Intercultural', NULL, U&'Popay\00E1n', 'Cauca', NULL, NULL, false),
+  ('universidad-autonoma-latinoamericana', 'universidad-autonoma-latinoamericana', 'principal', U&'Universidad Aut\00F3noma Latinoamericana', NULL, U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-catolica-de-colombia-bogota', 'universidad-catolica-de-colombia', 'bogota', U&'Universidad Cat\00F3lica de Colombia, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-catolica-de-colombia-chia', 'universidad-catolica-de-colombia', 'chia', U&'Universidad Cat\00F3lica de Colombia, Campus Ch\00EDa', U&'Ch\00EDa', U&'Ch\00EDa', 'Cundinamarca', NULL, NULL, false),
+  ('universidad-catolica-de-manizales', 'universidad-catolica-de-manizales', 'principal', U&'Universidad Cat\00F3lica de Manizales', NULL, 'Manizales', 'Caldas', NULL, NULL, false),
+  ('universidad-catolica-de-oriente', 'universidad-catolica-de-oriente', 'principal', U&'Universidad Cat\00F3lica de Oriente', NULL, 'Rionegro', 'Antioquia', NULL, NULL, false),
+  ('universidad-catolica-de-pereira', 'universidad-catolica-de-pereira', 'principal', U&'Universidad Cat\00F3lica de Pereira', NULL, 'Pereira', 'Risaralda', NULL, NULL, false),
+  ('universidad-catolica-luis-amigo', 'universidad-catolica-luis-amigo', 'principal', U&'Universidad Cat\00F3lica Luis Amig\00F3', NULL, U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-central', 'universidad-central', 'principal', 'Universidad Central', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-ces', 'universidad-ces', 'principal', 'Universidad CES', NULL, U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-cesmag', 'universidad-cesmag', 'principal', 'Universidad CESMAG', NULL, 'Pasto', U&'Nari\00F1o', NULL, NULL, false),
+  ('universidad-colegio-mayor-de-cundinamarca', 'universidad-colegio-mayor-de-cundinamarca', 'principal', 'Universidad Colegio Mayor de Cundinamarca', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-cooperativa-de-colombia-bogota', 'universidad-cooperativa-de-colombia', 'bogota', U&'Universidad Cooperativa de Colombia, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-cooperativa-de-colombia-medellin', 'universidad-cooperativa-de-colombia', 'medellin', U&'Universidad Cooperativa de Colombia, Campus Medell\00EDn', U&'Medell\00EDn', U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-cooperativa-de-colombia-bucaramanga', 'universidad-cooperativa-de-colombia', 'bucaramanga', 'Universidad Cooperativa de Colombia, Campus Bucaramanga', 'Bucaramanga', 'Bucaramanga', 'Santander', NULL, NULL, false),
+  ('universidad-cooperativa-de-colombia-barrancabermeja', 'universidad-cooperativa-de-colombia', 'barrancabermeja', 'Universidad Cooperativa de Colombia, Campus Barrancabermeja', 'Barrancabermeja', 'Barrancabermeja', 'Santander', NULL, NULL, false),
+  ('universidad-cooperativa-de-colombia-santa-marta', 'universidad-cooperativa-de-colombia', 'santa-marta', 'Universidad Cooperativa de Colombia, Campus Santa Marta', 'Santa Marta', 'Santa Marta', 'Magdalena', NULL, NULL, false),
+  ('universidad-de-antioquia-medellin', 'universidad-de-antioquia', 'medellin', U&'Universidad de Antioquia, Campus Medell\00EDn', U&'Medell\00EDn', U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-antioquia-andes', 'universidad-de-antioquia', 'andes', 'Universidad de Antioquia, Campus Andes', 'Andes', 'Andes', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-antioquia-el-carmen-de-viboral', 'universidad-de-antioquia', 'el-carmen-de-viboral', 'Universidad de Antioquia, Campus El Carmen de Viboral', 'El Carmen de Viboral', 'El Carmen de Viboral', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-antioquia-caucasia', 'universidad-de-antioquia', 'caucasia', 'Universidad de Antioquia, Campus Caucasia', 'Caucasia', 'Caucasia', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-antioquia-puerto-berrio', 'universidad-de-antioquia', 'puerto-berrio', U&'Universidad de Antioquia, Campus Puerto Berr\00EDo', U&'Puerto Berr\00EDo', U&'Puerto Berr\00EDo', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-antioquia-turbo', 'universidad-de-antioquia', 'turbo', 'Universidad de Antioquia, Campus Turbo', 'Turbo', 'Turbo', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-antioquia-santa-fe-de-antioquia', 'universidad-de-antioquia', 'santa-fe-de-antioquia', U&'Universidad de Antioquia, Campus Santa F\00E9 de Antioquia', U&'Santa F\00E9 de Antioquia', U&'Santa F\00E9 de Antioquia', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-bogota-jorge-tadeo-lozano-bogota', 'universidad-de-bogota-jorge-tadeo-lozano', 'bogota', U&'Universidad de Bogot\00E1 Jorge Tadeo Lozano, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-de-bogota-jorge-tadeo-lozano-cartagena-de-indias', 'universidad-de-bogota-jorge-tadeo-lozano', 'cartagena-de-indias', U&'Universidad de Bogot\00E1 Jorge Tadeo Lozano, Campus Cartagena de Indias', 'Cartagena de Indias', 'Cartagena de Indias', U&'Bol\00EDvar', NULL, NULL, false),
+  ('universidad-de-boyaca', 'universidad-de-boyaca', 'principal', U&'Universidad de Boyac\00E1', NULL, 'Tunja', U&'Boyac\00E1', NULL, NULL, false),
+  ('universidad-de-caldas', 'universidad-de-caldas', 'principal', 'Universidad de Caldas', NULL, 'Manizales', 'Caldas', NULL, NULL, false),
+  ('universidad-de-cartagena', 'universidad-de-cartagena', 'principal', 'Universidad de Cartagena', NULL, 'Cartagena de Indias', U&'Bol\00EDvar', NULL, NULL, false),
+  ('universidad-de-ciencias-aplicadas-y-ambientales', 'universidad-de-ciencias-aplicadas-y-ambientales', 'principal', 'Universidad de Ciencias Aplicadas y Ambientales', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-de-cordoba', 'universidad-de-cordoba', 'principal', U&'Universidad de C\00F3rdoba', NULL, U&'Monter\00EDa', U&'C\00F3rdoba', NULL, NULL, false),
+  ('universidad-de-cundinamarca-fusagasuga', 'universidad-de-cundinamarca', 'fusagasuga', U&'Universidad de Cundinamarca, Campus Fusagasug\00E1', U&'Fusagasug\00E1', U&'Fusagasug\00E1', 'Cundinamarca', NULL, NULL, false),
+  ('universidad-de-cundinamarca-girardot', 'universidad-de-cundinamarca', 'girardot', 'Universidad de Cundinamarca, Campus Girardot', 'Girardot', 'Girardot', 'Cundinamarca', NULL, NULL, false),
+  ('universidad-de-cundinamarca-villa-de-san-diego-de-ubate', 'universidad-de-cundinamarca', 'villa-de-san-diego-de-ubate', U&'Universidad de Cundinamarca, Campus Villa de San Diego de Ubat\00E9', U&'Villa de San Diego de Ubat\00E9', U&'Villa de San Diego de Ubat\00E9', 'Cundinamarca', NULL, NULL, false),
+  ('universidad-de-ibague', 'universidad-de-ibague', 'principal', U&'Universidad de Ibagu\00E9', NULL, U&'Ibagu\00E9', 'Tolima', NULL, NULL, false),
+  ('universidad-de-investigacion-y-desarrollo', 'universidad-de-investigacion-y-desarrollo', 'principal', U&'Universidad de Investigaci\00F3n y Desarrollo', NULL, 'Bucaramanga', 'Santander', NULL, NULL, false),
+  ('universidad-de-la-amazonia', 'universidad-de-la-amazonia', 'principal', 'Universidad de la Amazonia', NULL, 'Florencia', U&'Caquet\00E1', NULL, NULL, false),
+  ('universidad-de-la-costa', 'universidad-de-la-costa', 'principal', 'Universidad de la Costa', NULL, 'Barranquilla', U&'Atl\00E1ntico', NULL, NULL, false),
+  ('universidad-de-la-guajira', 'universidad-de-la-guajira', 'principal', 'Universidad de la Guajira', NULL, 'Riohacha', 'La Guajira', NULL, NULL, false),
+  ('universidad-de-la-sabana', 'universidad-de-la-sabana', 'principal', 'Universidad de la Sabana', NULL, U&'Ch\00EDa', 'Cundinamarca', NULL, NULL, false),
+  ('universidad-de-la-salle', 'universidad-de-la-salle', 'principal', 'Universidad de La Salle', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-de-los-andes', 'universidad-de-los-andes', 'principal', 'Universidad de los Andes', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-de-los-llanos', 'universidad-de-los-llanos', 'principal', 'Universidad de los Llanos', NULL, 'Villavicencio', 'Meta', NULL, NULL, false),
+  ('universidad-de-manizales', 'universidad-de-manizales', 'principal', 'Universidad de Manizales', NULL, 'Manizales', 'Caldas', NULL, NULL, false),
+  ('universidad-de-medellin', 'universidad-de-medellin', 'principal', U&'Universidad de Medell\00EDn', NULL, U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-narino', 'universidad-de-narino', 'principal', U&'Universidad de Nari\00F1o', NULL, 'Pasto', U&'Nari\00F1o', NULL, NULL, false),
+  ('universidad-de-pamplona', 'universidad-de-pamplona', 'principal', 'Universidad de Pamplona', NULL, 'Pamplona', 'Norte de Santander', NULL, NULL, false),
+  ('universidad-de-san-buenaventura-bogota', 'universidad-de-san-buenaventura', 'bogota', U&'Universidad de San Buenaventura, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-de-san-buenaventura-cali', 'universidad-de-san-buenaventura', 'cali', 'Universidad de San Buenaventura, Campus Cali', 'Cali', 'Cali', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-de-san-buenaventura-medellin', 'universidad-de-san-buenaventura', 'medellin', U&'Universidad de San Buenaventura, Campus Medell\00EDn', U&'Medell\00EDn', U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-de-san-buenaventura-cartagena-de-indias', 'universidad-de-san-buenaventura', 'cartagena-de-indias', 'Universidad de San Buenaventura, Campus Cartagena de Indias', 'Cartagena de Indias', 'Cartagena de Indias', U&'Bol\00EDvar', NULL, NULL, false),
+  ('universidad-de-santander', 'universidad-de-santander', 'principal', 'Universidad de Santander', NULL, 'Bucaramanga', 'Santander', NULL, NULL, false),
+  ('universidad-de-sucre', 'universidad-de-sucre', 'principal', 'Universidad de Sucre', NULL, 'Sincelejo', 'Sucre', NULL, NULL, false),
+  ('universidad-del-atlantico-co', 'universidad-del-atlantico-co', 'principal', U&'Universidad del Atl\00E1ntico (CO)', NULL, 'Puerto Colombia', U&'Atl\00E1ntico', NULL, NULL, false),
+  ('universidad-del-cauca', 'universidad-del-cauca', 'principal', 'Universidad del Cauca', NULL, U&'Popay\00E1n', 'Cauca', NULL, NULL, false),
+  ('universidad-del-magdalena', 'universidad-del-magdalena', 'principal', 'Universidad del Magdalena', NULL, 'Santa Marta', 'Magdalena', NULL, NULL, false),
+  ('universidad-del-norte', 'universidad-del-norte', 'principal', 'Universidad del Norte', NULL, 'Barranquilla', U&'Atl\00E1ntico', NULL, NULL, false),
+  ('universidad-del-pacifico', 'universidad-del-pacifico', 'principal', U&'Universidad del Pac\00EDfico', NULL, 'Buenaventura', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-del-quindio', 'universidad-del-quindio', 'principal', U&'Universidad del Quind\00EDo', NULL, 'Armenia', U&'Quind\00EDo', NULL, NULL, false),
+  ('universidad-del-rosario', 'universidad-del-rosario', 'principal', 'Universidad del Rosario', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-del-sinu-elias-bechara-zainum-monteria', 'universidad-del-sinu-elias-bechara-zainum', 'monteria', U&'Universidad del Sin\00FA El\00EDas Bechara Zainum, Campus Monter\00EDa', U&'Monter\00EDa', U&'Monter\00EDa', U&'C\00F3rdoba', NULL, NULL, false),
+  ('universidad-del-sinu-elias-bechara-zainum-cartagena-de-indias', 'universidad-del-sinu-elias-bechara-zainum', 'cartagena-de-indias', U&'Universidad del Sin\00FA El\00EDas Bechara Zainum, Campus Cartagena de Indias', 'Cartagena de Indias', 'Cartagena de Indias', U&'Bol\00EDvar', NULL, NULL, false),
+  ('universidad-del-tolima', 'universidad-del-tolima', 'principal', 'Universidad del Tolima', NULL, U&'Ibagu\00E9', 'Tolima', NULL, NULL, false),
+  ('universidad-del-valle-cali', 'universidad-del-valle', 'cali', 'Universidad del Valle, Campus Cali', 'Cali', 'Cali', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-del-valle-guadalajara-de-buga', 'universidad-del-valle', 'guadalajara-de-buga', 'Universidad del Valle, Campus Guadalajara de Buga', 'Guadalajara de Buga', 'Guadalajara de Buga', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-del-valle-zarzal', 'universidad-del-valle', 'zarzal', 'Universidad del Valle, Campus Zarzal', 'Zarzal', 'Zarzal', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-del-valle-buenaventura', 'universidad-del-valle', 'buenaventura', 'Universidad del Valle, Campus Buenaventura', 'Buenaventura', 'Buenaventura', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-del-valle-palmira', 'universidad-del-valle', 'palmira', 'Universidad del Valle, Campus Palmira', 'Palmira', 'Palmira', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-distrital-francisco-jose-de-caldas', 'universidad-distrital-francisco-jose-de-caldas', 'principal', U&'Universidad Distrital Francisco Jos\00E9 de Caldas', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-eafit', 'universidad-eafit', 'principal', 'Universidad EAFIT', NULL, U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-ean', 'universidad-ean', 'principal', 'Universidad EAN', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-ecci', 'universidad-ecci', 'principal', 'Universidad ECCI', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-eia', 'universidad-eia', 'principal', 'Universidad EIA', NULL, 'Envigado', 'Antioquia', NULL, NULL, false),
+  ('universidad-el-bosque', 'universidad-el-bosque', 'principal', 'Universidad El Bosque', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-externado-de-colombia', 'universidad-externado-de-colombia', 'principal', 'Universidad Externado de Colombia', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-francisco-de-paula-santander-san-jose-de-cucuta', 'universidad-francisco-de-paula-santander', 'san-jose-de-cucuta', U&'Universidad Francisco de Paula Santander, Campus San Jos\00E9 de C\00FAcuta', U&'San Jos\00E9 de C\00FAcuta', U&'San Jos\00E9 de C\00FAcuta', 'Norte de Santander', NULL, NULL, false),
+  ('universidad-francisco-de-paula-santander-ocana', 'universidad-francisco-de-paula-santander', 'ocana', U&'Universidad Francisco de Paula Santander, Campus Oca\00F1a', U&'Oca\00F1a', U&'Oca\00F1a', 'Norte de Santander', NULL, NULL, false),
+  ('icesi', 'icesi', 'principal', 'Universidad Icesi', NULL, 'Cali', 'Valle del Cauca', NULL, NULL, true),
+  ('universidad-incca-de-colombia', 'universidad-incca-de-colombia', 'principal', 'Universidad INCCA de Colombia', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-industrial-de-santander', 'universidad-industrial-de-santander', 'principal', 'Universidad Industrial de Santander', NULL, 'Bucaramanga', 'Santander', NULL, NULL, false),
+  ('universidad-internacional-del-tropico-americano', 'universidad-internacional-del-tropico-americano', 'principal', U&'Universidad Internacional del Tr\00F3pico Americano', NULL, 'Yopal', 'Casanare', NULL, NULL, false),
+  ('universidad-la-gran-colombia-bogota', 'universidad-la-gran-colombia', 'bogota', U&'Universidad La Gran Colombia, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-la-gran-colombia-armenia', 'universidad-la-gran-colombia', 'armenia', 'Universidad La Gran Colombia, Campus Armenia', 'Armenia', 'Armenia', U&'Quind\00EDo', NULL, NULL, false),
+  ('universidad-libre-bogota', 'universidad-libre', 'bogota', U&'Universidad Libre, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-libre-cali', 'universidad-libre', 'cali', 'Universidad Libre, Campus Cali', 'Cali', 'Cali', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-libre-barranquilla', 'universidad-libre', 'barranquilla', 'Universidad Libre, Campus Barranquilla', 'Barranquilla', 'Barranquilla', U&'Atl\00E1ntico', NULL, NULL, false),
+  ('universidad-libre-pereira', 'universidad-libre', 'pereira', 'Universidad Libre, Campus Pereira', 'Pereira', 'Pereira', 'Risaralda', NULL, NULL, false),
+  ('universidad-libre-san-jose-de-cucuta', 'universidad-libre', 'san-jose-de-cucuta', U&'Universidad Libre, Campus San Jos\00E9 de C\00FAcuta', U&'San Jos\00E9 de C\00FAcuta', U&'San Jos\00E9 de C\00FAcuta', 'Norte de Santander', NULL, NULL, false),
+  ('universidad-libre-socorro', 'universidad-libre', 'socorro', 'Universidad Libre, Campus Socorro', 'Socorro', 'Socorro', 'Santander', NULL, NULL, false),
+  ('universidad-manuela-beltran-bogota', 'universidad-manuela-beltran', 'bogota', U&'Universidad Manuela Beltr\00E1n, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-manuela-beltran-bucaramanga', 'universidad-manuela-beltran', 'bucaramanga', U&'Universidad Manuela Beltr\00E1n, Campus Bucaramanga', 'Bucaramanga', 'Bucaramanga', 'Santander', NULL, NULL, false),
+  ('universidad-mariana', 'universidad-mariana', 'principal', 'Universidad Mariana', NULL, 'Pasto', U&'Nari\00F1o', NULL, NULL, false),
+  ('universidad-metropolitana', 'universidad-metropolitana', 'principal', 'Universidad Metropolitana', NULL, 'Barranquilla', U&'Atl\00E1ntico', NULL, NULL, false),
+  ('universidad-militar-nueva-granada', 'universidad-militar-nueva-granada', 'principal', 'Universidad Militar Nueva Granada', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-nacional-abierta-y-a-distancia', 'universidad-nacional-abierta-y-a-distancia', 'principal', 'Universidad Nacional Abierta y a Distancia', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-bogota', 'universidad-nacional-de-colombia', 'bogota', U&'Universidad Nacional de Colombia, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-medellin', 'universidad-nacional-de-colombia', 'medellin', U&'Universidad Nacional de Colombia, Campus Medell\00EDn', U&'Medell\00EDn', U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-manizales', 'universidad-nacional-de-colombia', 'manizales', 'Universidad Nacional de Colombia, Campus Manizales', 'Manizales', 'Manizales', 'Caldas', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-palmira', 'universidad-nacional-de-colombia', 'palmira', 'Universidad Nacional de Colombia, Campus Palmira', 'Palmira', 'Palmira', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-arauca', 'universidad-nacional-de-colombia', 'arauca', 'Universidad Nacional de Colombia, Campus Arauca', 'Arauca', 'Arauca', 'Arauca', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-leticia', 'universidad-nacional-de-colombia', 'leticia', 'Universidad Nacional de Colombia, Campus Leticia', 'Leticia', 'Leticia', 'Amazonas', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-san-andres', 'universidad-nacional-de-colombia', 'san-andres', U&'Universidad Nacional de Colombia, Campus San Andr\00E9s', U&'San Andr\00E9s', U&'San Andr\00E9s', U&'Archipi\00E9lago de San Andr\00E9s, Providencia y Santa Catalina', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-san-andres-de-tumaco', 'universidad-nacional-de-colombia', 'san-andres-de-tumaco', U&'Universidad Nacional de Colombia, Campus San Andr\00E9s de Tumaco', U&'San Andr\00E9s de Tumaco', U&'San Andr\00E9s de Tumaco', U&'Nari\00F1o', NULL, NULL, false),
+  ('universidad-nacional-de-colombia-la-paz', 'universidad-nacional-de-colombia', 'la-paz', 'Universidad Nacional de Colombia, Campus La Paz', 'La Paz', 'La Paz', 'Cesar', NULL, NULL, false),
+  ('universidad-pedagogica-nacional', 'universidad-pedagogica-nacional', 'principal', U&'Universidad Pedag\00F3gica Nacional', NULL, U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-pedagogica-y-tecnologica-de-colombia-tunja', 'universidad-pedagogica-y-tecnologica-de-colombia', 'tunja', U&'Universidad Pedag\00F3gica y Tecnol\00F3gica de Colombia, Campus Tunja', 'Tunja', 'Tunja', U&'Boyac\00E1', NULL, NULL, false),
+  ('universidad-pedagogica-y-tecnologica-de-colombia-duitama', 'universidad-pedagogica-y-tecnologica-de-colombia', 'duitama', U&'Universidad Pedag\00F3gica y Tecnol\00F3gica de Colombia, Campus Duitama', 'Duitama', 'Duitama', U&'Boyac\00E1', NULL, NULL, false),
+  ('universidad-pedagogica-y-tecnologica-de-colombia-sogamoso', 'universidad-pedagogica-y-tecnologica-de-colombia', 'sogamoso', U&'Universidad Pedag\00F3gica y Tecnol\00F3gica de Colombia, Campus Sogamoso', 'Sogamoso', 'Sogamoso', U&'Boyac\00E1', NULL, NULL, false),
+  ('universidad-pedagogica-y-tecnologica-de-colombia-chiquinquira', 'universidad-pedagogica-y-tecnologica-de-colombia', 'chiquinquira', U&'Universidad Pedag\00F3gica y Tecnol\00F3gica de Colombia, Campus Chiquinquir\00E1', U&'Chiquinquir\00E1', U&'Chiquinquir\00E1', U&'Boyac\00E1', NULL, NULL, false),
+  ('universidad-piloto-de-colombia-bogota', 'universidad-piloto-de-colombia', 'bogota', U&'Universidad Piloto de Colombia, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-piloto-de-colombia-girardot', 'universidad-piloto-de-colombia', 'girardot', 'Universidad Piloto de Colombia, Campus Girardot', 'Girardot', 'Girardot', 'Cundinamarca', NULL, NULL, false),
+  ('universidad-pontificia-bolivariana-medellin', 'universidad-pontificia-bolivariana', 'medellin', U&'Universidad Pontificia Bolivariana, Campus Medell\00EDn', U&'Medell\00EDn', U&'Medell\00EDn', 'Antioquia', NULL, NULL, false),
+  ('universidad-pontificia-bolivariana-bucaramanga', 'universidad-pontificia-bolivariana', 'bucaramanga', 'Universidad Pontificia Bolivariana, Campus Bucaramanga', 'Bucaramanga', 'Bucaramanga', 'Santander', NULL, NULL, false),
+  ('universidad-pontificia-bolivariana-monteria', 'universidad-pontificia-bolivariana', 'monteria', U&'Universidad Pontificia Bolivariana, Campus Monter\00EDa', U&'Monter\00EDa', U&'Monter\00EDa', U&'C\00F3rdoba', NULL, NULL, false),
+  ('universidad-pontificia-bolivariana-palmira', 'universidad-pontificia-bolivariana', 'palmira', 'Universidad Pontificia Bolivariana, Campus Palmira', 'Palmira', 'Palmira', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-popular-del-cesar-valledupar', 'universidad-popular-del-cesar', 'valledupar', 'Universidad Popular del Cesar, Campus Valledupar', 'Valledupar', 'Valledupar', 'Cesar', NULL, NULL, false),
+  ('universidad-popular-del-cesar-aguachica', 'universidad-popular-del-cesar', 'aguachica', 'Universidad Popular del Cesar, Campus Aguachica', 'Aguachica', 'Aguachica', 'Cesar', NULL, NULL, false),
+  ('universidad-santiago-de-cali-cali', 'universidad-santiago-de-cali', 'cali', 'Universidad Santiago de Cali, Campus Cali', 'Cali', 'Cali', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-santiago-de-cali-palmira', 'universidad-santiago-de-cali', 'palmira', 'Universidad Santiago de Cali, Campus Palmira', 'Palmira', 'Palmira', 'Valle del Cauca', NULL, NULL, false),
+  ('universidad-santo-tomas-bogota', 'universidad-santo-tomas', 'bogota', U&'Universidad Santo Tom\00E1s, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-santo-tomas-bucaramanga', 'universidad-santo-tomas', 'bucaramanga', U&'Universidad Santo Tom\00E1s, Campus Bucaramanga', 'Bucaramanga', 'Bucaramanga', 'Santander', NULL, NULL, false),
+  ('universidad-santo-tomas-tunja', 'universidad-santo-tomas', 'tunja', U&'Universidad Santo Tom\00E1s, Campus Tunja', 'Tunja', 'Tunja', U&'Boyac\00E1', NULL, NULL, false),
+  ('universidad-sergio-arboleda-bogota', 'universidad-sergio-arboleda', 'bogota', U&'Universidad Sergio Arboleda, Campus Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1', U&'Bogot\00E1 D.C.', NULL, NULL, false),
+  ('universidad-sergio-arboleda-santa-marta', 'universidad-sergio-arboleda', 'santa-marta', 'Universidad Sergio Arboleda, Campus Santa Marta', 'Santa Marta', 'Santa Marta', 'Magdalena', NULL, NULL, false),
+  ('universidad-simon-bolivar', 'universidad-simon-bolivar', 'principal', U&'Universidad Sim\00F3n Bol\00EDvar', NULL, 'Barranquilla', U&'Atl\00E1ntico', NULL, NULL, false),
+  ('universidad-surcolombiana', 'universidad-surcolombiana', 'principal', 'Universidad Surcolombiana', NULL, 'Neiva', 'Huila', NULL, NULL, false),
+  ('universidad-tecnologica-de-bolivar', 'universidad-tecnologica-de-bolivar', 'principal', U&'Universidad Tecnol\00F3gica de Bol\00EDvar', NULL, 'Cartagena de Indias', U&'Bol\00EDvar', NULL, NULL, false),
+  ('universidad-tecnologica-de-pereira', 'universidad-tecnologica-de-pereira', 'principal', U&'Universidad Tecnol\00F3gica de Pereira', NULL, 'Pereira', 'Risaralda', NULL, NULL, false),
+  ('universidad-tecnologica-del-choco-diego-luis-cordoba', 'universidad-tecnologica-del-choco-diego-luis-cordoba', 'principal', U&'Universidad Tecnol\00F3gica del Choc\00F3 Diego Luis C\00F3rdoba', NULL, U&'Quibd\00F3', U&'Choc\00F3', NULL, NULL, false),
+  ('buap', 'buap', 'principal', U&'Benem\00E9rita Universidad Aut\00F3noma de Puebla', NULL, 'Puebla', 'Puebla', NULL, NULL, true),
+  ('centro-de-ensenanza-tecnica-y-superior', 'centro-de-ensenanza-tecnica-y-superior', 'principal', U&'Centro de Ense\00F1anza T\00E9cnica y Superior', NULL, 'Mexicali', 'Baja California', NULL, NULL, false),
+  ('centro-de-estudios-del-mayab', 'centro-de-estudios-del-mayab', 'principal', 'Centro de Estudios del Mayab', NULL, U&'M\00E9rida', U&'Yucat\00E1n', NULL, NULL, false),
+  ('centro-de-estudios-superiores-del-bajio', 'centro-de-estudios-superiores-del-bajio', 'principal', U&'Centro de Estudios Superiores del Baj\00EDo', NULL, U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, false),
+  ('centro-de-estudios-superiores-en-ciencias-juridicas-y-criminologicas', 'centro-de-estudios-superiores-en-ciencias-juridicas-y-criminologicas', 'principal', U&'Centro de Estudios Superiores en Ciencias Jur\00EDdicas y Criminol\00F3gicas', NULL, U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, false),
+  ('cide', 'cide', 'principal', U&'Centro de Investigaci\00F3n y Docencia Econ\00F3micas', NULL, U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('centro-universitario-de-tijuana', 'centro-universitario-de-tijuana', 'principal', 'Centro Universitario de Tijuana', NULL, 'Tijuana', 'Baja California', NULL, NULL, false),
+  ('centro-universitario-metropolitano-hidalgo', 'centro-universitario-metropolitano-hidalgo', 'principal', 'Centro Universitario Metropolitano Hidalgo', NULL, 'Mineral de la Reforma', 'Hidalgo', NULL, NULL, false),
+  ('centro-universitario-siglo-xxi-pachuca-de-soto', 'centro-universitario-siglo-xxi', 'pachuca-de-soto', 'Centro Universitario Siglo XXI, Campus Pachuca de Soto', 'Pachuca de Soto', 'Pachuca de Soto', 'Hidalgo', NULL, NULL, false),
+  ('centro-universitario-siglo-xxi-merida', 'centro-universitario-siglo-xxi', 'merida', U&'Centro Universitario Siglo XXI, Campus M\00E9rida', U&'M\00E9rida', U&'M\00E9rida', U&'Yucat\00E1n', NULL, NULL, false),
+  ('colmex', 'colmex', 'principal', U&'El Colegio de M\00E9xico', NULL, U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('instituto-de-ciencias-y-estudios-superiores-de-tamaulipas', 'instituto-de-ciencias-y-estudios-superiores-de-tamaulipas', 'principal', 'Instituto de Ciencias y Estudios Superiores de Tamaulipas', NULL, 'Tampico', 'Tamaulipas', NULL, NULL, false),
+  ('instituto-de-estudios-superiores-isima-queretaro', 'instituto-de-estudios-superiores-isima', 'queretaro', U&'Instituto de Estudios Superiores ISIMA, Campus Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, false),
+  ('instituto-de-estudios-superiores-isima-toluca', 'instituto-de-estudios-superiores-isima', 'toluca', 'Instituto de Estudios Superiores ISIMA, Campus Toluca', 'Toluca', 'Toluca', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('ipn', 'ipn', 'principal', U&'Instituto Polit\00E9cnico Nacional', NULL, U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('instituto-profesional-de-emprendedores', 'instituto-profesional-de-emprendedores', 'principal', 'Instituto Profesional de Emprendedores', NULL, U&'Tuxtla Guti\00E9rrez', 'Chiapas', NULL, NULL, false),
+  ('itam', 'itam', 'principal', U&'Instituto Tecnol\00F3gico Aut\00F3nomo de M\00E9xico', NULL, U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('instituto-tecnologico-de-acapulco', 'instituto-tecnologico-de-acapulco', 'principal', U&'Instituto Tecnol\00F3gico de Acapulco', NULL, U&'Acapulco de Ju\00E1rez', 'Guerrero', NULL, NULL, false),
+  ('instituto-tecnologico-de-aguascalientes', 'instituto-tecnologico-de-aguascalientes', 'principal', U&'Instituto Tecnol\00F3gico de Aguascalientes', NULL, 'Aguascalientes', 'Aguascalientes', NULL, NULL, false),
+  ('instituto-tecnologico-de-apizaco', 'instituto-tecnologico-de-apizaco', 'principal', U&'Instituto Tecnol\00F3gico de Apizaco', NULL, 'Tzompantepec', 'Tlaxcala', NULL, NULL, false),
+  ('instituto-tecnologico-de-campeche', 'instituto-tecnologico-de-campeche', 'principal', U&'Instituto Tecnol\00F3gico de Campeche', NULL, 'Campeche', 'Campeche', NULL, NULL, false),
+  ('instituto-tecnologico-de-cancun', 'instituto-tecnologico-de-cancun', 'principal', U&'Instituto Tecnol\00F3gico de Canc\00FAn', NULL, U&'Benito Ju\00E1rez', 'Quintana Roo', NULL, NULL, false),
+  ('instituto-tecnologico-de-chilpancingo', 'instituto-tecnologico-de-chilpancingo', 'principal', U&'Instituto Tecnol\00F3gico de Chilpancingo', NULL, 'Chilpancingo de los Bravo', 'Guerrero', NULL, NULL, false),
+  ('instituto-tecnologico-de-ciudad-juarez', 'instituto-tecnologico-de-ciudad-juarez', 'principal', U&'Instituto Tecnol\00F3gico de Ciudad Ju\00E1rez', NULL, U&'Ju\00E1rez', 'Chihuahua', NULL, NULL, false),
+  ('instituto-tecnologico-de-ciudad-madero', 'instituto-tecnologico-de-ciudad-madero', 'principal', U&'Instituto Tecnol\00F3gico de Ciudad Madero', NULL, 'Ciudad Madero', 'Tamaulipas', NULL, NULL, false),
+  ('instituto-tecnologico-de-colima', 'instituto-tecnologico-de-colima', 'principal', U&'Instituto Tecnol\00F3gico de Colima', NULL, U&'Villa de \00C1lvarez', 'Colima', NULL, NULL, false),
+  ('instituto-tecnologico-de-culiacan', 'instituto-tecnologico-de-culiacan', 'principal', U&'Instituto Tecnol\00F3gico de Culiac\00E1n', NULL, U&'Culiac\00E1n', 'Sinaloa', NULL, NULL, false),
+  ('instituto-tecnologico-de-durango', 'instituto-tecnologico-de-durango', 'principal', U&'Instituto Tecnol\00F3gico de Durango', NULL, 'Durango', 'Durango', NULL, NULL, false),
+  ('instituto-tecnologico-de-estudios-superiores-de-zamora', 'instituto-tecnologico-de-estudios-superiores-de-zamora', 'principal', U&'Instituto Tecnol\00F3gico de Estudios Superiores de Zamora', NULL, 'Zamora', U&'Michoac\00E1n', NULL, NULL, false),
+  ('instituto-tecnologico-de-estudios-superiores-los-cabos', 'instituto-tecnologico-de-estudios-superiores-los-cabos', 'principal', U&'Instituto Tecnol\00F3gico de Estudios Superiores Los Cabos', NULL, 'Los Cabos', 'Baja California Sur', NULL, NULL, false),
+  ('instituto-tecnologico-de-hermosillo', 'instituto-tecnologico-de-hermosillo', 'principal', U&'Instituto Tecnol\00F3gico de Hermosillo', NULL, 'Hermosillo', 'Sonora', NULL, NULL, false),
+  ('instituto-tecnologico-de-la-laguna', 'instituto-tecnologico-de-la-laguna', 'principal', U&'Instituto Tecnol\00F3gico de La Laguna', NULL, U&'Torre\00F3n', 'Coahuila', NULL, NULL, false),
+  ('instituto-tecnologico-de-la-paz', 'instituto-tecnologico-de-la-paz', 'principal', U&'Instituto Tecnol\00F3gico de La Paz', NULL, 'La Paz', 'Baja California Sur', NULL, NULL, false),
+  ('instituto-tecnologico-de-los-mochis', 'instituto-tecnologico-de-los-mochis', 'principal', U&'Instituto Tecnol\00F3gico de Los Mochis', NULL, 'Ahome', 'Sinaloa', NULL, NULL, false),
+  ('instituto-tecnologico-de-matamoros', 'instituto-tecnologico-de-matamoros', 'principal', U&'Instituto Tecnol\00F3gico de Matamoros', NULL, 'Matamoros', 'Tamaulipas', NULL, NULL, false),
+  ('instituto-tecnologico-de-merida', 'instituto-tecnologico-de-merida', 'principal', U&'Instituto Tecnol\00F3gico de M\00E9rida', NULL, U&'M\00E9rida', U&'Yucat\00E1n', NULL, NULL, false),
+  ('instituto-tecnologico-de-morelia', 'instituto-tecnologico-de-morelia', 'principal', U&'Instituto Tecnol\00F3gico de Morelia', NULL, 'Morelia', U&'Michoac\00E1n', NULL, NULL, false),
+  ('instituto-tecnologico-de-nuevo-leon', 'instituto-tecnologico-de-nuevo-leon', 'principal', U&'Instituto Tecnol\00F3gico de Nuevo Le\00F3n', NULL, 'Guadalupe', U&'Nuevo Le\00F3n', NULL, NULL, false),
+  ('instituto-tecnologico-de-oaxaca', 'instituto-tecnologico-de-oaxaca', 'principal', U&'Instituto Tecnol\00F3gico de Oaxaca', NULL, U&'Oaxaca de Ju\00E1rez', 'Oaxaca', NULL, NULL, false),
+  ('instituto-tecnologico-de-pachuca', 'instituto-tecnologico-de-pachuca', 'principal', U&'Instituto Tecnol\00F3gico de Pachuca', NULL, 'Pachuca de Soto', 'Hidalgo', NULL, NULL, false),
+  ('instituto-tecnologico-de-puebla', 'instituto-tecnologico-de-puebla', 'principal', U&'Instituto Tecnol\00F3gico de Puebla', NULL, 'Puebla', 'Puebla', NULL, NULL, false),
+  ('instituto-tecnologico-de-queretaro', 'instituto-tecnologico-de-queretaro', 'principal', U&'Instituto Tecnol\00F3gico de Quer\00E9taro', NULL, U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, false),
+  ('instituto-tecnologico-de-saltillo', 'instituto-tecnologico-de-saltillo', 'principal', U&'Instituto Tecnol\00F3gico de Saltillo', NULL, 'Saltillo', 'Coahuila', NULL, NULL, false),
+  ('instituto-tecnologico-de-san-luis-potosi', 'instituto-tecnologico-de-san-luis-potosi', 'principal', U&'Instituto Tecnol\00F3gico de San Luis Potos\00ED', NULL, U&'Soledad de Graciano S\00E1nchez', U&'San Luis Potos\00ED', NULL, NULL, false),
+  ('instituto-tecnologico-de-sonora', 'instituto-tecnologico-de-sonora', 'principal', U&'Instituto Tecnol\00F3gico de Sonora', NULL, 'Cajeme', 'Sonora', NULL, NULL, false),
+  ('instituto-tecnologico-de-tepic', 'instituto-tecnologico-de-tepic', 'principal', U&'Instituto Tecnol\00F3gico de Tepic', NULL, 'Tepic', 'Nayarit', NULL, NULL, false),
+  ('instituto-tecnologico-de-tijuana', 'instituto-tecnologico-de-tijuana', 'principal', U&'Instituto Tecnol\00F3gico de Tijuana', NULL, 'Tijuana', 'Baja California', NULL, NULL, false),
+  ('instituto-tecnologico-de-tuxtla-gutierrez', 'instituto-tecnologico-de-tuxtla-gutierrez', 'principal', U&'Instituto Tecnol\00F3gico de Tuxtla Guti\00E9rrez', NULL, U&'Tuxtla Guti\00E9rrez', 'Chiapas', NULL, NULL, false),
+  ('instituto-tecnologico-de-villahermosa', 'instituto-tecnologico-de-villahermosa', 'principal', U&'Instituto Tecnol\00F3gico de Villahermosa', NULL, 'Centro', 'Tabasco', NULL, NULL, false),
+  ('instituto-tecnologico-de-zacatecas', 'instituto-tecnologico-de-zacatecas', 'principal', U&'Instituto Tecnol\00F3gico de Zacatecas', NULL, 'Zacatecas', 'Zacatecas', NULL, NULL, false),
+  ('instituto-tecnologico-de-zacatepec', 'instituto-tecnologico-de-zacatepec', 'principal', U&'Instituto Tecnol\00F3gico de Zacatepec', NULL, 'Zacatepec', 'Morelos', NULL, NULL, false),
+  ('instituto-tecnologico-del-istmo', 'instituto-tecnologico-del-istmo', 'principal', U&'Instituto Tecnol\00F3gico del Istmo', NULL, U&'Juchit\00E1n de Zaragoza', 'Oaxaca', NULL, NULL, false),
+  ('instituto-tecnologico-mario-molina', 'instituto-tecnologico-mario-molina', 'principal', U&'Instituto Tecnol\00F3gico Mario Molina', NULL, 'Zapopan', 'Jalisco', NULL, NULL, false),
+  ('instituto-tecnologico-superior-de-calkini-en-el-estado-de-campeche', 'instituto-tecnologico-superior-de-calkini-en-el-estado-de-campeche', 'principal', U&'Instituto Tecnol\00F3gico Superior de Calkin\00ED en el Estado de Campeche', NULL, U&'Calkin\00ED', 'Campeche', NULL, NULL, false),
+  ('instituto-tecnologico-superior-de-irapuato', 'instituto-tecnologico-superior-de-irapuato', 'principal', U&'Instituto Tecnol\00F3gico Superior de Irapuato', NULL, 'Irapuato', 'Guanajuato', NULL, NULL, false),
+  ('instituto-tecnologico-superior-de-lerdo', 'instituto-tecnologico-superior-de-lerdo', 'principal', U&'Instituto Tecnol\00F3gico Superior de Lerdo', NULL, 'Lerdo', 'Durango', NULL, NULL, false),
+  ('instituto-tecnologico-superior-de-xalapa', 'instituto-tecnologico-superior-de-xalapa', 'principal', U&'Instituto Tecnol\00F3gico Superior de Xalapa', NULL, 'Xalapa', 'Veracruz', NULL, NULL, false),
+  ('instituto-universitario-del-centro-de-mexico', 'instituto-universitario-del-centro-de-mexico', 'principal', U&'Instituto Universitario del Centro de M\00E9xico', NULL, U&'Le\00F3n', 'Guanajuato', NULL, NULL, false),
+  ('instituto-universitario-del-norte', 'instituto-universitario-del-norte', 'principal', 'Instituto Universitario del Norte', NULL, 'Saltillo', 'Coahuila', NULL, NULL, false),
+  ('ites-rene-descartes', 'ites-rene-descartes', 'principal', U&'ITES Ren\00E9 Descartes', NULL, 'Campeche', 'Campeche', NULL, NULL, false),
+  ('iteso-universidad-jesuita-de-guadalajara', 'iteso-universidad-jesuita-de-guadalajara', 'principal', 'ITESO, Universidad Jesuita de Guadalajara', NULL, 'San Pedro Tlaquepaque', 'Jalisco', NULL, NULL, false),
+  ('tecnologico-de-estudios-superiores-de-ecatepec', 'tecnologico-de-estudios-superiores-de-ecatepec', 'principal', U&'Tecnol\00F3gico de Estudios Superiores de Ecatepec', NULL, 'Ecatepec de Morelos', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('tec-monterrey', 'tec', 'monterrey', U&'Tecnol\00F3gico de Monterrey, Campus Monterrey', 'Monterrey', 'Monterrey', U&'Nuevo Le\00F3n', NULL, NULL, true),
+  ('tec-guadalajara', 'tec', 'guadalajara', U&'Tecnol\00F3gico de Monterrey, Campus Guadalajara', 'Guadalajara', 'Zapopan', 'Jalisco', NULL, NULL, true),
+  ('tec-ciudad-de-mexico', 'tec', 'ciudad-de-mexico', U&'Tecnol\00F3gico de Monterrey, Campus Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('tec-estado-de-mexico', 'tec', 'estado-de-mexico', U&'Tecnol\00F3gico de Monterrey, Campus Estado de M\00E9xico', U&'Estado de M\00E9xico', U&'Atizap\00E1n de Zaragoza', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('tec-queretaro', 'tec', 'queretaro', U&'Tecnol\00F3gico de Monterrey, Campus Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, true),
+  ('tec-puebla', 'tec', 'puebla', U&'Tecnol\00F3gico de Monterrey, Campus Puebla', 'Puebla', 'Puebla', 'Puebla', NULL, NULL, false),
+  ('tec-santa-fe', 'tec', 'santa-fe', U&'Tecnol\00F3gico de Monterrey, Campus Santa Fe', 'Santa Fe', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, false),
+  ('tec-toluca', 'tec', 'toluca', U&'Tecnol\00F3gico de Monterrey, Campus Toluca', 'Toluca', 'Toluca', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('tec-chihuahua', 'tec', 'chihuahua', U&'Tecnol\00F3gico de Monterrey, Campus Chihuahua', 'Chihuahua', 'Chihuahua', 'Chihuahua', NULL, NULL, false),
+  ('tec-sonora-norte', 'tec', 'sonora-norte', U&'Tecnol\00F3gico de Monterrey, Campus Sonora Norte', 'Sonora Norte', 'Hermosillo', 'Sonora', NULL, NULL, false),
+  ('tec-leon', 'tec', 'leon', U&'Tecnol\00F3gico de Monterrey, Campus Le\00F3n', U&'Le\00F3n', U&'Le\00F3n', 'Guanajuato', NULL, NULL, false),
+  ('tec-san-luis-potosi', 'tec', 'san-luis-potosi', U&'Tecnol\00F3gico de Monterrey, Campus San Luis Potos\00ED', U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, NULL, false),
+  ('tec-hidalgo', 'tec', 'hidalgo', U&'Tecnol\00F3gico de Monterrey, Campus Hidalgo', 'Hidalgo', 'Pachuca de Soto', 'Hidalgo', NULL, NULL, false),
+  ('tec-laguna', 'tec', 'laguna', U&'Tecnol\00F3gico de Monterrey, Campus Laguna', 'Laguna', U&'Torre\00F3n', 'Coahuila', NULL, NULL, false),
+  ('universidad-alfa-y-omega', 'universidad-alfa-y-omega', 'principal', 'Universidad Alfa y Omega', NULL, 'Centro', 'Tabasco', NULL, NULL, false),
+  ('anahuac', 'anahuac', 'huixquilucan', U&'Universidad An\00E1huac', 'Huixquilucan', 'Huixquilucan', U&'Estado de M\00E9xico', NULL, NULL, true),
+  ('anahuac-el-marques', 'anahuac', 'el-marques', U&'Universidad An\00E1huac, Campus El Marqu\00E9s', U&'El Marqu\00E9s', U&'El Marqu\00E9s', U&'Quer\00E9taro', NULL, NULL, false),
+  ('anahuac-xalapa', 'anahuac', 'xalapa', U&'Universidad An\00E1huac, Campus Xalapa', 'Xalapa', 'Xalapa', 'Veracruz', NULL, NULL, false),
+  ('anahuac-san-andres-cholula', 'anahuac', 'san-andres-cholula', U&'Universidad An\00E1huac, Campus San Andr\00E9s Cholula', U&'San Andr\00E9s Cholula', U&'San Andr\00E9s Cholula', 'Puebla', NULL, NULL, false),
+  ('universidad-anahuac-de-cancun', 'universidad-anahuac-de-cancun', 'principal', U&'Universidad An\00E1huac de Canc\00FAn', NULL, U&'Benito Ju\00E1rez', 'Quintana Roo', NULL, NULL, false),
+  ('universidad-autonoma-agraria-antonio-narro', 'universidad-autonoma-agraria-antonio-narro', 'principal', U&'Universidad Aut\00F3noma Agraria Antonio Narro', NULL, 'Saltillo', 'Coahuila', NULL, NULL, false),
+  ('universidad-autonoma-benito-juarez-de-oaxaca', 'universidad-autonoma-benito-juarez-de-oaxaca', 'principal', U&'Universidad Aut\00F3noma Benito Ju\00E1rez de Oaxaca', NULL, U&'Oaxaca de Ju\00E1rez', 'Oaxaca', NULL, NULL, false),
+  ('universidad-autonoma-chapingo', 'universidad-autonoma-chapingo', 'principal', U&'Universidad Aut\00F3noma Chapingo', NULL, 'Texcoco', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('universidad-autonoma-de-aguascalientes', 'universidad-autonoma-de-aguascalientes', 'principal', U&'Universidad Aut\00F3noma de Aguascalientes', NULL, 'Aguascalientes', 'Aguascalientes', NULL, NULL, false),
+  ('universidad-autonoma-de-baja-california', 'universidad-autonoma-de-baja-california', 'principal', U&'Universidad Aut\00F3noma de Baja California', NULL, 'Tijuana', 'Baja California', NULL, NULL, false),
+  ('universidad-autonoma-de-baja-california-sur', 'universidad-autonoma-de-baja-california-sur', 'principal', U&'Universidad Aut\00F3noma de Baja California Sur', NULL, 'La Paz', 'Baja California Sur', NULL, NULL, false),
+  ('universidad-autonoma-de-campeche', 'universidad-autonoma-de-campeche', 'principal', U&'Universidad Aut\00F3noma de Campeche', NULL, 'Campeche', 'Campeche', NULL, NULL, false),
+  ('universidad-autonoma-de-chiapas', 'universidad-autonoma-de-chiapas', 'principal', U&'Universidad Aut\00F3noma de Chiapas', NULL, U&'Tuxtla Guti\00E9rrez', 'Chiapas', NULL, NULL, false),
+  ('universidad-autonoma-de-chihuahua', 'universidad-autonoma-de-chihuahua', 'principal', U&'Universidad Aut\00F3noma de Chihuahua', NULL, 'Chihuahua', 'Chihuahua', NULL, NULL, false),
+  ('universidad-autonoma-de-ciudad-juarez', 'universidad-autonoma-de-ciudad-juarez', 'principal', U&'Universidad Aut\00F3noma de Ciudad Ju\00E1rez', NULL, U&'Ju\00E1rez', 'Chihuahua', NULL, NULL, false),
+  ('universidad-autonoma-de-coahuila', 'universidad-autonoma-de-coahuila', 'principal', U&'Universidad Aut\00F3noma de Coahuila', NULL, U&'Torre\00F3n', 'Coahuila', NULL, NULL, false),
+  ('universidad-autonoma-de-durango-durango', 'universidad-autonoma-de-durango', 'durango', U&'Universidad Aut\00F3noma de Durango, Campus Durango', 'Durango', 'Durango', 'Durango', NULL, NULL, false),
+  ('universidad-autonoma-de-durango-mexicali', 'universidad-autonoma-de-durango', 'mexicali', U&'Universidad Aut\00F3noma de Durango, Campus Mexicali', 'Mexicali', 'Mexicali', 'Baja California', NULL, NULL, false),
+  ('universidad-autonoma-de-durango-los-mochis', 'universidad-autonoma-de-durango', 'los-mochis', U&'Universidad Aut\00F3noma de Durango, Campus Los Mochis', 'Los Mochis', 'Ahome', 'Sinaloa', NULL, NULL, false),
+  ('universidad-autonoma-de-durango-zacatecas', 'universidad-autonoma-de-durango', 'zacatecas', U&'Universidad Aut\00F3noma de Durango, Campus Zacatecas', 'Zacatecas', 'Zacatecas', 'Zacatecas', NULL, NULL, false),
+  ('universidad-autonoma-de-durango-mazatlan', 'universidad-autonoma-de-durango', 'mazatlan', U&'Universidad Aut\00F3noma de Durango, Campus Mazatl\00E1n', U&'Mazatl\00E1n', U&'Mazatl\00E1n', 'Sinaloa', NULL, NULL, false),
+  ('universidad-autonoma-de-durango-saltillo', 'universidad-autonoma-de-durango', 'saltillo', U&'Universidad Aut\00F3noma de Durango, Campus Saltillo', 'Saltillo', 'Saltillo', 'Coahuila', NULL, NULL, false),
+  ('universidad-autonoma-de-durango-culiacan', 'universidad-autonoma-de-durango', 'culiacan', U&'Universidad Aut\00F3noma de Durango, Campus Culiac\00E1n', U&'Culiac\00E1n', U&'Culiac\00E1n', 'Sinaloa', NULL, NULL, false),
+  ('universidad-autonoma-de-guadalajara-zapopan', 'universidad-autonoma-de-guadalajara', 'zapopan', U&'Universidad Aut\00F3noma de Guadalajara, Campus Zapopan', 'Zapopan', 'Zapopan', 'Jalisco', NULL, NULL, false),
+  ('universidad-autonoma-de-guadalajara-tabasco', 'universidad-autonoma-de-guadalajara', 'tabasco', U&'Universidad Aut\00F3noma de Guadalajara, Campus Tabasco', 'Tabasco', 'Centro', 'Tabasco', NULL, NULL, false),
+  ('universidad-autonoma-de-guerrero', 'universidad-autonoma-de-guerrero', 'principal', U&'Universidad Aut\00F3noma de Guerrero', NULL, U&'Acapulco de Ju\00E1rez', 'Guerrero', NULL, NULL, false),
+  ('universidad-autonoma-de-la-ciudad-de-mexico', 'universidad-autonoma-de-la-ciudad-de-mexico', 'principal', U&'Universidad Aut\00F3noma de la Ciudad de M\00E9xico', NULL, U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, false),
+  ('universidad-autonoma-de-nayarit', 'universidad-autonoma-de-nayarit', 'principal', U&'Universidad Aut\00F3noma de Nayarit', NULL, 'Tepic', 'Nayarit', NULL, NULL, false),
+  ('uanl', 'uanl', 'principal', U&'Universidad Aut\00F3noma de Nuevo Le\00F3n', NULL, U&'San Nicol\00E1s de los Garza', U&'Nuevo Le\00F3n', NULL, NULL, true),
+  ('universidad-autonoma-de-occidente', 'universidad-autonoma-de-occidente', 'principal', U&'Universidad Aut\00F3noma de Occidente', NULL, U&'Culiac\00E1n', 'Sinaloa', NULL, NULL, false),
+  ('uaq', 'uaq', 'principal', U&'Universidad Aut\00F3noma de Quer\00E9taro', NULL, U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, true),
+  ('uaslp', 'uaslp', 'principal', U&'Universidad Aut\00F3noma de San Luis Potos\00ED', NULL, U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, NULL, true),
+  ('universidad-autonoma-de-sinaloa', 'universidad-autonoma-de-sinaloa', 'principal', U&'Universidad Aut\00F3noma de Sinaloa', NULL, U&'Culiac\00E1n', 'Sinaloa', NULL, NULL, false),
+  ('universidad-autonoma-de-tamaulipas', 'universidad-autonoma-de-tamaulipas', 'principal', U&'Universidad Aut\00F3noma de Tamaulipas', NULL, 'Tampico', 'Tamaulipas', NULL, NULL, false),
+  ('universidad-autonoma-de-tlaxcala', 'universidad-autonoma-de-tlaxcala', 'principal', U&'Universidad Aut\00F3noma de Tlaxcala', NULL, 'Tlaxcala', 'Tlaxcala', NULL, NULL, false),
+  ('universidad-autonoma-de-yucatan', 'universidad-autonoma-de-yucatan', 'principal', U&'Universidad Aut\00F3noma de Yucat\00E1n', NULL, U&'M\00E9rida', U&'Yucat\00E1n', NULL, NULL, false),
+  ('universidad-autonoma-de-zacatecas', 'universidad-autonoma-de-zacatecas', 'principal', U&'Universidad Aut\00F3noma de Zacatecas', NULL, 'Zacatecas', 'Zacatecas', NULL, NULL, false),
+  ('universidad-autonoma-del-carmen', 'universidad-autonoma-del-carmen', 'principal', U&'Universidad Aut\00F3noma del Carmen', NULL, 'Carmen', 'Campeche', NULL, NULL, false),
+  ('universidad-autonoma-del-estado-de-hidalgo', 'universidad-autonoma-del-estado-de-hidalgo', 'principal', U&'Universidad Aut\00F3noma del Estado de Hidalgo', NULL, U&'San Agust\00EDn Tlaxiaca', 'Hidalgo', NULL, NULL, false),
+  ('uaemex', 'uaemex', 'principal', U&'Universidad Aut\00F3noma del Estado de M\00E9xico', NULL, 'Toluca', U&'Estado de M\00E9xico', NULL, NULL, true),
+  ('universidad-autonoma-del-estado-de-morelos', 'universidad-autonoma-del-estado-de-morelos', 'principal', U&'Universidad Aut\00F3noma del Estado de Morelos', NULL, 'Cuernavaca', 'Morelos', NULL, NULL, false),
+  ('universidad-autonoma-del-estado-de-quintana-roo', 'universidad-autonoma-del-estado-de-quintana-roo', 'principal', U&'Universidad Aut\00F3noma del Estado de Quintana Roo', NULL, U&'Oth\00F3n P. Blanco', 'Quintana Roo', NULL, NULL, false),
+  ('universidad-autonoma-del-noreste', 'universidad-autonoma-del-noreste', 'principal', U&'Universidad Aut\00F3noma del Noreste', NULL, 'Saltillo', 'Coahuila', NULL, NULL, false),
+  ('uam', 'uam', 'ciudad-de-mexico', U&'Universidad Aut\00F3noma Metropolitana', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('uam-lerma', 'uam', 'lerma', U&'Universidad Aut\00F3noma Metropolitana, Campus Lerma', 'Lerma', 'Lerma', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('universidad-britanica-de-mexico', 'universidad-britanica-de-mexico', 'principal', U&'Universidad Brit\00E1nica de M\00E9xico', NULL, 'Aguascalientes', 'Aguascalientes', NULL, NULL, false),
+  ('universidad-cristobal-colon', 'universidad-cristobal-colon', 'principal', U&'Universidad Crist\00F3bal Col\00F3n', NULL, 'Veracruz', 'Veracruz', NULL, NULL, false),
+  ('universidad-cuauhtemoc-aguascalientes', 'universidad-cuauhtemoc', 'aguascalientes', U&'Universidad Cuauht\00E9moc, Campus Aguascalientes', 'Aguascalientes', U&'Jes\00FAs Mar\00EDa', 'Aguascalientes', NULL, NULL, false),
+  ('universidad-cuauhtemoc-queretaro', 'universidad-cuauhtemoc', 'queretaro', U&'Universidad Cuauht\00E9moc, Campus Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, false),
+  ('universidad-cuauhtemoc-san-luis-potosi', 'universidad-cuauhtemoc', 'san-luis-potosi', U&'Universidad Cuauht\00E9moc, Campus San Luis Potos\00ED', U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, NULL, false),
+  ('universidad-cuauhtemoc-guadalajara', 'universidad-cuauhtemoc', 'guadalajara', U&'Universidad Cuauht\00E9moc, Campus Guadalajara', 'Guadalajara', 'Zapopan', 'Jalisco', NULL, NULL, false),
+  ('universidad-cuauhtemoc-xalapa', 'universidad-cuauhtemoc', 'xalapa', U&'Universidad Cuauht\00E9moc, Campus Xalapa', 'Xalapa', 'Xalapa', 'Veracruz', NULL, NULL, false),
+  ('universidad-cultural', 'universidad-cultural', 'principal', 'Universidad Cultural', NULL, U&'Ju\00E1rez', 'Chihuahua', NULL, NULL, false),
+  ('universidad-de-ciencias-y-artes-de-chiapas', 'universidad-de-ciencias-y-artes-de-chiapas', 'principal', 'Universidad de Ciencias y Artes de Chiapas', NULL, U&'Tuxtla Guti\00E9rrez', 'Chiapas', NULL, NULL, false),
+  ('universidad-de-colima', 'universidad-de-colima', 'principal', 'Universidad de Colima', NULL, 'Colima', 'Colima', NULL, NULL, false),
+  ('udg', 'udg', 'principal', 'Universidad de Guadalajara', NULL, 'Guadalajara', 'Jalisco', NULL, NULL, true),
+  ('universidad-de-guanajuato', 'universidad-de-guanajuato', 'principal', 'Universidad de Guanajuato', NULL, 'Guanajuato', 'Guanajuato', NULL, NULL, false),
+  ('universidad-de-la-salud-ciudad-de-mexico', 'universidad-de-la-salud', 'ciudad-de-mexico', U&'Universidad de la Salud, Campus Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, false),
+  ('universidad-de-la-salud-puebla', 'universidad-de-la-salud', 'puebla', 'Universidad de la Salud, Campus Puebla', 'Puebla', 'Puebla', 'Puebla', NULL, NULL, false),
+  ('udlap', 'udlap', 'principal', U&'Universidad de las Am\00E9ricas Puebla', NULL, U&'San Andr\00E9s Cholula', 'Puebla', NULL, NULL, true),
+  ('universidad-de-leon', 'universidad-de-leon', 'principal', U&'Universidad de Le\00F3n', NULL, U&'Le\00F3n', 'Guanajuato', NULL, NULL, false),
+  ('universidad-de-los-mochis', 'universidad-de-los-mochis', 'principal', 'Universidad de Los Mochis', NULL, 'Ahome', 'Sinaloa', NULL, NULL, false),
+  ('universidad-de-monterrey', 'universidad-de-monterrey', 'principal', 'Universidad de Monterrey', NULL, U&'San Pedro Garza Garc\00EDa', U&'Nuevo Le\00F3n', NULL, NULL, false),
+  ('universidad-de-oriente-veracruz', 'universidad-de-oriente-veracruz', 'principal', 'Universidad de Oriente - Veracruz', NULL, 'Veracruz', 'Veracruz', NULL, NULL, false),
+  ('universidad-de-sonora', 'universidad-de-sonora', 'principal', 'Universidad de Sonora', NULL, 'Hermosillo', 'Sonora', NULL, NULL, false),
+  ('universidad-del-atlantico', 'universidad-del-atlantico', 'principal', U&'Universidad del Atl\00E1ntico', NULL, 'Reynosa', 'Tamaulipas', NULL, NULL, false),
+  ('universidad-del-caribe', 'universidad-del-caribe', 'principal', 'Universidad del Caribe', NULL, U&'Benito Ju\00E1rez', 'Quintana Roo', NULL, NULL, false),
+  ('universidad-del-desarrollo-profesional-hermosillo', 'universidad-del-desarrollo-profesional', 'hermosillo', 'Universidad del Desarrollo Profesional, Campus Hermosillo', 'Hermosillo', 'Hermosillo', 'Sonora', NULL, NULL, false),
+  ('universidad-del-desarrollo-profesional-tijuana', 'universidad-del-desarrollo-profesional', 'tijuana', 'Universidad del Desarrollo Profesional, Campus Tijuana', 'Tijuana', 'Tijuana', 'Baja California', NULL, NULL, false),
+  ('universidad-del-golfo-de-california', 'universidad-del-golfo-de-california', 'principal', 'Universidad del Golfo de California', NULL, 'Los Cabos', 'Baja California Sur', NULL, NULL, false),
+  ('universidad-del-valle-de-cuernavaca', 'universidad-del-valle-de-cuernavaca', 'principal', 'Universidad del Valle de Cuernavaca', NULL, 'Cuernavaca', 'Morelos', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-lomas-verdes', 'universidad-del-valle-de-mexico', 'lomas-verdes', U&'Universidad del Valle de M\00E9xico, Campus Lomas Verdes', 'Lomas Verdes', U&'Coacalco de Berrioz\00E1bal', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-ciudad-de-mexico', 'universidad-del-valle-de-mexico', 'ciudad-de-mexico', U&'Universidad del Valle de M\00E9xico, Campus Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-queretaro', 'universidad-del-valle-de-mexico', 'queretaro', U&'Universidad del Valle de M\00E9xico, Campus Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-san-andres-cholula', 'universidad-del-valle-de-mexico', 'san-andres-cholula', U&'Universidad del Valle de M\00E9xico, Campus San Andr\00E9s Cholula', U&'San Andr\00E9s Cholula', U&'San Andr\00E9s Cholula', 'Puebla', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-villahermosa', 'universidad-del-valle-de-mexico', 'villahermosa', U&'Universidad del Valle de M\00E9xico, Campus Villahermosa', 'Villahermosa', 'Centro', 'Tabasco', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-victoria', 'universidad-del-valle-de-mexico', 'victoria', U&'Universidad del Valle de M\00E9xico, Campus Victoria', 'Victoria', 'Victoria', 'Tamaulipas', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-hermosillo', 'universidad-del-valle-de-mexico', 'hermosillo', U&'Universidad del Valle de M\00E9xico, Campus Hermosillo', 'Hermosillo', 'Hermosillo', 'Sonora', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-veracruz', 'universidad-del-valle-de-mexico', 'veracruz', U&'Universidad del Valle de M\00E9xico, Campus Veracruz', 'Veracruz', U&'Boca del R\00EDo', 'Veracruz', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-cumbres', 'universidad-del-valle-de-mexico', 'cumbres', U&'Universidad del Valle de M\00E9xico, Campus Cumbres', 'Cumbres', 'Monterrey', U&'Nuevo Le\00F3n', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-merida-79-uvm-s-c', 'universidad-del-valle-de-mexico', 'merida-79-uvm-s-c', U&'Universidad del Valle de M\00E9xico, Campus M\00E9rida (79 UVM, S.c.)', U&'M\00E9rida (79 UVM, S.c.)', U&'M\00E9rida', U&'Yucat\00E1n', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-monterrey', 'universidad-del-valle-de-mexico', 'monterrey', U&'Universidad del Valle de M\00E9xico, Campus Monterrey', 'Monterrey', U&'San Nicol\00E1s de los Garza', U&'Nuevo Le\00F3n', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-chihuahua', 'universidad-del-valle-de-mexico', 'chihuahua', U&'Universidad del Valle de M\00E9xico, Campus Chihuahua', 'Chihuahua', 'Chihuahua', 'Chihuahua', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-guadalajara', 'universidad-del-valle-de-mexico', 'guadalajara', U&'Universidad del Valle de M\00E9xico, Campus Guadalajara', 'Guadalajara', 'San Pedro Tlaquepaque', 'Jalisco', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-saltillo', 'universidad-del-valle-de-mexico', 'saltillo', U&'Universidad del Valle de M\00E9xico, Campus Saltillo', 'Saltillo', 'Saltillo', 'Coahuila', NULL, NULL, false),
+  ('universidad-del-valle-de-mexico-mexicali', 'universidad-del-valle-de-mexico', 'mexicali', U&'Universidad del Valle de M\00E9xico, Campus Mexicali', 'Mexicali', 'Mexicali', 'Baja California', NULL, NULL, false),
+  ('universidad-estatal-de-sonora', 'universidad-estatal-de-sonora', 'principal', 'Universidad Estatal de Sonora', NULL, 'Hermosillo', 'Sonora', NULL, NULL, false),
+  ('universidad-hipocrates', 'universidad-hipocrates', 'principal', U&'Universidad Hip\00F3crates', NULL, U&'Acapulco de Ju\00E1rez', 'Guerrero', NULL, NULL, false),
+  ('ibero', 'ibero', 'ciudad-de-mexico', 'Universidad Iberoamericana', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('ibero-leon', 'ibero', 'leon', U&'Universidad Iberoamericana, Campus Le\00F3n', U&'Le\00F3n', U&'Le\00F3n', 'Guanajuato', NULL, NULL, false),
+  ('universidad-iberoamericana-puebla', 'universidad-iberoamericana-puebla', 'principal', 'Universidad Iberoamericana Puebla', NULL, U&'San Andr\00E9s Cholula', 'Puebla', NULL, NULL, false),
+  ('universidad-internacional', 'universidad-internacional', 'principal', 'Universidad Internacional', NULL, 'Cuernavaca', 'Morelos', NULL, NULL, false),
+  ('universidad-juarez-autonoma-de-tabasco', 'universidad-juarez-autonoma-de-tabasco', 'principal', U&'Universidad Ju\00E1rez Aut\00F3noma de Tabasco', NULL, 'Centro', 'Tabasco', NULL, NULL, false),
+  ('universidad-juarez-del-estado-de-durango', 'universidad-juarez-del-estado-de-durango', 'principal', U&'Universidad Ju\00E1rez del Estado de Durango', NULL, 'Durango', 'Durango', NULL, NULL, false),
+  ('universidad-la-salle-cancun', 'universidad-la-salle-cancun', 'principal', U&'Universidad La Salle Canc\00FAn', NULL, U&'Benito Ju\00E1rez', 'Quintana Roo', NULL, NULL, false),
+  ('universidad-la-salle-chihuahua', 'universidad-la-salle-chihuahua', 'principal', 'Universidad La Salle Chihuahua', NULL, 'Chihuahua', 'Chihuahua', NULL, NULL, false),
+  ('universidad-la-salle-laguna', 'universidad-la-salle-laguna', 'principal', 'Universidad La Salle Laguna', NULL, U&'G\00F3mez Palacio', 'Durango', NULL, NULL, false),
+  ('universidad-la-salle-noroeste', 'universidad-la-salle-noroeste', 'principal', 'Universidad La Salle Noroeste', NULL, 'Cajeme', 'Sonora', NULL, NULL, false),
+  ('universidad-la-salle-oaxaca', 'universidad-la-salle-oaxaca', 'principal', 'Universidad La Salle Oaxaca', NULL, U&'Santa Cruz Xoxocotl\00E1n', 'Oaxaca', NULL, NULL, false),
+  ('universidad-marista-de-merida', 'universidad-marista-de-merida', 'principal', U&'Universidad Marista de M\00E9rida', NULL, U&'M\00E9rida', U&'Yucat\00E1n', NULL, NULL, false),
+  ('universidad-metropolitana-de-monterrey', 'universidad-metropolitana-de-monterrey', 'principal', 'Universidad Metropolitana de Monterrey', NULL, 'Monterrey', U&'Nuevo Le\00F3n', NULL, NULL, false),
+  ('universidad-mexiquense-del-bicentenario', 'universidad-mexiquense-del-bicentenario', 'principal', 'Universidad Mexiquense del Bicentenario', NULL, 'Ecatepec de Morelos', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('universidad-michoacana-de-san-nicolas-de-hidalgo', 'universidad-michoacana-de-san-nicolas-de-hidalgo', 'principal', U&'Universidad Michoacana de San Nicol\00E1s de Hidalgo', NULL, 'Morelia', U&'Michoac\00E1n', NULL, NULL, false),
+  ('universidad-montrer', 'universidad-montrer', 'principal', 'Universidad Montrer', NULL, 'Morelia', U&'Michoac\00E1n', NULL, NULL, false),
+  ('universidad-mundo-maya-centro', 'universidad-mundo-maya', 'centro', 'Universidad Mundo Maya, Campus Centro', 'Centro', 'Centro', 'Tabasco', NULL, NULL, false),
+  ('universidad-mundo-maya-campeche', 'universidad-mundo-maya', 'campeche', 'Universidad Mundo Maya, Campus Campeche', 'Campeche', 'Campeche', 'Campeche', NULL, NULL, false),
+  ('unam', 'unam', 'ciudad-de-mexico', U&'Universidad Nacional Aut\00F3noma de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('unam-naucalpan-de-juarez', 'unam', 'naucalpan-de-juarez', U&'Universidad Nacional Aut\00F3noma de M\00E9xico, Campus Naucalpan de Ju\00E1rez', U&'Naucalpan de Ju\00E1rez', U&'Naucalpan de Ju\00E1rez', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('unam-morelia', 'unam', 'morelia', U&'Universidad Nacional Aut\00F3noma de M\00E9xico, Campus Morelia', 'Morelia', 'Morelia', U&'Michoac\00E1n', NULL, NULL, false),
+  ('unam-leon', 'unam', 'leon', U&'Universidad Nacional Aut\00F3noma de M\00E9xico, Campus Le\00F3n', U&'Le\00F3n', U&'Le\00F3n', 'Guanajuato', NULL, NULL, false),
+  ('unam-queretaro', 'unam', 'queretaro', U&'Universidad Nacional Aut\00F3noma de M\00E9xico, Campus Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, false),
+  ('unam-ucu', 'unam', 'ucu', U&'Universidad Nacional Aut\00F3noma de M\00E9xico, Campus Uc\00FA', U&'Uc\00FA', U&'Uc\00FA', U&'Yucat\00E1n', NULL, NULL, false),
+  ('universidad-olmeca', 'universidad-olmeca', 'principal', 'Universidad Olmeca', NULL, 'Centro', 'Tabasco', NULL, NULL, false),
+  ('universidad-pablo-guardado-chavez', 'universidad-pablo-guardado-chavez', 'principal', U&'Universidad Pablo Guardado Ch\00E1vez', NULL, U&'Tuxtla Guti\00E9rrez', 'Chiapas', NULL, NULL, false),
+  ('up', 'up', 'ciudad-de-mexico', 'Universidad Panamericana', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, true),
+  ('up-guadalajara', 'up', 'guadalajara', 'Universidad Panamericana, Campus Guadalajara', 'Guadalajara', 'Zapopan', 'Jalisco', NULL, NULL, false),
+  ('up-bonaterra', 'up', 'bonaterra', 'Universidad Panamericana, Campus Bonaterra', 'Bonaterra', 'Aguascalientes', 'Aguascalientes', NULL, NULL, false),
+  ('up-huixquilucan', 'up', 'huixquilucan', 'Universidad Panamericana, Campus Huixquilucan', 'Huixquilucan', 'Huixquilucan', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('universidad-politecnica-de-san-luis-potosi', 'universidad-politecnica-de-san-luis-potosi', 'principal', U&'Universidad Polit\00E9cnica de San Luis Potos\00ED', NULL, U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, NULL, false),
+  ('universidad-politecnica-de-tlaxcala', 'universidad-politecnica-de-tlaxcala', 'principal', U&'Universidad Polit\00E9cnica de Tlaxcala', NULL, 'Tepeyanco', 'Tlaxcala', NULL, NULL, false),
+  ('universidad-popular-autonoma-del-estado-de-puebla', 'universidad-popular-autonoma-del-estado-de-puebla', 'principal', U&'Universidad Popular Aut\00F3noma del Estado de Puebla', NULL, 'Puebla', 'Puebla', NULL, NULL, false),
+  ('universidad-popular-de-la-chontalpa', 'universidad-popular-de-la-chontalpa', 'principal', 'Universidad Popular de la Chontalpa', NULL, U&'C\00E1rdenas', 'Tabasco', NULL, NULL, false),
+  ('universidad-potosina', 'universidad-potosina', 'principal', 'Universidad Potosina', NULL, U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, NULL, false),
+  ('universidad-regional-del-sureste', 'universidad-regional-del-sureste', 'principal', 'Universidad Regional del Sureste', NULL, U&'San Sebasti\00E1n Tutla', 'Oaxaca', NULL, NULL, false),
+  ('universidad-tangamanga', 'universidad-tangamanga', 'principal', 'Universidad Tangamanga', NULL, U&'San Luis Potos\00ED', U&'San Luis Potos\00ED', NULL, NULL, false),
+  ('universidad-tec-milenio-a-c', 'universidad-tec-milenio-a-c', 'principal', 'Universidad Tec Milenio A.c', NULL, U&'Culiac\00E1n', 'Sinaloa', NULL, NULL, false),
+  ('universidad-tecnologica-de-aguascalientes', 'universidad-tecnologica-de-aguascalientes', 'principal', U&'Universidad Tecnol\00F3gica de Aguascalientes', NULL, 'Aguascalientes', 'Aguascalientes', NULL, NULL, false),
+  ('universidad-tecnologica-de-ciudad-juarez', 'universidad-tecnologica-de-ciudad-juarez', 'principal', U&'Universidad Tecnol\00F3gica de Ciudad Ju\00E1rez', NULL, U&'Ju\00E1rez', 'Chihuahua', NULL, NULL, false),
+  ('universidad-tecnologica-de-jalisco', 'universidad-tecnologica-de-jalisco', 'principal', U&'Universidad Tecnol\00F3gica de Jalisco', NULL, 'Guadalajara', 'Jalisco', NULL, NULL, false),
+  ('universidad-tecnologica-de-leon', 'universidad-tecnologica-de-leon', 'principal', U&'Universidad Tecnol\00F3gica de Le\00F3n', NULL, U&'Le\00F3n', 'Guanajuato', NULL, NULL, false),
+  ('universidad-tecnologica-de-manzanillo', 'universidad-tecnologica-de-manzanillo', 'principal', U&'Universidad Tecnol\00F3gica de Manzanillo', NULL, 'Manzanillo', 'Colima', NULL, NULL, false),
+  ('universidad-tecnologica-de-mexico-atizapan-de-zaragoza', 'universidad-tecnologica-de-mexico', 'atizapan-de-zaragoza', U&'Universidad Tecnol\00F3gica de M\00E9xico, Campus Atizap\00E1n de Zaragoza', U&'Atizap\00E1n de Zaragoza', U&'Atizap\00E1n de Zaragoza', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('universidad-tecnologica-de-mexico-ciudad-de-mexico', 'universidad-tecnologica-de-mexico', 'ciudad-de-mexico', U&'Universidad Tecnol\00F3gica de M\00E9xico, Campus Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', U&'Ciudad de M\00E9xico', NULL, NULL, false),
+  ('universidad-tecnologica-de-mexico-leon', 'universidad-tecnologica-de-mexico', 'leon', U&'Universidad Tecnol\00F3gica de M\00E9xico, Campus Le\00F3n', U&'Le\00F3n', U&'Le\00F3n', 'Guanajuato', NULL, NULL, false),
+  ('universidad-tecnologica-de-mexico-san-pedro-tlaquepaque', 'universidad-tecnologica-de-mexico', 'san-pedro-tlaquepaque', U&'Universidad Tecnol\00F3gica de M\00E9xico, Campus San Pedro Tlaquepaque', 'San Pedro Tlaquepaque', 'San Pedro Tlaquepaque', 'Jalisco', NULL, NULL, false),
+  ('universidad-tecnologica-de-mexico-queretaro', 'universidad-tecnologica-de-mexico', 'queretaro', U&'Universidad Tecnol\00F3gica de M\00E9xico, Campus Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, false),
+  ('universidad-tecnologica-de-nayarit', 'universidad-tecnologica-de-nayarit', 'principal', U&'Universidad Tecnol\00F3gica de Nayarit', NULL, 'Xalisco', 'Nayarit', NULL, NULL, false),
+  ('universidad-tecnologica-de-puebla', 'universidad-tecnologica-de-puebla', 'principal', U&'Universidad Tecnol\00F3gica de Puebla', NULL, 'Puebla', 'Puebla', NULL, NULL, false),
+  ('universidad-tecnologica-de-queretaro', 'universidad-tecnologica-de-queretaro', 'principal', U&'Universidad Tecnol\00F3gica de Quer\00E9taro', NULL, U&'Quer\00E9taro', U&'Quer\00E9taro', NULL, NULL, false),
+  ('universidad-tecnologica-de-tijuana', 'universidad-tecnologica-de-tijuana', 'principal', U&'Universidad Tecnol\00F3gica de Tijuana', NULL, 'Tijuana', 'Baja California', NULL, NULL, false),
+  ('universidad-tecnologica-del-centro-de-veracruz', 'universidad-tecnologica-del-centro-de-veracruz', 'principal', U&'Universidad Tecnol\00F3gica del Centro de Veracruz', NULL, U&'Cuitl\00E1huac', 'Veracruz', NULL, NULL, false),
+  ('universidad-tecnologica-del-estado-de-zacatecas', 'universidad-tecnologica-del-estado-de-zacatecas', 'principal', U&'Universidad Tecnol\00F3gica del Estado de Zacatecas', NULL, 'Guadalupe', 'Zacatecas', NULL, NULL, false),
+  ('universidad-tecnologica-emiliano-zapata-del-estado-de-morelos', 'universidad-tecnologica-emiliano-zapata-del-estado-de-morelos', 'principal', U&'Universidad Tecnol\00F3gica Emiliano Zapata del Estado de Morelos', NULL, 'Emiliano Zapata', 'Morelos', NULL, NULL, false),
+  ('universidad-tecnologica-metropolitana', 'universidad-tecnologica-metropolitana', 'principal', U&'Universidad Tecnol\00F3gica Metropolitana', NULL, U&'M\00E9rida', U&'Yucat\00E1n', NULL, NULL, false),
+  ('universidad-tecnologica-santa-catarina', 'universidad-tecnologica-santa-catarina', 'principal', U&'Universidad Tecnol\00F3gica Santa Catarina', NULL, 'Santa Catarina', U&'Nuevo Le\00F3n', NULL, NULL, false),
+  ('universidad-tecnologica-tula-tepeji', 'universidad-tecnologica-tula-tepeji', 'principal', U&'Universidad Tecnol\00F3gica Tula-Tepeji', NULL, 'Tula de Allende', 'Hidalgo', NULL, NULL, false),
+  ('universidad-univer-milenium', 'universidad-univer-milenium', 'principal', 'Universidad Univer Milenium', NULL, 'Toluca', U&'Estado de M\00E9xico', NULL, NULL, false),
+  ('universidad-vasco-de-quiroga', 'universidad-vasco-de-quiroga', 'principal', 'Universidad Vasco de Quiroga', NULL, 'Morelia', U&'Michoac\00E1n', NULL, NULL, false),
+  ('universidad-veracruzana', 'universidad-veracruzana', 'principal', 'Universidad Veracruzana', NULL, 'Xalapa', 'Veracruz', NULL, NULL, false),
+  ('universidad-vizcaya-de-las-americas-merida', 'universidad-vizcaya-de-las-americas', 'merida', U&'Universidad Vizcaya de las Am\00E9ricas, Campus M\00E9rida', U&'M\00E9rida', U&'M\00E9rida', U&'Yucat\00E1n', NULL, NULL, false),
+  ('universidad-vizcaya-de-las-americas-hermosillo', 'universidad-vizcaya-de-las-americas', 'hermosillo', U&'Universidad Vizcaya de las Am\00E9ricas, Campus Hermosillo', 'Hermosillo', 'Hermosillo', 'Sonora', NULL, NULL, false),
+  ('universidad-vizcaya-de-las-americas-saltillo', 'universidad-vizcaya-de-las-americas', 'saltillo', U&'Universidad Vizcaya de las Am\00E9ricas, Campus Saltillo', 'Saltillo', 'Saltillo', 'Coahuila', NULL, NULL, false),
+  ('universidad-vizcaya-de-las-americas-torreon', 'universidad-vizcaya-de-las-americas', 'torreon', U&'Universidad Vizcaya de las Am\00E9ricas, Campus Torre\00F3n', U&'Torre\00F3n', U&'Torre\00F3n', 'Coahuila', NULL, NULL, false),
+  ('universidad-vizcaya-de-las-americas-tepic', 'universidad-vizcaya-de-las-americas', 'tepic', U&'Universidad Vizcaya de las Am\00E9ricas, Campus Tepic', 'Tepic', 'Tepic', 'Nayarit', NULL, NULL, false),
+  ('universidad-vizcaya-de-las-americas-monclova', 'universidad-vizcaya-de-las-americas', 'monclova', U&'Universidad Vizcaya de las Am\00E9ricas, Campus Monclova', 'Monclova', 'Monclova', 'Coahuila', NULL, NULL, false),
+  ('universidad-vizcaya-de-las-americas-campeche', 'universidad-vizcaya-de-las-americas', 'campeche', U&'Universidad Vizcaya de las Am\00E9ricas, Campus Campeche', 'Campeche', 'Campeche', 'Campeche', NULL, NULL, false),
+  ('universidad-vizcaya-de-las-americas-ciudad-juarez', 'universidad-vizcaya-de-las-americas', 'ciudad-juarez', U&'Universidad Vizcaya de las Am\00E9ricas, Campus Ciudad Ju\00E1rez', U&'Ciudad Ju\00E1rez', U&'Ju\00E1rez', 'Chihuahua', NULL, NULL, false),
+  ('american-river-college', 'american-river-college', 'principal', 'American River College', NULL, 'Sacramento', 'California', 38.65085, -121.349672, false),
+  ('anderson-university', 'anderson-university', 'principal', 'Anderson University', NULL, 'Anderson', 'South Carolina', 34.5152, -82.640358, false),
+  ('anne-arundel-community-college', 'anne-arundel-community-college', 'principal', 'Anne Arundel Community College', NULL, 'Arnold', 'Maryland', 39.049813, -76.512223, false),
+  ('anoka-ramsey-community-college', 'anoka-ramsey-community-college', 'principal', 'Anoka-Ramsey Community College', NULL, 'Coon Rapids', 'Minnesota', 45.172978, -93.351697, false),
+  ('arizona-christian-university', 'arizona-christian-university', 'principal', 'Arizona Christian University', NULL, 'Glendale', 'Arizona', 33.622952, -112.181776, false),
+  ('arizona-state-university', 'arizona-state-university', 'principal', 'Arizona State University', NULL, 'Tempe', 'Arizona', 33.417721, -111.934383, false),
+  ('arkansas-state-university', 'arkansas-state-university', 'principal', 'Arkansas State University', NULL, 'Jonesboro', 'Arkansas', 35.842388, -90.679988, false),
+  ('auburn-university', 'auburn-university', 'principal', 'Auburn University', NULL, 'Auburn', 'Alabama', 32.599378, -85.488258, false),
+  ('augustana-university', 'augustana-university', 'principal', 'Augustana University', NULL, 'Sioux Falls', 'South Dakota', 43.525148, -96.736975, false),
+  ('baker-university', 'baker-university', 'principal', 'Baker University', NULL, 'Baldwin City', 'Kansas', 38.778712, -95.187346, false),
+  ('ball-state-university', 'ball-state-university', 'principal', 'Ball State University', NULL, 'Muncie', 'Indiana', 40.203431, -85.409043, false),
+  ('bates-technical-college', 'bates-technical-college', 'principal', 'Bates Technical College', NULL, 'Tacoma', 'Washington', 47.251743, -122.44683, false),
+  ('baton-rouge-community-college', 'baton-rouge-community-college', 'principal', 'Baton Rouge Community College', NULL, 'Baton Rouge', 'Louisiana', 30.448276, -91.137935, false),
+  ('baylor-university', 'baylor-university', 'principal', 'Baylor University', NULL, 'Waco', 'Texas', 31.546872, -97.121041, false),
+  ('bellevue-university', 'bellevue-university', 'principal', 'Bellevue University', NULL, 'Bellevue', 'Nebraska', 41.150225, -95.91764, false),
+  ('bergen-community-college', 'bergen-community-college', 'principal', 'Bergen Community College', NULL, 'Paramus', 'New Jersey', 40.951782, -74.088804, false),
+  ('blue-ridge-community-and-technical-college', 'blue-ridge-community-and-technical-college', 'principal', 'Blue Ridge Community and Technical College', NULL, 'Martinsburg', 'West Virginia', 39.43529, -78.001918, false),
+  ('bluegrass-community-and-technical-college', 'bluegrass-community-and-technical-college', 'principal', 'Bluegrass Community and Technical College', NULL, 'Lexington', 'Kentucky', 38.024808, -84.503665, false),
+  ('boise-state-university', 'boise-state-university', 'principal', 'Boise State University', NULL, 'Boise', 'Idaho', 43.604284, -116.203301, false),
+  ('boston-university', 'boston-university', 'principal', 'Boston University', NULL, 'Boston', 'Massachusetts', 42.351118, -71.107942, false),
+  ('brigham-young-university', 'brigham-young-university', 'principal', 'Brigham Young University', NULL, 'Provo', 'Utah', 40.250851, -111.649281, false),
+  ('brigham-young-university-hawaii', 'brigham-young-university-hawaii', 'principal', 'Brigham Young University-Hawaii', NULL, 'Laie', 'Hawaii', 21.642074, -157.926586, false),
+  ('brigham-young-university-idaho', 'brigham-young-university-idaho', 'principal', 'Brigham Young University-Idaho', NULL, 'Rexburg', 'Idaho', 43.818408, -111.782431, false),
+  ('bristol-community-college', 'bristol-community-college', 'principal', 'Bristol Community College', NULL, 'Fall River', 'Massachusetts', 41.721994, -71.119133, false),
+  ('brown-university', 'brown-university', 'principal', 'Brown University', NULL, 'Providence', 'Rhode Island', 41.82617, -71.40385, false),
+  ('buena-vista-university', 'buena-vista-university', 'principal', 'Buena Vista University', NULL, 'Storm Lake', 'Iowa', 42.642255, -95.208529, false),
+  ('carroll-college', 'carroll-college', 'principal', 'Carroll College', NULL, 'Helena', 'Montana', 46.600771, -112.040285, false),
+  ('case-western-reserve-university', 'case-western-reserve-university', 'principal', 'Case Western Reserve University', NULL, 'Cleveland', 'Ohio', 41.507419, -81.609596, false),
+  ('casper-college', 'casper-college', 'principal', 'Casper College', NULL, 'Casper', 'Wyoming', 42.832788, -106.326712, false),
+  ('central-connecticut-state-university', 'central-connecticut-state-university', 'principal', 'Central Connecticut State University', NULL, 'New Britain', 'Connecticut', 41.692502, -72.765991, false),
+  ('central-georgia-technical-college', 'central-georgia-technical-college', 'principal', 'Central Georgia Technical College', NULL, 'Warner Robins', 'Georgia', 32.545341, -83.66765, false),
+  ('central-new-mexico-community-college', 'central-new-mexico-community-college', 'principal', 'Central New Mexico Community College', NULL, 'Albuquerque', 'New Mexico', 35.071878, -106.628861, false),
+  ('central-wyoming-college', 'central-wyoming-college', 'principal', 'Central Wyoming College', NULL, 'Riverton', 'Wyoming', 43.030556, -108.426738, false),
+  ('champlain-college', 'champlain-college', 'principal', 'Champlain College', NULL, 'Burlington', 'Vermont', 44.473287, -73.202746, false),
+  ('chandler-gilbert-community-college', 'chandler-gilbert-community-college', 'principal', 'Chandler-Gilbert Community College', NULL, 'Chandler', 'Arizona', 33.293897, -111.795922, false),
+  ('chattanooga-state-community-college', 'chattanooga-state-community-college', 'principal', 'Chattanooga State Community College', NULL, 'Chattanooga', 'Tennessee', 35.100202, -85.237389, false),
+  ('clemson-university', 'clemson-university', 'principal', 'Clemson University', NULL, 'Clemson', 'South Carolina', 34.679381, -82.835114, false),
+  ('coastal-alabama-community-college', 'coastal-alabama-community-college', 'principal', 'Coastal Alabama Community College', NULL, 'Bay Minette', 'Alabama', 30.851343, -87.778193, false),
+  ('college-of-dupage', 'college-of-dupage', 'principal', 'College of DuPage', NULL, 'Glen Ellyn', 'Illinois', 41.841577, -88.071635, false),
+  ('college-of-western-idaho', 'college-of-western-idaho', 'principal', 'College of Western Idaho', NULL, 'Nampa', 'Idaho', 43.614106, -116.507314, false),
+  ('colorado-state-university-fort-collins', 'colorado-state-university-fort-collins', 'principal', 'Colorado State University-Fort Collins', NULL, 'Fort Collins', 'Colorado', 40.574805, -105.080732, false),
+  ('columbus-state-community-college', 'columbus-state-community-college', 'principal', 'Columbus State Community College', NULL, 'Columbus', 'Ohio', 39.96887, -82.98766, false),
+  ('community-college-of-allegheny-county', 'community-college-of-allegheny-county', 'principal', 'Community College of Allegheny County', NULL, 'Pittsburgh', 'Pennsylvania', 40.450908, -80.018453, false),
+  ('community-college-of-aurora', 'community-college-of-aurora', 'principal', 'Community College of Aurora', NULL, 'Aurora', 'Colorado', 39.71788, -104.802673, false),
+  ('community-college-of-rhode-island', 'community-college-of-rhode-island', 'principal', 'Community College of Rhode Island', NULL, 'Warwick', 'Rhode Island', 41.712817, -71.481509, false),
+  ('community-college-of-vermont', 'community-college-of-vermont', 'principal', 'Community College of Vermont', NULL, 'Montpelier', 'Vermont', 44.280811, -72.573774, false),
+  ('concordia-university-saint-paul', 'concordia-university-saint-paul', 'principal', 'Concordia University-Saint Paul', NULL, 'Saint Paul', 'Minnesota', 44.949759, -93.154861, false),
+  ('connecticut-state-community-college', 'connecticut-state-community-college', 'principal', 'Connecticut State Community College', NULL, 'Hartford', 'Connecticut', 41.768397, -72.672734, false),
+  ('cornell-university', 'cornell-university', 'principal', 'Cornell University', NULL, 'Ithaca', 'New York', 42.4472, -76.483084, false),
+  ('dakota-college-at-bottineau', 'dakota-college-at-bottineau', 'principal', 'Dakota College at Bottineau', NULL, 'Bottineau', 'North Dakota', 48.832505, -100.441103, false),
+  ('delaware-technical-community-college-terry', 'delaware-technical-community-college-terry', 'principal', 'Delaware Technical Community College-Terry', NULL, 'Dover', 'Delaware', 39.198371, -75.56012, false),
+  ('des-moines-area-community-college', 'des-moines-area-community-college', 'principal', 'Des Moines Area Community College', NULL, 'Ankeny', 'Iowa', 41.707348, -93.611597, false),
+  ('drexel-university', 'drexel-university', 'principal', 'Drexel University', NULL, 'Philadelphia', 'Pennsylvania', 39.955217, -75.190051, false),
+  ('duke-university', 'duke-university', 'principal', 'Duke University', NULL, 'Durham', 'North Carolina', 36.001135, -78.937624, false),
+  ('el-paso-community-college', 'el-paso-community-college', 'principal', 'El Paso Community College', NULL, 'El Paso', 'Texas', 31.773359, -106.373616, false),
+  ('emory-university', 'emory-university', 'principal', 'Emory University', NULL, 'Atlanta', 'Georgia', 33.790183, -84.325512, false),
+  ('flathead-valley-community-college', 'flathead-valley-community-college', 'principal', 'Flathead Valley Community College', NULL, 'Kalispell', 'Montana', 48.227389, -114.327258, false),
+  ('florida-international-university', 'florida-international-university', 'principal', 'Florida International University', NULL, 'Miami', 'Florida', 25.75732, -80.373928, false),
+  ('florida-state', 'florida-state', 'principal', 'Florida State University', NULL, 'Tallahassee', 'Florida', 30.443147, -84.295064, true),
+  ('fox-valley-technical-college', 'fox-valley-technical-college', 'principal', 'Fox Valley Technical College', NULL, 'Appleton', 'Wisconsin', 44.283174, -88.45893, false),
+  ('george-fox-university', 'george-fox-university', 'principal', 'George Fox University', NULL, 'Newberg', 'Oregon', 45.303629, -122.967494, false),
+  ('george-mason-university', 'george-mason-university', 'principal', 'George Mason University', NULL, 'Fairfax', 'Virginia', 38.83195, -77.307063, false),
+  ('george-washington-university', 'george-washington-university', 'principal', 'George Washington University', NULL, 'Washington', 'District of Columbia', 38.89923, -77.048363, false),
+  ('georgia-institute-of-technology', 'georgia-institute-of-technology', 'principal', 'Georgia Institute of Technology', NULL, 'Atlanta', 'Georgia', 33.77242, -84.394832, false),
+  ('gonzaga-university', 'gonzaga-university', 'principal', 'Gonzaga University', NULL, 'Spokane', 'Washington', 47.666531, -117.400625, false),
+  ('grand-rapids-community-college', 'grand-rapids-community-college', 'principal', 'Grand Rapids Community College', NULL, 'Grand Rapids', 'Michigan', 42.967076, -85.665625, false),
+  ('great-bay-community-college', 'great-bay-community-college', 'principal', 'Great Bay Community College', NULL, 'Portsmouth', 'New Hampshire', 43.072093, -70.798969, false),
+  ('harding-university', 'harding-university', 'principal', 'Harding University', NULL, 'Searcy', 'Arkansas', 35.247386, -91.726143, false),
+  ('hinds-community-college', 'hinds-community-college', 'principal', 'Hinds Community College', NULL, 'Raymond', 'Mississippi', 32.256109, -90.416118, false),
+  ('indiana-university-bloomington', 'indiana-university-bloomington', 'principal', 'Indiana University-Bloomington', NULL, 'Bloomington', 'Indiana', 39.16609, -86.526559, false),
+  ('iowa-state-university', 'iowa-state-university', 'principal', 'Iowa State University', NULL, 'Ames', 'Iowa', 42.026212, -93.648504, false),
+  ('ivy-tech-community-college', 'ivy-tech-community-college', 'principal', 'Ivy Tech Community College', NULL, 'Indianapolis', 'Indiana', 39.803753, -86.158213, false),
+  ('johns-hopkins-university', 'johns-hopkins-university', 'principal', 'Johns Hopkins University', NULL, 'Baltimore', 'Maryland', 39.328977, -76.621595, false),
+  ('johnson-county-community-college', 'johnson-county-community-college', 'principal', 'Johnson County Community College', NULL, 'Overland Park', 'Kansas', 38.924125, -94.727798, false),
+  ('kansas-state-university', 'kansas-state-university', 'principal', 'Kansas State University', NULL, 'Manhattan', 'Kansas', 39.188648, -96.581077, false),
+  ('kapiolani-community-college', 'kapiolani-community-college', 'principal', 'Kapiolani Community College', NULL, 'Honolulu', 'Hawaii', 21.27148, -157.800213, false),
+  ('keene-state-college', 'keene-state-college', 'principal', 'Keene State College', NULL, 'Keene', 'New Hampshire', 42.926452, -72.279276, false),
+  ('kent-state-university-at-kent', 'kent-state-university-at-kent', 'principal', 'Kent State University at Kent', NULL, 'Kent', 'Ohio', 41.146653, -81.342533, false),
+  ('lake-area-technical-college', 'lake-area-technical-college', 'principal', 'Lake Area Technical College', NULL, 'Watertown', 'South Dakota', 44.901714, -97.095229, false),
+  ('liberty-university', 'liberty-university', 'principal', 'Liberty University', NULL, 'Lynchburg', 'Virginia', 37.350232, -79.18222, false),
+  ('louisiana-state-university-and-agricultural-mechanical-college', 'louisiana-state-university-and-agricultural-mechanical-college', 'principal', 'Louisiana State University and Agricultural & Mechanical College', NULL, 'Baton Rouge', 'Louisiana', 30.414986, -91.178921, false),
+  ('marquette-university', 'marquette-university', 'principal', 'Marquette University', NULL, 'Milwaukee', 'Wisconsin', 43.03903, -87.927961, false),
+  ('marshall-university', 'marshall-university', 'principal', 'Marshall University', NULL, 'Huntington', 'West Virginia', 38.422482, -82.428964, false),
+  ('metropolitan-community-college-area', 'metropolitan-community-college-area', 'principal', 'Metropolitan Community College Area', NULL, 'Omaha', 'Nebraska', 41.310451, -95.957829, false),
+  ('metropolitan-community-college-kansas-city', 'metropolitan-community-college-kansas-city', 'principal', 'Metropolitan Community College-Kansas City', NULL, 'Kansas City', 'Missouri', 39.068668, -94.58966, false),
+  ('michigan-state-university', 'michigan-state-university', 'principal', 'Michigan State University', NULL, 'East Lansing', 'Michigan', 42.73212, -84.476111, false),
+  ('minnesota-state-university-mankato', 'minnesota-state-university-mankato', 'principal', 'Minnesota State University-Mankato', NULL, 'Mankato', 'Minnesota', 44.146712, -93.99945, false),
+  ('mississippi-state-university', 'mississippi-state-university', 'principal', 'Mississippi State University', NULL, 'Mississippi State', 'Mississippi', 33.454852, -88.790139, false),
+  ('missouri-state-university-springfield', 'missouri-state-university-springfield', 'principal', 'Missouri State University-Springfield', NULL, 'Springfield', 'Missouri', 37.199258, -93.281281, false),
+  ('montana-state-university', 'montana-state-university', 'principal', 'Montana State University', NULL, 'Bozeman', 'Montana', 45.666726, -111.048812, false),
+  ('montclair-state-university', 'montclair-state-university', 'principal', 'Montclair State University', NULL, 'Montclair', 'New Jersey', 40.860414, -74.198141, false),
+  ('new-mexico-state-university', 'new-mexico-state-university', 'principal', 'New Mexico State University', NULL, 'Las Cruces', 'New Mexico', 32.281568, -106.752069, false),
+  ('north-carolina-state-university-at-raleigh', 'north-carolina-state-university-at-raleigh', 'principal', 'North Carolina State University at Raleigh', NULL, 'Raleigh', 'North Carolina', 35.785111, -78.674517, false),
+  ('north-dakota-state-university', 'north-dakota-state-university', 'principal', 'North Dakota State University', NULL, 'Fargo', 'North Dakota', 46.893127, -96.800838, false),
+  ('northern-virginia-community-college', 'northern-virginia-community-college', 'principal', 'Northern Virginia Community College', NULL, 'Annandale', 'Virginia', 38.833361, -77.236718, false),
+  ('northwest-arkansas-community-college', 'northwest-arkansas-community-college', 'principal', 'NorthWest Arkansas Community College', NULL, 'Bentonville', 'Arkansas', 36.357704, -94.17289, false),
+  ('northwestern-university', 'northwestern-university', 'principal', 'Northwestern University', NULL, 'Evanston', 'Illinois', 42.050356, -87.679858, false),
+  ('nova-southeastern-university', 'nova-southeastern-university', 'principal', 'Nova Southeastern University', NULL, 'Fort Lauderdale', 'Florida', 26.082288, -80.249891, false),
+  ('ohio-state-university', 'ohio-state-university', 'principal', 'Ohio State University', NULL, 'Columbus', 'Ohio', 39.999803, -83.007525, false),
+  ('oklahoma-city-community-college', 'oklahoma-city-community-college', 'principal', 'Oklahoma City Community College', NULL, 'Oklahoma City', 'Oklahoma', 35.387699, -97.570109, false),
+  ('oklahoma-state-university', 'oklahoma-state-university', 'principal', 'Oklahoma State University', NULL, 'Stillwater', 'Oklahoma', 36.123085, -97.069743, false),
+  ('oral-roberts-university', 'oral-roberts-university', 'principal', 'Oral Roberts University', NULL, 'Tulsa', 'Oklahoma', 36.049129, -95.952547, false),
+  ('oregon-state-university', 'oregon-state-university', 'principal', 'Oregon State University', NULL, 'Corvallis', 'Oregon', 44.56395, -123.274723, false),
+  ('pennsylvania-state-university', 'pennsylvania-state-university', 'principal', 'Pennsylvania State University', NULL, 'University Park', 'Pennsylvania', 40.7965, -77.862848, false),
+  ('portland-community-college', 'portland-community-college', 'principal', 'Portland Community College', NULL, 'Portland', 'Oregon', 45.438154, -122.730876, false),
+  ('princeton-university', 'princeton-university', 'principal', 'Princeton University', NULL, 'Princeton', 'New Jersey', 40.348732, -74.659365, false),
+  ('purdue', 'purdue', 'principal', 'Purdue University', NULL, 'West Lafayette', 'Indiana', 40.428206, -86.914435, true),
+  ('rhode-island-college', 'rhode-island-college', 'principal', 'Rhode Island College', NULL, 'Providence', 'Rhode Island', 41.842415, -71.46556, false),
+  ('roseman-university-of-health-sciences', 'roseman-university-of-health-sciences', 'principal', 'Roseman University of Health Sciences', NULL, 'Henderson', 'Nevada', 36.073182, -115.064633, false),
+  ('rutgers-university-new-brunswick', 'rutgers-university-new-brunswick', 'principal', 'Rutgers University-New Brunswick', NULL, 'New Brunswick', 'New Jersey', 40.498769, -74.446251, false),
+  ('salt-lake-community-college', 'salt-lake-community-college', 'principal', 'Salt Lake Community College', NULL, 'Salt Lake City', 'Utah', 40.671575, -111.942809, false),
+  ('samford-university', 'samford-university', 'principal', 'Samford University', NULL, 'Birmingham', 'Alabama', 33.464128, -86.791799, false),
+  ('south-dakota-state-university', 'south-dakota-state-university', 'principal', 'South Dakota State University', NULL, 'Brookings', 'South Dakota', 44.317485, -96.782139, false),
+  ('southern-maine-community-college', 'southern-maine-community-college', 'principal', 'Southern Maine Community College', NULL, 'South Portland', 'Maine', 43.646649, -70.229182, false),
+  ('southern-new-hampshire-university', 'southern-new-hampshire-university', 'principal', 'Southern New Hampshire University', NULL, 'Manchester', 'New Hampshire', 43.038922, -71.451842, false),
+  ('stony-brook-university', 'stony-brook-university', 'principal', 'Stony Brook University', NULL, 'Stony Brook', 'New York', 40.91476, -73.12046, false),
+  ('suffolk-county-community-college', 'suffolk-county-community-college', 'principal', 'Suffolk County Community College', NULL, 'Selden', 'New York', 40.848963, -73.056165, false),
+  ('temple-university', 'temple-university', 'principal', 'Temple University', NULL, 'Philadelphia', 'Pennsylvania', 39.980546, -75.156859, false),
+  ('texas-a-m-university-college-station', 'texas-a-m-university-college-station', 'principal', 'Texas A&M University-College Station', NULL, 'College Station', 'Texas', 30.618726, -96.336475, false),
+  ('texas-tech-university', 'texas-tech-university', 'principal', 'Texas Tech University', NULL, 'Lubbock', 'Texas', 33.583448, -101.874783, false),
+  ('the-university-of-alabama', 'the-university-of-alabama', 'principal', 'The University of Alabama', NULL, 'Tuscaloosa', 'Alabama', 33.211875, -87.545978, false),
+  ('the-university-of-montana', 'the-university-of-montana', 'principal', 'The University of Montana', NULL, 'Missoula', 'Montana', 46.859312, -113.982912, false),
+  ('the-university-of-tennessee-knoxville', 'the-university-of-tennessee-knoxville', 'principal', 'The University of Tennessee-Knoxville', NULL, 'Knoxville', 'Tennessee', 35.952082, -83.925852, false),
+  ('trident-technical-college', 'trident-technical-college', 'principal', 'Trident Technical College', NULL, 'Charleston', 'South Carolina', 32.928767, -80.031276, false),
+  ('tulane-university-of-louisiana', 'tulane-university-of-louisiana', 'principal', 'Tulane University of Louisiana', NULL, 'New Orleans', 'Louisiana', 29.940069, -90.122144, false),
+  ('university-at-buffalo', 'university-at-buffalo', 'principal', 'University at Buffalo', NULL, 'Buffalo', 'New York', 43.000942, -78.789458, false),
+  ('university-of-alaska-anchorage', 'university-of-alaska-anchorage', 'principal', 'University of Alaska Anchorage', NULL, 'Anchorage', 'Alaska', 61.190163, -149.82619, false),
+  ('university-of-alaska-fairbanks', 'university-of-alaska-fairbanks', 'principal', 'University of Alaska Fairbanks', NULL, 'Fairbanks', 'Alaska', 64.85756, -147.823146, false),
+  ('university-of-arizona', 'university-of-arizona', 'principal', 'University of Arizona', NULL, 'Tucson', 'Arizona', 32.232672, -110.950815, false),
+  ('university-of-arkansas', 'university-of-arkansas', 'principal', 'University of Arkansas', NULL, 'Fayetteville', 'Arkansas', 36.070009, -94.176981, false),
+  ('university-of-california-berkeley', 'university-of-california-berkeley', 'principal', 'University of California-Berkeley', NULL, 'Berkeley', 'California', 37.871918, -122.260463, false),
+  ('university-of-california-davis', 'university-of-california-davis', 'principal', 'University of California-Davis', NULL, 'Davis', 'California', 38.539667, -121.749567, false),
+  ('university-of-charleston', 'university-of-charleston', 'principal', 'University of Charleston', NULL, 'Charleston', 'West Virginia', 38.333367, -81.616244, false),
+  ('university-of-colorado-boulder', 'university-of-colorado-boulder', 'principal', 'University of Colorado Boulder', NULL, 'Boulder', 'Colorado', 40.008781, -105.270823, false),
+  ('university-of-connecticut', 'university-of-connecticut', 'principal', 'University of Connecticut', NULL, 'Storrs', 'Connecticut', 41.809098, -72.249948, false),
+  ('university-of-delaware', 'university-of-delaware', 'principal', 'University of Delaware', NULL, 'Newark', 'Delaware', 39.679577, -75.752822, false),
+  ('university-of-denver', 'university-of-denver', 'principal', 'University of Denver', NULL, 'Denver', 'Colorado', 39.678005, -104.963259, false),
+  ('university-of-detroit-mercy', 'university-of-detroit-mercy', 'principal', 'University of Detroit Mercy', NULL, 'Detroit', 'Michigan', 42.414222, -83.139158, false),
+  ('university-of-florida', 'university-of-florida', 'principal', 'University of Florida', NULL, 'Gainesville', 'Florida', 29.64629, -82.347911, false),
+  ('university-of-georgia', 'university-of-georgia', 'principal', 'University of Georgia', NULL, 'Athens', 'Georgia', 33.956262, -83.374039, false),
+  ('university-of-hawaii-at-hilo', 'university-of-hawaii-at-hilo', 'principal', 'University of Hawaii at Hilo', NULL, 'Hilo', 'Hawaii', 19.701189, -155.080847, false),
+  ('university-of-hawaii-at-manoa', 'university-of-hawaii-at-manoa', 'principal', 'University of Hawaii at Manoa', NULL, 'Honolulu', 'Hawaii', 21.298598, -157.818979, false),
+  ('university-of-idaho', 'university-of-idaho', 'principal', 'University of Idaho', NULL, 'Moscow', 'Idaho', 46.727406, -117.014167, false),
+  ('university-of-illinois-chicago', 'university-of-illinois-chicago', 'principal', 'University of Illinois Chicago', NULL, 'Chicago', 'Illinois', 41.871837, -87.650503, false),
+  ('university-of-illinois-urbana-champaign', 'university-of-illinois-urbana-champaign', 'principal', 'University of Illinois Urbana-Champaign', NULL, 'Champaign', 'Illinois', 40.104718, -88.229114, false),
+  ('university-of-iowa', 'university-of-iowa', 'principal', 'University of Iowa', NULL, 'Iowa City', 'Iowa', 41.661935, -91.536425, false),
+  ('university-of-jamestown', 'university-of-jamestown', 'principal', 'University of Jamestown', NULL, 'Jamestown', 'North Dakota', 46.914302, -98.698416, false),
+  ('university-of-kansas', 'university-of-kansas', 'principal', 'University of Kansas', NULL, 'Lawrence', 'Kansas', 38.958549, -95.247567, false),
+  ('university-of-kentucky', 'university-of-kentucky', 'principal', 'University of Kentucky', NULL, 'Lexington', 'Kentucky', 38.038911, -84.504747, false),
+  ('university-of-louisiana-at-lafayette', 'university-of-louisiana-at-lafayette', 'principal', 'University of Louisiana at Lafayette', NULL, 'Lafayette', 'Louisiana', 30.212191, -92.020165, false),
+  ('university-of-louisville', 'university-of-louisville', 'principal', 'University of Louisville', NULL, 'Louisville', 'Kentucky', 38.216862, -85.760412, false),
+  ('university-of-maine', 'university-of-maine', 'principal', 'University of Maine', NULL, 'Orono', 'Maine', 44.899257, -68.669332, false),
+  ('university-of-maryland-global-campus', 'university-of-maryland-global-campus', 'principal', 'University of Maryland Global Campus', NULL, 'Adelphi', 'Maryland', 38.912706, -76.847584, false),
+  ('university-of-maryland-college-park', 'university-of-maryland-college-park', 'principal', 'University of Maryland-College Park', NULL, 'College Park', 'Maryland', 38.988178, -76.944721, false),
+  ('university-of-massachusetts-amherst', 'university-of-massachusetts-amherst', 'principal', 'University of Massachusetts-Amherst', NULL, 'Amherst', 'Massachusetts', 42.385999, -72.526728, false),
+  ('university-of-massachusetts-boston', 'university-of-massachusetts-boston', 'principal', 'University of Massachusetts-Boston', NULL, 'Boston', 'Massachusetts', 42.312881, -71.036865, false),
+  ('university-of-memphis', 'university-of-memphis', 'principal', 'University of Memphis', NULL, 'Memphis', 'Tennessee', 35.118878, -89.938068, false),
+  ('university-of-michigan-ann-arbor', 'university-of-michigan-ann-arbor', 'principal', 'University of Michigan-Ann Arbor', NULL, 'Ann Arbor', 'Michigan', 42.278374, -83.73481, false),
+  ('university-of-minnesota-twin-cities', 'university-of-minnesota-twin-cities', 'principal', 'University of Minnesota-Twin Cities', NULL, 'Minneapolis', 'Minnesota', 44.972851, -93.235464, false),
+  ('university-of-mississippi', 'university-of-mississippi', 'principal', 'University of Mississippi', NULL, 'University', 'Mississippi', 34.365529, -89.537434, false),
+  ('university-of-missouri-columbia', 'university-of-missouri-columbia', 'principal', 'University of Missouri-Columbia', NULL, 'Columbia', 'Missouri', 38.94531, -92.328843, false),
+  ('university-of-nebraska-at-omaha', 'university-of-nebraska-at-omaha', 'principal', 'University of Nebraska at Omaha', NULL, 'Omaha', 'Nebraska', 41.258769, -96.008516, false),
+  ('university-of-nebraska-lincoln', 'university-of-nebraska-lincoln', 'principal', 'University of Nebraska-Lincoln', NULL, 'Lincoln', 'Nebraska', 40.817598, -96.700508, false),
+  ('university-of-nevada-las-vegas', 'university-of-nevada-las-vegas', 'principal', 'University of Nevada-Las Vegas', NULL, 'Las Vegas', 'Nevada', 36.106047, -115.138462, false),
+  ('university-of-nevada-reno', 'university-of-nevada-reno', 'principal', 'University of Nevada-Reno', NULL, 'Reno', 'Nevada', 39.543642, -119.815377, false),
+  ('university-of-new-england', 'university-of-new-england', 'principal', 'University of New England', NULL, 'Biddeford', 'Maine', 43.458591, -70.38535, false),
+  ('university-of-new-hampshire', 'university-of-new-hampshire', 'principal', 'University of New Hampshire', NULL, 'Durham', 'New Hampshire', 43.135934, -70.932465, false),
+  ('university-of-new-mexico', 'university-of-new-mexico', 'principal', 'University of New Mexico', NULL, 'Albuquerque', 'New Mexico', 35.083868, -106.620155, false),
+  ('university-of-north-carolina-at-chapel-hill', 'university-of-north-carolina-at-chapel-hill', 'principal', 'University of North Carolina at Chapel Hill', NULL, 'Chapel Hill', 'North Carolina', 35.911769, -79.050969, false),
+  ('university-of-north-dakota', 'university-of-north-dakota', 'principal', 'University of North Dakota', NULL, 'Grand Forks', 'North Dakota', 47.921654, -97.071738, false),
+  ('university-of-notre-dame', 'university-of-notre-dame', 'principal', 'University of Notre Dame', NULL, 'Notre Dame', 'Indiana', 41.703058, -86.238959, false),
+  ('university-of-oklahoma', 'university-of-oklahoma', 'principal', 'University of Oklahoma', NULL, 'Norman', 'Oklahoma', 35.209407, -97.444211, false),
+  ('university-of-oregon', 'university-of-oregon', 'principal', 'University of Oregon', NULL, 'Eugene', 'Oregon', 44.045146, -123.075792, false),
+  ('university-of-rhode-island', 'university-of-rhode-island', 'principal', 'University of Rhode Island', NULL, 'Kingston', 'Rhode Island', 41.484691, -71.527356, false),
+  ('university-of-south-carolina-columbia', 'university-of-south-carolina-columbia', 'principal', 'University of South Carolina-Columbia', NULL, 'Columbia', 'South Carolina', 33.996788, -81.026935, false),
+  ('university-of-south-dakota', 'university-of-south-dakota', 'principal', 'University of South Dakota', NULL, 'Vermillion', 'South Dakota', 42.786019, -96.925283, false),
+  ('university-of-southern-california', 'university-of-southern-california', 'principal', 'University of Southern California', NULL, 'Los Angeles', 'California', 34.021281, -118.284169, false),
+  ('university-of-southern-maine', 'university-of-southern-maine', 'principal', 'University of Southern Maine', NULL, 'Portland', 'Maine', 43.662863, -70.274247, false),
+  ('university-of-the-cumberlands', 'university-of-the-cumberlands', 'principal', 'University of the Cumberlands', NULL, 'Williamsburg', 'Kentucky', 36.737048, -84.161646, false),
+  ('university-of-the-district-of-columbia', 'university-of-the-district-of-columbia', 'principal', 'University of the District of Columbia', NULL, 'Washington', 'District of Columbia', 38.943819, -77.066247, false),
+  ('university-of-the-southwest', 'university-of-the-southwest', 'principal', 'University of the Southwest', NULL, 'Hobbs', 'New Mexico', 32.775496, -103.186948, false),
+  ('university-of-utah', 'university-of-utah', 'principal', 'University of Utah', NULL, 'Salt Lake City', 'Utah', 40.762484, -111.846044, false),
+  ('university-of-vermont', 'university-of-vermont', 'principal', 'University of Vermont', NULL, 'Burlington', 'Vermont', 44.477325, -73.196646, false),
+  ('university-of-washington', 'university-of-washington', 'principal', 'University of Washington', NULL, 'Seattle', 'Washington', 47.65538, -122.30514, false),
+  ('university-of-wisconsin-madison', 'university-of-wisconsin-madison', 'principal', 'University of Wisconsin-Madison', NULL, 'Madison', 'Wisconsin', 43.075409, -89.404098, false),
+  ('university-of-wisconsin-milwaukee', 'university-of-wisconsin-milwaukee', 'principal', 'University of Wisconsin-Milwaukee', NULL, 'Milwaukee', 'Wisconsin', 43.076848, -87.880488, false),
+  ('university-of-wyoming', 'university-of-wyoming', 'principal', 'University of Wyoming', NULL, 'Laramie', 'Wyoming', 41.311773, -105.57931, false),
+  ('utah-state-university', 'utah-state-university', 'principal', 'Utah State University', NULL, 'Logan', 'Utah', 41.740748, -111.81391, false),
+  ('vanderbilt-university', 'vanderbilt-university', 'principal', 'Vanderbilt University', NULL, 'Nashville', 'Tennessee', 36.14659, -86.803369, false),
+  ('vermont-state-university', 'vermont-state-university', 'principal', 'Vermont State University', NULL, 'Randolph', 'Vermont', 43.939623, -72.604498, false),
+  ('virginia-polytechnic-institute-and-state-university', 'virginia-polytechnic-institute-and-state-university', 'principal', 'Virginia Polytechnic Institute and State University', NULL, 'Blacksburg', 'Virginia', 37.229012, -80.423675, false),
+  ('wake-technical-community-college', 'wake-technical-community-college', 'principal', 'Wake Technical Community College', NULL, 'Raleigh', 'North Carolina', 35.650151, -78.706126, false),
+  ('washington-state-university', 'washington-state-university', 'principal', 'Washington State University', NULL, 'Pullman', 'Washington', 46.730448, -117.158168, false),
+  ('washington-university-in-st-louis', 'washington-university-in-st-louis', 'principal', 'Washington University in St Louis', NULL, 'Saint Louis', 'Missouri', 38.647929, -90.310604, false),
+  ('west-virginia-university', 'west-virginia-university', 'principal', 'West Virginia University', NULL, 'Morgantown', 'West Virginia', 39.634371, -79.954391, false),
+  ('william-carey-university', 'william-carey-university', 'principal', 'William Carey University', NULL, 'Hattiesburg', 'Mississippi', 31.305264, -89.291815, false),
+  ('wilmington-university', 'wilmington-university', 'principal', 'Wilmington University', NULL, 'New Castle', 'Delaware', 39.682299, -75.586998, false),
+  ('yale-university', 'yale-university', 'principal', 'Yale University', NULL, 'New Haven', 'Connecticut', 41.311158, -72.926688, false);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM _c JOIN public.institutions i USING (slug) JOIN public.universities u ON u.slug = _c.university_slug
+    WHERE i.university_id IS NOT NULL AND i.university_id <> u.id
+  ) THEN
+    RAISE EXCEPTION 'CAMPUS_REPARENT';
+  END IF;
+END $$;
+
+WITH upd AS (
+  UPDATE public.institutions i SET
+    university_id = u.id,
+    campus_slug   = coalesce(i.campus_slug, s.campus_slug),
+    name          = CASE WHEN s.preserve THEN i.name ELSE s.name END,
+    campus_name   = CASE WHEN s.preserve THEN coalesce(i.campus_name, s.campus_name) ELSE s.campus_name END,
+    city          = coalesce(i.city, s.city),
+    state_region  = coalesce(i.state_region, s.state_region),
+    lat           = coalesce(i.lat, s.lat),
+    lng           = coalesce(i.lng, s.lng)
+  FROM _c s JOIN public.universities u ON u.slug = s.university_slug
+  WHERE i.slug = s.slug
+    AND (i.university_id, i.campus_slug, i.name, i.campus_name, i.city, i.state_region, i.lat, i.lng)
+        IS DISTINCT FROM
+        (u.id, coalesce(i.campus_slug, s.campus_slug), CASE WHEN s.preserve THEN i.name ELSE s.name END,
+         CASE WHEN s.preserve THEN coalesce(i.campus_name, s.campus_name) ELSE s.campus_name END,
+         coalesce(i.city, s.city), coalesce(i.state_region, s.state_region), coalesce(i.lat, s.lat), coalesce(i.lng, s.lng))
+  RETURNING 1
+) INSERT INTO _report SELECT 'campuses', 'updated', count(*) FROM upd;
+
+WITH ins AS (
+  INSERT INTO public.institutions (slug, name, university_id, campus_slug, campus_name, city, state_region, lat, lng, email_domains, is_active)
+  SELECT s.slug, s.name, u.id, s.campus_slug, s.campus_name, s.city, s.state_region, s.lat, s.lng, '{}', true
+  FROM _c s JOIN public.universities u ON u.slug = s.university_slug
+  WHERE NOT EXISTS (SELECT 1 FROM public.institutions i WHERE i.slug = s.slug)
+  RETURNING 1
+) INSERT INTO _report SELECT 'campuses', 'inserted', count(*) FROM ins;
+
+-- 4. Dominios de correo (con evidencia)
+CREATE TEMP TABLE _d (domain text, university_slug text, campus_slug text, audience text, confidence text,
+  verification_enabled boolean, official_source_url text, source_title text, last_verified_at date, notes text,
+  is_active boolean, student_id_pattern text) ON COMMIT DROP;
+INSERT INTO _d VALUES
+  ('fsu.edu', 'florida-state', NULL, 'all_affiliates', 'confirmed', true, 'https://announcements.fsu.edu/article/student-email-upgrades-fsuedu-accounts-may-4', 'Student email upgrades to @fsu.edu accounts May 4', '2026-09-14', 'Estudiantes migrados a FSUID@fsu.edu, mismo sistema que personal. Prueba afiliacion vigente, no distingue estudiante de personal.', true, NULL),
+  ('my.fsu.edu', 'florida-state', NULL, 'unknown', 'confirmed', false, 'https://its.fsu.edu/about-its/news/student-email-upgrade-complete', 'Student email upgrade complete', '2026-09-14', 'Dominio antiguo de estudiantes; buzones cerrados el 4 de mayo de 2022. No verifica.', false, NULL),
+  ('purdue.edu', 'purdue', NULL, 'all_affiliates', 'confirmed', true, 'https://it.purdue.edu/services/email.php', 'Email | Purdue University IT', '2026-09-14', 'Se entrega a quienes mantienen afiliacion con Purdue. Prueba afiliacion, no necesariamente estudiante.', true, NULL),
+  ('tec.mx', 'tec', NULL, 'all_affiliates', 'confirmed', true, 'https://conecta.tec.mx/es/noticias/nacional/educacion/eres-del-tec-siguen-gratis-cursos-de-coursera-y-se-suman-los-de-edx', U&'\00BFEres del Tec? Siguen gratis cursos de Coursera y se suman los de edX (Conecta Tec, 2021-03-23)', '2026-09-14', 'Pagina oficial del Tec: estudiantes, profesores y colaboradores necesitan correo @tec.mx (o @tecsalud.mx, @itesm.mx); los EXATEC quedan fuera. Prueba afiliacion vigente, no distingue estudiante de personal. Tambien https://profesorescatedra.tec.mx/en/configure-email-and-access para profesores. Habilitado el 2026-09-14 a peticion del propietario; evidencia de 2021, revisar si aparece una fuente mas reciente.', true, '^a0[0-9]{7}$'),
+  ('exatec.tec.mx', 'tec', NULL, 'alumni', 'confirmed', false, 'https://tec.mx/es/exatec/cuenta-de-acceso-mitec-egresados', 'Cuenta de acceso a mitec egresados', '2026-09-14', 'Cuenta de egresados. Nunca verifica matricula vigente.', true, NULL),
+  ('exatec.mx', 'tec', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior sin evidencia. No verifica.', true, NULL),
+  ('itesm.mx', 'tec', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Solo aparece en servidores y buzones de departamentos. No verifica.', true, NULL),
+  ('u.icesi.edu.co', 'icesi', NULL, 'unknown', 'confirmed', false, 'https://www.icesi.edu.co/servicios/syri/ccc/correo-electronico-academico/', 'Correo electronico academico - Servicios', '2026-09-14', 'Correo academico para estudiantes activos, egresados y profesores hora catedra. Incluye egresados: no prueba matricula vigente. Desactivado.', true, NULL),
+  ('icesi.edu.co', 'icesi', NULL, 'faculty_staff', 'confirmed', false, 'https://www.icesi.edu.co/servicios/syri/ccc/correo-colaboradores/', 'Correo electronico colaboradores', '2026-09-14', 'Personal y profesores de planta. No verifica estudiantes.', true, NULL),
+  ('javeriana.edu.co', 'javeriana', NULL, 'unknown', 'probable', false, NULL, NULL, '2026-09-14', 'Indicios de uso por estudiantes, pero ninguna pagina oficial legible lo declara. La sede Cali usa javerianacali.edu.co. Desactivado.', true, NULL),
+  ('comunidad.unam.mx', 'unam', NULL, 'all_affiliates', 'confirmed', true, 'https://www.tic.unam.mx/servicios-de-tic/correo-electronico-institucional/', 'Correo electronico institucional - Portal TIC UNAM', '2026-09-14', 'Lo solicitan estudiantes y personal activos.', true, NULL),
+  ('unam.mx', 'unam', NULL, 'faculty_staff', 'confirmed', false, 'https://www.tic.unam.mx/servicios-de-tic/correo-electronico-institucional/', 'Correo electronico institucional - Portal TIC UNAM', '2026-09-14', 'Solo responsables de TIC de dependencias. No es de estudiantes.', true, NULL),
+  ('alumnos.udg.mx', 'udg', NULL, 'student', 'confirmed', true, 'https://cgta.udg.mx/correo-institucional', 'Correo institucional | Coordinacion General de Tecnologias de la Administracion', '2026-09-14', 'Cuenta Google Workspace for Education para estudiantes.', true, NULL),
+  ('udg.mx', 'udg', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior sin evidencia de audiencia. No verifica.', true, NULL),
+  ('uanl.edu.mx', 'uanl', NULL, 'all_affiliates', 'confirmed', true, 'https://dti.uanl.mx/correo-universitario/', 'Correo Universitario - Direccion de Tecnologias y Desarrollo Digital UANL', '2026-09-14', 'Exclusivo para estudiantes, profesores e investigadores activos.', true, NULL),
+  ('alumno.ipn.mx', 'ipn', NULL, 'student', 'probable', false, 'https://www.ipn.mx/cenac/centro-de-atencion/preguntas-frecuentes.html', 'Preguntas frecuentes de los servicios TIC | IPN Oficial', '2026-09-14', 'Se mencionan tipos de cuenta @alumno, pero ninguna pagina legible lo liga explicitamente a estudiantes. Desactivado.', true, NULL),
+  ('ipn.mx', 'ipn', NULL, 'faculty_staff', 'probable', false, NULL, NULL, '2026-09-14', 'Por implicacion, personal y dependencias. No verifica.', true, NULL),
+  ('uniandes.edu.co', 'universidad-de-los-andes', NULL, 'unknown', 'confirmed', false, 'https://tecnologia.uniandes.edu.co/terminos-y-condiciones-uso-de-cuentas-uniandes/', 'Terminos y condiciones - Uso de Cuentas Uniandes', '2026-09-14', 'Cuentas para estudiantes, profesores, administrativos y egresados. Incluye egresados: no prueba vinculo vigente. Desactivado.', true, NULL),
+  ('unal.edu.co', 'universidad-nacional-de-colombia', NULL, 'unknown', 'probable', false, NULL, NULL, '2026-09-14', 'Paginas oficiales no accesibles; indicios de que incluye egresados. Desactivado.', true, NULL),
+  ('udea.edu.co', 'universidad-de-antioquia', NULL, 'unknown', 'probable', false, NULL, NULL, '2026-09-14', 'Paginas oficiales devolvieron 403; indicios de que los egresados conservan la cuenta. Desactivado.', true, NULL),
+  ('buap.mx', 'buap', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('alumno.buap.mx', 'buap', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('udlap.mx', 'udlap', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('ibero.mx', 'ibero', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('anahuac.mx', 'anahuac', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('uaslp.mx', 'uaslp', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('uaemex.mx', 'uaemex', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('colmex.mx', 'colmex', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('cide.edu', 'cide', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('uam.mx', 'uam', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('uaq.mx', 'uaq', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('itam.mx', 'itam', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL),
+  ('up.edu.mx', 'up', NULL, 'unknown', 'unconfirmed', false, NULL, NULL, '2026-09-14', 'Heredado del catalogo anterior (20260830) sin evidencia. No verifica.', true, NULL);
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM _d JOIN public.institution_email_domains d USING (domain) JOIN public.universities u ON u.slug = _d.university_slug
+             WHERE d.university_id <> u.id) THEN
+    RAISE EXCEPTION 'DOMAIN_REPARENT';
+  END IF;
+END $$;
+
+WITH up AS (
+  INSERT INTO public.institution_email_domains (domain, university_id, campus_id, audience, confidence, verification_enabled,
+    official_source_url, source_title, last_verified_at, notes, is_active, student_id_pattern)
+  SELECT s.domain, u.id, c.id, s.audience, s.confidence, s.verification_enabled, s.official_source_url, s.source_title,
+    s.last_verified_at, s.notes, s.is_active, s.student_id_pattern
+  FROM _d s JOIN public.universities u ON u.slug = s.university_slug
+  LEFT JOIN public.institutions c ON c.slug = s.campus_slug
+  ON CONFLICT (domain) DO UPDATE SET
+    campus_id = EXCLUDED.campus_id, audience = EXCLUDED.audience, confidence = EXCLUDED.confidence,
+    verification_enabled = EXCLUDED.verification_enabled, official_source_url = EXCLUDED.official_source_url,
+    source_title = EXCLUDED.source_title, last_verified_at = EXCLUDED.last_verified_at, notes = EXCLUDED.notes,
+    is_active = EXCLUDED.is_active, student_id_pattern = EXCLUDED.student_id_pattern
+  WHERE (institution_email_domains.campus_id, institution_email_domains.audience, institution_email_domains.confidence,
+         institution_email_domains.verification_enabled, institution_email_domains.official_source_url,
+         institution_email_domains.is_active, institution_email_domains.student_id_pattern, institution_email_domains.notes)
+    IS DISTINCT FROM (EXCLUDED.campus_id, EXCLUDED.audience, EXCLUDED.confidence, EXCLUDED.verification_enabled,
+         EXCLUDED.official_source_url, EXCLUDED.is_active, EXCLUDED.student_id_pattern, EXCLUDED.notes)
+  RETURNING (xmax = 0) AS inserted
+) INSERT INTO _report SELECT 'domains', CASE WHEN inserted THEN 'inserted' ELSE 'updated' END, count(*) FROM up GROUP BY inserted;
+
+-- 5. Nadie cambio de campus
+DO $$
+BEGIN
+  IF EXISTS (
+    (SELECT campus_id, count(*) FROM public.profiles GROUP BY campus_id EXCEPT SELECT campus_id, n FROM _before_profiles)
+    UNION ALL
+    (SELECT campus_id, n FROM _before_profiles EXCEPT SELECT campus_id, count(*) FROM public.profiles GROUP BY campus_id)
+  ) THEN
+    RAISE EXCEPTION 'PROFILES_REASSIGNED';
+  END IF;
+  IF EXISTS (
+    (SELECT institution_id, count(*) FROM public.events GROUP BY institution_id EXCEPT SELECT institution_id, n FROM _before_events)
+    UNION ALL
+    (SELECT institution_id, n FROM _before_events EXCEPT SELECT institution_id, count(*) FROM public.events GROUP BY institution_id)
+  ) THEN
+    RAISE EXCEPTION 'EVENTS_REASSIGNED';
+  END IF;
+END $$;
+
+-- Reporte (el SQL Editor muestra este resultado)
+SELECT entity, action, sum(n) AS n FROM _report GROUP BY entity, action ORDER BY entity, action;
+
+COMMIT;
+
+-- >>> 20260918000000_ver-asistentes.sql <<<
+-- ============================================================
+-- Ver quien va a un evento antes de unirse
+--
+-- Hasta aqui la lista de asistentes solo la veian quien organiza y quien
+-- ya estaba dentro: la RLS de event_participants no deja leer mas.
+--
+-- Decision de Sebastian (2026-09-15): la ve cualquiera que pueda ver el
+-- evento. Por eso no se abre la tabla, sino una funcion que devuelve lo
+-- justo:
+--   * solo nombre y foto (lo mismo que ya ensena public_profiles), sin
+--     valoraciones, check-in ni fecha de union;
+--   * solo quien esta dentro (status = 'joined'): las solicitudes
+--     pendientes y rechazadas no salen;
+--   * nunca personas bloqueadas con quien pregunta, en ningun sentido;
+--   * si el evento no se puede ver, no devuelve nada (ni un error que
+--     confirme que existe).
+--
+-- La condicion de "puede ver el evento" copia la politica
+-- "Events visibility policy" (20260829000000_institution-isolation.sql).
+-- Si esa politica cambia, esta funcion tiene que cambiar con ella; la
+-- prueba src/test/eventAttendees.sql.test.ts las compara fila a fila.
+--
+-- No toca ninguna tabla ni politica existente. ASCII puro e idempotente.
+-- ============================================================
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.event_attendees(_event_id uuid)
+RETURNS TABLE (
+  user_id     uuid,
+  name        text,
+  avatar_url  text,
+  is_creator  boolean
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  WITH ev AS (
+    SELECT e.id, e.creator_id
+    FROM public.events e
+    WHERE e.id = _event_id
+      AND auth.uid() IS NOT NULL
+      AND (
+        e.creator_id = auth.uid()
+        OR (
+          NOT public.is_blocked(auth.uid(), e.creator_id)
+          AND public.same_institution(auth.uid(), e.creator_id)
+          AND (
+            e.privacy IN ('open', 'private')
+            OR (e.privacy = 'friends' AND public.are_friends(e.creator_id, auth.uid()))
+          )
+        )
+      )
+  ), gente AS (
+    -- Quien organiza no tiene fila en event_participants: va aparte y primero.
+    SELECT ev.creator_id AS uid, true AS organiza, NULL::timestamptz AS desde
+    FROM ev
+    UNION ALL
+    SELECT ep.user_id, false, ep.joined_at
+    FROM public.event_participants ep
+    JOIN ev ON ev.id = ep.event_id
+    WHERE ep.status = 'joined'
+      AND ep.user_id <> ev.creator_id
+  )
+  SELECT p.id, p.name, p.avatar_url, g.organiza
+  FROM gente g
+  JOIN public.profiles p ON p.id = g.uid
+  WHERE p.id = auth.uid()
+     OR NOT public.is_blocked(auth.uid(), p.id)
+  ORDER BY g.organiza DESC, g.desde ASC NULLS FIRST, p.id;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.event_attendees(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.event_attendees(uuid) TO authenticated;
+
+COMMIT;
+
+-- >>> 20260919000000_despues-del-evento.sql <<<
+-- ============================================================
+-- Despues del evento: repetir el plan y convertirlo en grupo
+--
+-- Decisiones de Sebastian (2026-09-15):
+--   * "Repetir el plan" crea un evento nuevo copiado del anterior y AVISA
+--     por push a quienes fueron la vez anterior.
+--   * "Convertir en grupo" crea un grupo e INVITA a quienes fueron; cada
+--     persona entra solo si acepta. Nadie aparece en un chat sin querer.
+--
+-- Lo que hay:
+--   1. events.repeated_from: de que evento sale. Solo lo puede poner quien
+--      organizo o se unio al original, y no se cambia despues.
+--   2. Push al publicar una repeticion, a quien fue y puede ver el evento
+--      nuevo. Una vez por original y persona cada 12 horas.
+--   3. groups.source_event_id y group_invites (sin acceso directo: todo
+--      por funciones).
+--   4. create_group_from_event, my_group_invites, respond_group_invite.
+--   5. notification_counts suma group_invites.
+--
+-- No borra ni reescribe datos. ASCII puro (textos con U&'...').
+-- Idempotente: se puede pegar dos veces.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. Repetir el plan
+-- ------------------------------------------------------------
+ALTER TABLE public.events
+  ADD COLUMN IF NOT EXISTS repeated_from uuid REFERENCES public.events(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS events_repeated_from_idx
+  ON public.events (repeated_from) WHERE repeated_from IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.guard_event_repeat()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.repeated_from IS DISTINCT FROM OLD.repeated_from THEN
+      RAISE EXCEPTION 'REPEAT_IMMUTABLE' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.repeated_from IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.events o
+    WHERE o.id = NEW.repeated_from
+      AND (
+        o.creator_id = NEW.creator_id
+        OR EXISTS (
+          SELECT 1 FROM public.event_participants ep
+          WHERE ep.event_id = o.id AND ep.user_id = NEW.creator_id AND ep.status = 'joined'
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'REPEAT_NOT_ALLOWED' USING ERRCODE = '42501';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_event_repeat() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_event_repeat ON public.events;
+CREATE TRIGGER trg_guard_event_repeat
+  BEFORE INSERT OR UPDATE OF repeated_from ON public.events
+  FOR EACH ROW EXECUTE FUNCTION public.guard_event_repeat();
+
+-- ------------------------------------------------------------
+-- 2. Aviso a quienes fueron
+--
+-- Solo a quien puede ver el evento nuevo (mismas reglas que
+-- "Events visibility policy"): repetir un plan como "solo amigos" no
+-- avisa a quien no es amigo. Tope de 100 avisos.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.on_event_repeat_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_who text;
+  r record;
+BEGIN
+  -- Publicar y borrar para volver a publicar no vuelve a avisar.
+  IF EXISTS (
+    SELECT 1 FROM public.events e
+    WHERE e.repeated_from = NEW.repeated_from
+      AND e.creator_id = NEW.creator_id
+      AND e.id <> NEW.id
+      AND e.created_at > now() - interval '12 hours'
+  ) THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT COALESCE(NULLIF(p.name, ''), 'Alguien') INTO v_who
+  FROM public.profiles p WHERE p.id = NEW.creator_id;
+
+  FOR r IN
+    SELECT DISTINCT g.uid
+    FROM (
+      SELECT o.creator_id AS uid FROM public.events o WHERE o.id = NEW.repeated_from
+      UNION
+      SELECT ep.user_id FROM public.event_participants ep
+      WHERE ep.event_id = NEW.repeated_from AND ep.status = 'joined'
+    ) g
+    WHERE g.uid <> NEW.creator_id
+      AND NOT public.is_blocked(g.uid, NEW.creator_id)
+      AND public.same_institution(g.uid, NEW.creator_id)
+      AND (
+        NEW.privacy IN ('open', 'private')
+        OR (NEW.privacy = 'friends' AND public.are_friends(NEW.creator_id, g.uid))
+      )
+    LIMIT 100
+  LOOP
+    PERFORM public.push_send(
+      r.uid,
+      'Se repite un plan',
+      COALESCE(v_who, 'Alguien') || U&' organiz\00F3 otra vez \00AB' || NEW.title || U&'\00BB. \00BFTe apuntas?',
+      jsonb_build_object('type', 'event_repeat', 'event_id', NEW.id)
+    );
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.on_event_repeat_push() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_event_repeat_push ON public.events;
+CREATE TRIGGER trg_event_repeat_push
+  AFTER INSERT ON public.events
+  FOR EACH ROW
+  WHEN (NEW.repeated_from IS NOT NULL)
+  EXECUTE FUNCTION public.on_event_repeat_push();
+
+-- ------------------------------------------------------------
+-- 3. Grupos que salen de un evento, e invitaciones
+-- ------------------------------------------------------------
+ALTER TABLE public.groups
+  ADD COLUMN IF NOT EXISTS source_event_id uuid REFERENCES public.events(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS public.group_invites (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id        uuid NOT NULL REFERENCES public.groups(id) ON DELETE CASCADE,
+  inviter_id      uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  invitee_id      uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  source_event_id uuid REFERENCES public.events(id) ON DELETE SET NULL,
+  status          text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'declined')),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  responded_at    timestamptz,
+  UNIQUE (group_id, invitee_id),
+  CONSTRAINT group_invites_no_self CHECK (inviter_id <> invitee_id)
+);
+
+CREATE INDEX IF NOT EXISTS group_invites_pending_idx
+  ON public.group_invites (invitee_id) WHERE status = 'pending';
+
+-- Sin politicas: ni se lee ni se escribe directo, solo por las funciones.
+ALTER TABLE public.group_invites ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.group_invites FROM PUBLIC, anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 4a. create_group_from_event
+--
+-- Quien organizo o se unio a un evento que ya empezo crea el grupo, entra
+-- (lo mete trg_group_created_add_creator) e invita al resto. Llamarla dos
+-- veces para el mismo evento devuelve el mismo grupo: no se puede usar para
+-- mandar invitaciones en bucle.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.create_group_from_event(_event_id uuid, _name text DEFAULT NULL)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid   uuid := auth.uid();
+  v_ev    record;
+  v_group uuid;
+  v_name  text;
+  v_who   text;
+  r       record;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT e.id, e.title, e.creator_id, e.starts_at INTO v_ev
+  FROM public.events e WHERE e.id = _event_id;
+
+  -- Mismo error si no existe o si no fuiste: no confirma que exista. Van en
+  -- dos IF porque plpgsql no garantiza cortocircuito y leer v_ev sin fila
+  -- falla.
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'NOT_AN_ATTENDEE' USING ERRCODE = '42501';
+  END IF;
+  IF NOT (
+    v_ev.creator_id = v_uid
+    OR EXISTS (
+      SELECT 1 FROM public.event_participants ep
+      WHERE ep.event_id = _event_id AND ep.user_id = v_uid AND ep.status = 'joined'
+    )
+  ) THEN
+    RAISE EXCEPTION 'NOT_AN_ATTENDEE' USING ERRCODE = '42501';
+  END IF;
+
+  IF v_ev.starts_at > now() THEN
+    RAISE EXCEPTION 'EVENT_NOT_STARTED' USING ERRCODE = 'P0001';
+  END IF;
+
+  SELECT g.id INTO v_group
+  FROM public.groups g
+  WHERE g.source_event_id = _event_id AND g.created_by = v_uid
+  ORDER BY g.created_at
+  LIMIT 1;
+  IF v_group IS NOT NULL THEN
+    RETURN v_group;
+  END IF;
+
+  v_name := left(btrim(COALESCE(_name, '')), 60);
+  IF v_name = '' THEN
+    v_name := left(v_ev.title, 60);
+  END IF;
+  -- Los DM son grupos '__dm_...': un nombre asi se colaria como DM.
+  IF v_name LIKE '\_\_dm\_%' THEN
+    RAISE EXCEPTION 'INVALID_NAME' USING ERRCODE = 'P0001';
+  END IF;
+
+  INSERT INTO public.groups (name, created_by, source_event_id)
+  VALUES (v_name, v_uid, _event_id)
+  RETURNING id INTO v_group;
+
+  SELECT COALESCE(NULLIF(p.name, ''), 'Alguien') INTO v_who
+  FROM public.profiles p WHERE p.id = v_uid;
+
+  FOR r IN
+    SELECT DISTINCT g.uid
+    FROM (
+      SELECT v_ev.creator_id AS uid
+      UNION
+      SELECT ep.user_id FROM public.event_participants ep
+      WHERE ep.event_id = _event_id AND ep.status = 'joined'
+    ) g
+    WHERE g.uid <> v_uid
+      AND NOT public.is_blocked(v_uid, g.uid)
+    LIMIT 100
+  LOOP
+    INSERT INTO public.group_invites (group_id, inviter_id, invitee_id, source_event_id)
+    VALUES (v_group, v_uid, r.uid, _event_id)
+    ON CONFLICT (group_id, invitee_id) DO NOTHING;
+
+    PERFORM public.push_send(
+      r.uid,
+      'Te invitaron a un grupo',
+      COALESCE(v_who, 'Alguien') || U&' te invit\00F3 a \00AB' || v_name || U&'\00BB',
+      jsonb_build_object('type', 'group_invite', 'group_id', v_group)
+    );
+  END LOOP;
+
+  RETURN v_group;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.create_group_from_event(uuid, text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.create_group_from_event(uuid, text) TO authenticated;
+
+-- ------------------------------------------------------------
+-- 4b. my_group_invites: las pendientes, sin las de gente bloqueada.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.my_group_invites()
+RETURNS TABLE (
+  invite_id      uuid,
+  group_id       uuid,
+  group_name     text,
+  inviter_id     uuid,
+  inviter_name   text,
+  inviter_avatar text,
+  event_title    text,
+  created_at     timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT gi.id, gi.group_id, g.name, gi.inviter_id, p.name, p.avatar_url, e.title, gi.created_at
+  FROM public.group_invites gi
+  JOIN public.groups g ON g.id = gi.group_id
+  JOIN public.profiles p ON p.id = gi.inviter_id
+  LEFT JOIN public.events e ON e.id = gi.source_event_id
+  WHERE gi.invitee_id = auth.uid()
+    AND gi.status = 'pending'
+    AND NOT public.is_blocked(auth.uid(), gi.inviter_id)
+  ORDER BY gi.created_at DESC;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.my_group_invites() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.my_group_invites() TO authenticated;
+
+-- ------------------------------------------------------------
+-- 4c. respond_group_invite: aceptar mete en el grupo; rechazar no avisa.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.respond_group_invite(_invite_id uuid, _accept boolean)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_inv record;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT gi.id, gi.group_id, gi.inviter_id, gi.status INTO v_inv
+  FROM public.group_invites gi
+  WHERE gi.id = _invite_id AND gi.invitee_id = v_uid
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'INVITE_NOT_FOUND' USING ERRCODE = 'P0002';
+  END IF;
+  IF public.is_blocked(v_uid, v_inv.inviter_id) THEN
+    RAISE EXCEPTION 'INVITE_NOT_FOUND' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF v_inv.status <> 'pending' THEN
+    IF v_inv.status = 'accepted' AND _accept THEN
+      RETURN v_inv.group_id;
+    END IF;
+    RAISE EXCEPTION 'INVITE_ALREADY_ANSWERED' USING ERRCODE = 'P0001';
+  END IF;
+
+  UPDATE public.group_invites
+  SET status = CASE WHEN _accept THEN 'accepted' ELSE 'declined' END,
+      responded_at = now()
+  WHERE id = v_inv.id;
+
+  IF _accept THEN
+    INSERT INTO public.group_members (group_id, user_id)
+    VALUES (v_inv.group_id, v_uid)
+    ON CONFLICT (group_id, user_id) DO NOTHING;
+    RETURN v_inv.group_id;
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.respond_group_invite(uuid, boolean) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.respond_group_invite(uuid, boolean) TO authenticated;
+
+-- ------------------------------------------------------------
+-- 5. notification_counts con group_invites
+--
+-- Cambia la forma del resultado, asi que hay que borrarla y crearla. Las
+-- cuatro columnas de antes quedan igual y en el mismo orden: la version de
+-- la App Store ignora la nueva.
+-- ------------------------------------------------------------
+DROP FUNCTION IF EXISTS public.notification_counts();
+
+CREATE FUNCTION public.notification_counts()
+RETURNS TABLE (
+  join_requests   bigint,
+  friend_requests bigint,
+  unread_messages bigint,
+  approvals       bigint,
+  group_invites   bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT
+    (SELECT count(*)
+       FROM public.event_participants p
+       JOIN public.events e ON e.id = p.event_id
+      WHERE e.creator_id = auth.uid()
+        AND e.is_active
+        AND p.status = 'pending'),
+
+    (SELECT count(*)
+       FROM public.friendships f
+      WHERE f.addressee_id = auth.uid()
+        AND f.status = 'pending'
+        AND NOT public.is_blocked(auth.uid(), f.requester_id)),
+
+    (SELECT count(*)
+       FROM public.group_members gm
+       JOIN public.messages m ON m.group_id = gm.group_id
+      WHERE gm.user_id   = auth.uid()
+        AND m.sender_id <> auth.uid()
+        AND m.created_at > gm.last_read_at
+        AND m.deleted_at IS NULL
+        AND NOT public.is_blocked(auth.uid(), m.sender_id)),
+
+    (SELECT count(*)
+       FROM public.event_participants p
+       JOIN public.events e ON e.id = p.event_id
+      WHERE p.user_id = auth.uid()
+        AND p.approved_at IS NOT NULL
+        AND p.approval_seen = false
+        AND e.is_active),
+
+    (SELECT count(*)
+       FROM public.group_invites gi
+      WHERE gi.invitee_id = auth.uid()
+        AND gi.status = 'pending'
+        AND NOT public.is_blocked(auth.uid(), gi.inviter_id));
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.notification_counts() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.notification_counts() TO authenticated;
+
+COMMIT;
+
+-- >>> 20260920000000_perfiles-huerfanos.sql <<<
+-- ============================================================
+-- Cuentas sin perfil: rellenar las que faltan y cerrar el agujero
+--
+-- El problema (detectado el 2026-09-18 auditando event_participants):
+-- hay filas en auth.users sin su fila en public.profiles. Como
+-- public.same_institution() resuelve la pertenencia leyendo profiles,
+-- sin perfil devuelve false siempre y la RLS de events, public_profiles
+-- y el chat dejan de mostrarle a esa persona lo de su propio campus. La
+-- app se le ve medio vacia y no falla nada visible.
+--
+-- Que puede dejar a una cuenta asi. Repasadas todas las versiones de
+-- handle_new_user() (20260325, 20260828, 20260907, 20260915, 20260917):
+--
+--   a) NO es que el disparador falle en silencio. No tiene ningun
+--      EXCEPTION WHEN OTHERS, y si el INSERT revienta se lleva por
+--      delante la transaccion entera del alta: no queda huerfana, es que
+--      no hay cuenta (GoTrue devuelve "Database error saving new user").
+--      El caso tipico es profiles.email NOT NULL con NEW.email nulo, que
+--      pasa en las altas sin correo (anonima, telefono, o un idToken de
+--      Apple sin claim de email). Eso rompe el alta, no la deja a medias.
+--      Aun asi se arregla abajo: un alta sin correo no deberia tumbarse.
+--
+--   b) SI dejan huerfanas, y son las que explican lo que se ve:
+--      * cualquier camino que se salte el disparador, o sea cualquier
+--        sesion con session_replication_role = 'replica': restauraciones,
+--        PITR, pg_restore y la importacion de datos del panel;
+--      * borrar a mano una fila de public.profiles. La clave ajena
+--        profiles.id -> auth.users(id) cae en cascada hacia abajo, pero
+--        nada impedia el borrado en el otro sentido;
+--      * cuentas anteriores al 2026-03-25, cuando no existia el
+--        disparador.
+--
+--   c) Un segundo agujero silencioso, del mismo estilo:
+--      sync_profile_verified() hace UPDATE profiles WHERE id = NEW.user_id,
+--      que sin perfil es un no-op sin error. Se queda una afiliacion
+--      verificada cuyo perfil no existe. Lo arregla el relleno de abajo.
+--
+-- Lo que hace esta migracion:
+--   1. backfill_missing_profiles(): crea los perfiles que faltan y pasa
+--      cada uno por la misma via que un alta normal.
+--   2. Lo ejecuta una vez.
+--   3. Endurece handle_new_user(): correo ausente no tumba el alta, y
+--      repetir el INSERT no rompe. SIN EXCEPTION WHEN OTHERS a proposito
+--      (ver el comentario del punto 3).
+--   4. Prohibe borrar un perfil mientras su cuenta siga viva.
+--
+-- ASCII puro. Idempotente: se puede pegar dos veces.
+-- Diagnostico previo: supabase/setup/diagnostico-perfiles-huerfanos.sql
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. Rellenar los que faltan
+--
+-- En funcion y no suelto porque hace falta tres veces: aqui, en el
+-- trabajo programado de 20260920010000, y a mano si algun dia se
+-- restaura un backup.
+--
+-- No toca las cuentas borradas en blando (deleted_at): resucitarles el
+-- perfil las devolveria a la vista publica. La columna se lee via
+-- to_jsonb() porque no existe en todas las versiones de GoTrue y
+-- nombrarla directamente haria fallar la funcion entera.
+--
+-- El correo va con coalesce a cadena vacia por profiles.email NOT NULL.
+-- Vacio es exacto: esa cuenta no tiene correo. No casa con ningun
+-- dominio, asi que institution_for_email() y student_id_for_email()
+-- devuelven NULL igual que siempre.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.backfill_missing_profiles()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_ids uuid[];
+  v_id  uuid;
+BEGIN
+  WITH creados AS (
+    INSERT INTO public.profiles (id, email)
+    SELECT u.id, coalesce(u.email, '')
+    FROM auth.users u
+    WHERE NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = u.id)
+      AND (to_jsonb(u) ->> 'deleted_at') IS NULL
+    ON CONFLICT (id) DO NOTHING
+    RETURNING id
+  )
+  SELECT array_agg(id) INTO v_ids FROM creados;
+
+  IF v_ids IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- Antes de nada, lo que ya se sabia de esa persona. Una cuenta huerfana
+  -- puede tener su fila en profile_affiliations: sin perfil,
+  -- sync_profile_verified() no tenia donde escribir (ver el punto c de la
+  -- cabecera) y apply_auth_email_affiliation() se corta en
+  -- 'already_verified' sin llegar a asignar campus. Si no se copia aqui, el
+  -- perfil nace vacio y same_institution() le sigue diciendo que no a todo:
+  -- la fila existiria y la app se le veria igual de rota.
+  UPDATE public.profiles p
+  SET campus_id            = coalesce(p.campus_id, a.campus_id),
+      institution_verified = (a.status = 'verified'),
+      student_id           = coalesce(
+                               p.student_id,
+                               CASE WHEN a.status = 'verified'
+                                    THEN public.student_id_for_email(u.email) END)
+  FROM public.profile_affiliations a
+  JOIN auth.users u ON u.id = a.user_id
+  WHERE a.user_id = p.id
+    AND p.id = ANY (v_ids);
+
+  -- Y ahora cada perfil pasa por la misma via que un alta de hoy:
+  -- si su correo de acceso esta confirmado y es de un dominio
+  -- institucional, queda adscrito a su campus y verificado. Si no, se
+  -- queda sin verificar, como cualquier cuenta con correo generico.
+  -- Esto es lo que les devuelve su comunidad: sin campus_id,
+  -- same_institution() les seguiria diciendo que no a todo.
+  --
+  -- El EXCEPTION de dentro del bucle es deliberado y NO es el que se
+  -- critica arriba: esta acotado a un paso accesorio, avisa en vez de
+  -- callarse, y lo que protege es el perfil, que ya esta creado. Sin el,
+  -- una sola afiliacion rara abortaria el relleno de todos los demas.
+  FOREACH v_id IN ARRAY v_ids LOOP
+    BEGIN
+      PERFORM public.apply_auth_email_affiliation(v_id);
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'backfill_missing_profiles: afiliacion de % no resuelta (%)', v_id, SQLERRM;
+    END;
+  END LOOP;
+
+  RETURN array_length(v_ids, 1);
+END;
+$$;
+
+COMMENT ON FUNCTION public.backfill_missing_profiles() IS
+  'Crea la fila de public.profiles de las cuentas de auth.users que no la tienen y resuelve su afiliacion. Idempotente. La llama el trabajo programado reconciliar-perfiles.';
+
+REVOKE EXECUTE ON FUNCTION public.backfill_missing_profiles() FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 2. Ejecutarlo ahora
+-- ------------------------------------------------------------
+DO $$
+DECLARE
+  v_n integer;
+BEGIN
+  v_n := public.backfill_missing_profiles();
+  RAISE NOTICE 'perfiles creados: %', v_n;
+END $$;
+
+
+-- ------------------------------------------------------------
+-- 3. Que no vuelva a pasar en el alta
+--
+-- Dos cambios, los dos pequenos:
+--
+--   * coalesce(NEW.email, ''): un alta sin correo (anonima, por telefono,
+--     o un idToken de Apple sin claim de email) ya no choca contra
+--     profiles.email NOT NULL. Antes eso no dejaba huerfana a la cuenta
+--     (tumbaba el alta entera), pero tumbar el alta tampoco vale.
+--
+--   * ON CONFLICT (id) DO NOTHING: si el perfil ya existe, no revienta.
+--     Hace falta para que el relleno y el disparador puedan cruzarse sin
+--     pisarse.
+--
+-- Lo que NO lleva, a proposito: un EXCEPTION WHEN OTHERS envolviendo el
+-- INSERT. Seria justo el bug que se esta arreglando: convertiria
+-- cualquier fallo futuro en una cuenta huerfana silenciosa, que es lo
+-- que ha costado una auditoria de event_participants encontrar. Si este
+-- INSERT llega a fallar algun dia, que se note en el alta.
+--
+-- El disparador se recrea en vez de darse por existente: asi esta
+-- migracion tambien sirve si alguien lo borro o lo dejo desactivado
+-- (DROP + CREATE lo devuelve a estado activo).
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email)
+  VALUES (NEW.id, coalesce(NEW.email, ''))
+  ON CONFLICT (id) DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+
+-- ------------------------------------------------------------
+-- 4. Que no se pueda borrar un perfil con la cuenta viva
+--
+-- La clave ajena profiles.id -> auth.users(id) ON DELETE CASCADE cubre
+-- un sentido: borrar la cuenta borra el perfil. El otro estaba abierto,
+-- y borrar una fila de profiles desde el panel o el SQL Editor dejaba a
+-- esa persona con la app rota sin ningun aviso.
+--
+-- El borrado de cuenta de verdad sigue funcionando: cuando la cascada
+-- llega aqui, la fila de auth.users ya no esta en la transaccion, asi
+-- que el EXISTS da false y deja pasar. Hay una prueba que lo fija
+-- (src/test/perfilesHuerfanos.sql.test.ts).
+--
+-- Si alguna vez hace falta borrar un perfil de verdad, se quita el
+-- disparador, se borra, y se vuelve a poner.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.prevent_orphan_profile_delete()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM auth.users u WHERE u.id = OLD.id) THEN
+    RAISE EXCEPTION 'no se puede borrar el perfil mientras la cuenta siga existiendo: borra la cuenta y el perfil cae en cascada'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN OLD;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.prevent_orphan_profile_delete() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_prevent_orphan_profile_delete ON public.profiles;
+CREATE TRIGGER trg_prevent_orphan_profile_delete
+  BEFORE DELETE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_orphan_profile_delete();
+
+COMMIT;
+
+-- >>> 20260920010000_reconciliar-perfiles-cron.sql <<<
+-- ============================================================
+-- Programar la reconciliacion de perfiles.
+--
+-- Va en su propio script a proposito, por lo mismo que
+-- 20260825010000_schedule-message-purge.sql: el SQL Editor ejecuta cada
+-- uno dentro de una transaccion, y si CREATE EXTENSION pg_cron fallara
+-- se llevaria por delante el relleno y el endurecimiento de
+-- 20260920000000, que son lo que de verdad importa.
+--
+-- Que cubre esto que no cubra ya la migracion anterior: el disparador
+-- endurecido protege las altas normales, y el guardia de borrado protege
+-- contra borrar un perfil a mano. Queda un camino que ninguno de los dos
+-- puede tapar desde dentro de la base: una sesion con
+-- session_replication_role = 'replica' no ejecuta el disparador. Asi se
+-- restaura un backup, asi hace PITR Supabase y asi importa datos el
+-- panel. Si eso pasa, nadie se entera hasta que alguien audita a mano;
+-- con esto, se arregla solo a la manana siguiente.
+--
+-- Si esto falla no pasa nada grave: basta con llamar a
+-- backfill_missing_profiles() a mano de vez en cuando, o programarlo
+-- desde Database > Cron Jobs en el panel de Supabase.
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+-- unschedule falla si el trabajo no existe, de ahi el envoltorio.
+DO $$
+BEGIN
+  PERFORM cron.unschedule('reconciliar-perfiles');
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
+
+SELECT cron.schedule(
+  'reconciliar-perfiles',
+  '43 4 * * *',                       -- 04:43 cada dia, despues del purgado
+  $$SELECT public.backfill_missing_profiles()$$
+);
+
+-- >>> 20260921000000_push-empieza-el-evento.sql <<<
+-- ============================================================
+-- Avisar por push cuando el evento empieza
+--
+-- Por que: el boton de "Registrar asistencia" solo existe dentro de la
+-- hoja del evento y solo mientras el evento esta en curso. Nada avisaba
+-- de que habia llegado ese momento, asi que habia que acordarse de abrir
+-- la app, buscar el evento y tocar. Medido el 2026-09-19: 43 eventos, 24
+-- ocasiones reales de hacer check-in, y CERO check-ins en toda la vida
+-- del proyecto. No fallaba nada: es que no se podia pulsar.
+--
+-- Por que un trabajo programado y no un disparador: "el evento empieza"
+-- no es un cambio en la base. Nadie escribe nada a las 19:00; sencillamente
+-- llega la hora. Los cuatro push de 20260827 cuelgan de un INSERT o un
+-- UPDATE, y aqui no hay ninguno al que engancharse. De ahi pg_cron, como
+-- el purgado de mensajes.
+--
+-- Lo que NO hace, a proposito:
+--   * No avisa a quien organiza: no puede hacer check-in (la interfaz se
+--     lo oculta con !isCreator y no tiene fila en event_participants).
+--   * No avisa a quien ya hizo check-in en esos primeros minutos.
+--   * No filtra por is_blocked: no es un aviso de otra persona, es el
+--     recordatorio de un plan al que te apuntaste tu.
+--
+-- ASCII puro (textos con U&'...'). Idempotente: se puede pegar dos veces.
+-- La programacion va aparte, en 20260921010000.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. La marca de "ya avisado"
+--
+-- En events y no en event_participants: el aviso se decide por evento
+-- (una pasada, una marca) aunque se mande a varias personas. Quien se
+-- una despues de que salga el aviso no lo recibe, y esta bien: se apunto
+-- con el evento ya empezado.
+-- ------------------------------------------------------------
+ALTER TABLE public.events
+  ADD COLUMN IF NOT EXISTS start_push_sent_at timestamptz;
+
+COMMENT ON COLUMN public.events.start_push_sent_at IS
+  'Cuando salio el aviso de "ya empezo". NULL = todavia no. Lo escribe notify_started_events().';
+
+-- Los eventos que YA empezaron cuando se aplica esto quedan marcados sin
+-- mandar nada. Sin esto, la primera pasada del cron avisaria de golpe de
+-- 34 eventos viejos, la mayoria terminados hace semanas. Los futuros se
+-- quedan en NULL y avisaran cuando les toque, que es lo que se quiere.
+UPDATE public.events
+SET start_push_sent_at = now()
+WHERE start_push_sent_at IS NULL
+  AND starts_at <= now();
+
+-- La consulta del cron solo mira los no avisados: un indice parcial la
+-- deja en nada por muchos eventos que se acumulen con el tiempo.
+CREATE INDEX IF NOT EXISTS events_start_push_pendiente_idx
+  ON public.events (starts_at)
+  WHERE start_push_sent_at IS NULL;
+
+
+-- ------------------------------------------------------------
+-- 2. El aviso
+--
+-- El UPDATE ... RETURNING de la CTE es lo que hace esto seguro: marca y
+-- reclama los eventos en la misma sentencia, asi que si dos pasadas del
+-- cron llegaran a solaparse, la segunda no ve ninguno y nadie recibe el
+-- aviso dos veces. Marcar antes de mandar y no despues es deliberado:
+-- push_send() ya se traga sus propios errores (se queda en WARNING), asi
+-- que "marcado pero no enviado" es el fallo bueno y "enviado dos veces"
+-- el malo.
+--
+-- Las dos ventanas:
+--   * ends_at > now()  -- si ya termino, no hay nada que registrar.
+--   * starts_at > now() - 1 hora  -- si el cron estuvo caido medio dia,
+--     que no llegue "ya empezo" de algo que empezo esta manana.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.notify_started_events()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r record;
+  v_n integer := 0;
+BEGIN
+  FOR r IN
+    WITH reclamados AS (
+      UPDATE public.events e
+      SET start_push_sent_at = now()
+      WHERE e.start_push_sent_at IS NULL
+        AND e.is_active
+        AND e.starts_at <= now()
+        AND e.starts_at > now() - interval '1 hour'
+        AND e.ends_at   > now()
+      RETURNING e.id, e.title, e.creator_id
+    )
+    SELECT rc.id AS event_id, rc.title, ep.user_id
+    FROM reclamados rc
+    JOIN public.event_participants ep ON ep.event_id = rc.id
+    WHERE ep.status = 'joined'
+      AND ep.user_id <> rc.creator_id
+      AND NOT ep.checked_in
+  LOOP
+    PERFORM public.push_send(
+      r.user_id,
+      U&'Ya empez\00F3',
+      U&'\00AB' || COALESCE(r.title, 'Tu plan') || U&'\00BB ya empez\00F3. Registra tu asistencia para sumar puntos.',
+      jsonb_build_object('type', 'event_started', 'event_id', r.event_id)
+    );
+    v_n := v_n + 1;
+  END LOOP;
+
+  RETURN v_n;
+END;
+$$;
+
+COMMENT ON FUNCTION public.notify_started_events() IS
+  'Avisa por push a quien se unio a un evento que acaba de empezar, para que registre su asistencia. Idempotente por events.start_push_sent_at. La llama el trabajo programado avisar-inicio-evento.';
+
+REVOKE EXECUTE ON FUNCTION public.notify_started_events() FROM PUBLIC, anon, authenticated;
+
+COMMIT;
+
+-- >>> 20260921010000_programar-push-inicio.sql <<<
+-- ============================================================
+-- Programar el aviso de "ya empezo el evento".
+--
+-- Va en su propio script por lo mismo que 20260825010000 y 20260920010000:
+-- el SQL Editor ejecuta cada uno dentro de una transaccion, y si
+-- CREATE EXTENSION pg_cron fallara se llevaria por delante la columna, el
+-- indice y la funcion de 20260921000000, que es lo que de verdad importa.
+--
+-- Cada 5 minutos, no cada minuto: el aviso llega entre 0 y 5 minutos
+-- despues de la hora de inicio, que para un evento de 2 horas (la mediana
+-- medida) no se nota, y son 288 pasadas al dia en vez de 1440. La consulta
+-- ademas va por indice parcial sobre los no avisados, asi que cuando no
+-- hay nada que hacer no cuesta nada.
+--
+-- Si esto falla no pasa nada grave: la funcion esta puesta y se puede
+-- llamar a mano, o programar desde Database > Cron Jobs en el panel.
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+-- unschedule falla si el trabajo no existe, de ahi el envoltorio.
+DO $$
+BEGIN
+  PERFORM cron.unschedule('avisar-inicio-evento');
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
+
+SELECT cron.schedule(
+  'avisar-inicio-evento',
+  '*/5 * * * *',
+  $$SELECT public.notify_started_events()$$
+);

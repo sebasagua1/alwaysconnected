@@ -29,12 +29,18 @@ import { cn } from '@/lib/utils';
 import { UserAvatar } from '@/components/ui/user-avatar';
 import { formatOrigin } from '@/lib/origin';
 import { pageTitle } from '@/lib/brand';
+import { VerificationCard } from '@/components/profile/VerificationCard';
+import { VerifyInstitutionSheet } from '@/components/profile/VerifyInstitutionSheet';
+import { formatAffiliation, type VerificationState } from '@/lib/institutions';
+import { BADGE_TARGETS, badgeProgress, type MyParticipation } from '@/lib/badges';
+import type { BadgeType } from '@/lib/categoryIcons';
 
 export default function Profile() {
   const { profile, signOut, fetchProfile } = useAuthStore();
   const { t, i18n } = useTranslation();
   const [stats, setStats] = useState({ attended: 0, created: 0 });
   const [badges, setBadges] = useState<string[]>([]);
+  const [progress, setProgress] = useState<Record<BadgeType, number> | null>(null);
   const [pointsHistory, setPointsHistory] = useState<{ id: string; points: number; reason: string; created_at: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [editOpen, setEditOpen] = useState(false);
@@ -44,9 +50,22 @@ export default function Profile() {
   const [deleting, setDeleting] = useState(false);
   const { toast } = useToast();
   const originLabel = formatOrigin(profile?.origin, i18n.language || 'es');
+  const [verification, setVerification] = useState<VerificationState | null>(null);
+  const [verificationLoading, setVerificationLoading] = useState(true);
+  const [verifyOpen, setVerifyOpen] = useState(false);
+
+  // El estado de la verificación institucional. Si falla, la tarjeta cae a
+  // "Falta verificar": invitar de más no rompe nada; esconderla sí.
+  const loadVerification = async () => {
+    const { data, error } = await supabase.rpc('my_institution_verification');
+    if (error) console.error('my_institution_verification:', error.message);
+    setVerification(data?.[0] ?? null);
+    setVerificationLoading(false);
+  };
 
   useEffect(() => {
     fetchProfile();
+    loadVerification();
   }, [fetchProfile]);
 
   useEffect(() => {
@@ -84,6 +103,23 @@ export default function Profile() {
           .eq('user_id', profile.id);
         if (cancelada) return;
         if (badgeData) setBadges(badgeData.map((b) => b.badge_type));
+
+        // Para decir cuánto falta en cada insignia bloqueada. Solo las filas
+        // propias, que la RLS ya deja leer.
+        const { data: mine } = await supabase
+          .from('event_participants')
+          .select('status, checked_in, joined_at, events(category)')
+          .eq('user_id', profile.id);
+        if (cancelada) return;
+        if (mine) {
+          const rows: MyParticipation[] = mine.map((r) => ({
+            status: r.status,
+            checked_in: r.checked_in,
+            joined_at: r.joined_at,
+            category: (r.events as { category: string } | null)?.category ?? null,
+          }));
+          setProgress(badgeProgress(created ?? 0, rows));
+        }
 
         const { data: historyData } = await supabase
           .from('point_events')
@@ -189,6 +225,9 @@ export default function Profile() {
           />
           <div className="flex-1">
             <h2 className="text-lg font-extrabold text-foreground">{profile.name ?? t('profile.student')}</h2>
+            {verification && formatAffiliation(verification, t) && (
+              <p className="text-sm font-semibold text-foreground/80">{formatAffiliation(verification, t)}</p>
+            )}
             <p className="text-sm text-muted-foreground">{profile.major ?? t('profile.noMajor')}</p>
             <p className="text-xs text-muted-foreground">
               {profile.residence_type ? t('residence.' + profile.residence_type) : ''}
@@ -226,6 +265,11 @@ export default function Profile() {
           </div>
         )}
       </div>
+
+      <VerificationCard state={verification} loading={verificationLoading} onOpen={() => setVerifyOpen(true)} />
+      {verifyOpen && (
+        <VerifyInstitutionSheet onClose={() => setVerifyOpen(false)} onChanged={loadVerification} />
+      )}
 
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-3 mb-5">
@@ -280,19 +324,44 @@ export default function Profile() {
       {/* Badges */}
       <div className="bg-card rounded-2xl p-5 shadow-soft">
         <h3 className="text-sm font-bold text-foreground mb-3">{t('profile.badges')}</h3>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           {BADGE_DEFINITIONS.map(badge => {
             const earned = badges.includes(badge.type);
+            const target = BADGE_TARGETS[badge.type];
+            const current = earned ? target : progress?.[badge.type] ?? 0;
+            const Icon = BADGE_ICONS[badge.type];
             return (
               <div
                 key={badge.type}
                 className={cn(
-                  'flex flex-col items-center gap-1 p-3 rounded-xl text-center transition-all',
-                  earned ? 'bg-primary/5' : 'bg-muted/50 opacity-40'
+                  'flex flex-col gap-1.5 p-3 rounded-xl text-left',
+                  earned ? 'bg-primary/10' : 'bg-muted/50',
                 )}
               >
-                {(() => { const Icon = BADGE_ICONS[badge.type]; return <Icon className="w-7 h-7" />; })()}
-                <span className="text-xs font-bold text-foreground">{t('badges.' + badge.type)}</span>
+                <Icon aria-hidden="true" className={cn('w-6 h-6', earned ? 'text-primary' : 'text-muted-foreground/60')} />
+                <span className="text-xs font-bold text-foreground leading-tight">{t('badges.' + badge.type)}</span>
+                {/* Bloqueada no basta: sin decir cómo se gana, la insignia
+                    gris no invita a nada. */}
+                <span className="text-[11px] text-muted-foreground leading-snug">
+                  {earned ? t('badges.earned') : t(`badges.how.${badge.type}`, { count: target })}
+                </span>
+                {!earned && progress && (
+                  <div className="mt-auto pt-1">
+                    <div
+                      role="progressbar"
+                      aria-valuemin={0}
+                      aria-valuemax={target}
+                      aria-valuenow={current}
+                      aria-label={t('badges.progress', { current, target })}
+                      className="h-1.5 rounded-full bg-muted overflow-hidden"
+                    >
+                      <div className="h-full bg-primary rounded-full" style={{ width: `${(current / target) * 100}%` }} />
+                    </div>
+                    <span className="block mt-1 text-[11px] font-semibold text-muted-foreground">
+                      {current}/{target}
+                    </span>
+                  </div>
+                )}
               </div>
             );
           })}

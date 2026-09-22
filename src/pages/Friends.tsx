@@ -26,6 +26,7 @@ import type { Database } from '@/integrations/supabase/types';
 import { pageTitle } from '@/lib/brand';
 import { formatChatTime } from '@/lib/chat';
 import { FindPeople } from '@/components/friends/FindPeople';
+import { GroupInvites } from '@/components/chat/GroupInvites';
 
 type FriendData = Pick<
   Database['public']['Views']['public_profiles']['Row'],
@@ -62,7 +63,7 @@ type LeaderEntry = {
   id: string | null;
   name: string | null;
   avatar_url: string | null;
-  reputation: number;
+  points: number;
 };
 
 type ActiveTab = 'friends' | 'groups' | 'leaderboard';
@@ -77,6 +78,7 @@ export default function Friends() {
   const initialTab: ActiveTab = (location.state as { tab?: ActiveTab } | null)?.tab ?? 'friends';
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
   const unreadMessages = useNotificationStore((n) => n.unreadMessages);
+  const groupInvites = useNotificationStore((n) => n.groupInvites);
   const [friends, setFriends] = useState<Friend[]>([]);
   const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -234,9 +236,15 @@ export default function Friends() {
     try {
       const { data, error } = await supabase
         .from('public_profiles')
-        .select('id, name, avatar_url, reputation')
-        .order('reputation', { ascending: false })
-        // Desempate: sin él, dos personas con la misma reputación podían
+        // Ordena por `points`, NO por `reputation`. Son dos monedas distintas:
+        // `points` sube al unirse a un evento, organizarlo, calificarlo o hacer
+        // check-in — que es lo que la gente hace y ve subir en su perfil—;
+        // `reputation` solo sube si OTRO se une a TU evento (+2) o al hacer
+        // check-in (+5). Ordenando por reputación, quien solo asiste a eventos
+        // sumaba cientos de puntos y veía el Top congelado en 0.
+        .select('id, name, avatar_url, points')
+        .order('points', { ascending: false })
+        // Desempate: sin él, dos personas con los mismos puntos podían
         // intercambiarse entre páginas y salir dos veces, o ninguna.
         .order('id', { ascending: true })
         .range(offset, offset + LEADER_PAGE_SIZE - 1);
@@ -461,9 +469,9 @@ export default function Friends() {
             {tab === 'friends' && t('friends.tabFriends')}
             {tab === 'groups' && t('friends.tabGroups')}
             {tab === 'leaderboard' && t('friends.tabLeaderboard')}
-            {tab === 'friends' && pendingRequests.length > 0 && (
+            {tab === 'friends' && pendingRequests.length + groupInvites > 0 && (
               <span className="absolute -top-1 -right-1 w-5 h-5 bg-destructive text-destructive-foreground rounded-full text-xs font-bold flex items-center justify-center">
-                {pendingRequests.length}
+                {pendingRequests.length + groupInvites}
               </span>
             )}
           </button>
@@ -477,6 +485,8 @@ export default function Friends() {
           onMessage={handleMessageFriend}
         >
         <div className="space-y-4">
+          <GroupInvites />
+
           {pendingRequests.length > 0 && (
             <div className="space-y-2">
               <h2 className="text-sm font-semibold text-muted-foreground">
@@ -726,7 +736,7 @@ export default function Friends() {
                 />
                 <p className="flex-1 font-semibold text-sm text-foreground truncate">{entry.name}</p>
                 <span className="text-sm font-bold text-primary shrink-0">
-                  {entry.reputation} {t('leaderboard.pts')}
+                  {entry.points} {t('leaderboard.pts')}
                 </span>
               </button>
             ))
