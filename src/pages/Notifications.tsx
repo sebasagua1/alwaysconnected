@@ -16,6 +16,7 @@ import { useToast } from '@/hooks/use-toast';
 import { copyFor, inboxSection, routeForNotification, upsertInbox, type InboxItem } from '@/lib/notifications';
 import { pageTitle } from '@/lib/brand';
 import { cn } from '@/lib/utils';
+import { useStaggerReveal } from '@/hooks/useStaggerReveal';
 
 const PAGE = 30;
 
@@ -180,8 +181,13 @@ export default function Notifications() {
 
   let lastSection = '';
 
+  // Entrada en cascada, igual que en Mis Eventos, Amigos y la lista del mapa.
+  // Sin esto las notificaciones aparecían de golpe mientras el resto de la app
+  // las revela una detrás de otra.
+  const listScope = useStaggerReveal<HTMLDivElement>([filter, status]);
+
   return (
-    <div className="min-h-screen pb-nav px-4 pt-safe">
+    <div ref={listScope} className="min-h-screen pb-nav px-4 pt-safe">
       <Helmet><title>{pageTitle(t('notificationCenter.title'))}</title></Helmet>
 
       <div className="flex items-center gap-2 mb-4">
@@ -258,7 +264,7 @@ export default function Notifications() {
             const Icon = CATEGORY_ICON[n.category] ?? Bell;
             const unread = !n.read_at;
             return (
-              <li key={n.id} className="list-none">
+              <li key={n.id} data-reveal className="list-none">
                 {header && (
                   <h2 className="text-xs font-bold uppercase tracking-wide text-muted-foreground mt-4 mb-2 first:mt-0">
                     {t(`notificationCenter.section.${header}`)}

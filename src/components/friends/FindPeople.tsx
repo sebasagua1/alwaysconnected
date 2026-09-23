@@ -24,6 +24,7 @@ import { usePeopleSearch, type Relation } from '@/hooks/usePeopleSearch';
 import { useFriendActions } from '@/hooks/useFriendActions';
 import { rpcMessage } from '@/lib/rpcErrors';
 import { cn } from '@/lib/utils';
+import { useStaggerReveal } from '@/hooks/useStaggerReveal';
 
 /** Una persona tal como la pinta la lista, venga de la búsqueda o de las sugerencias. */
 export type Person = {
@@ -172,7 +173,7 @@ export function FindPeople({ children, onFriendsChanged, onMessage }: Props) {
     if (hidden.has(raw.id)) return null;
     const p = withOverride(raw);
     return (
-      <li key={p.id} className="flex items-center gap-2 bg-card rounded-xl p-3 shadow-soft">
+      <li key={p.id} data-reveal className="flex items-center gap-2 bg-card rounded-xl p-3 shadow-soft">
         <button
           type="button"
           onClick={() => setViewing(p)}
@@ -212,8 +213,13 @@ export function FindPeople({ children, onFriendsChanged, onMessage }: Props) {
   const showingResults = term.length > 0;
   const visibleResults = results.filter((r) => !hidden.has(r.id));
 
+  // Entrada en cascada de los resultados, como en el resto de listas de la
+  // app. Depende del término buscado y del estado: cada búsqueda nueva vuelve
+  // a revelar, en vez de sustituir las filas de golpe.
+  const listScope = useStaggerReveal<HTMLDivElement>([term, status]);
+
   return (
-    <div className="space-y-4">
+    <div ref={listScope} className="space-y-4">
       <form
         role="search"
         onSubmit={(e) => {
