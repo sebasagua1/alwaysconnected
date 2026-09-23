@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       funcion:
-        description: 'Qué función desplegar ("todas" para las tres)'
+        description: 'Qué función desplegar ("todas" para todas)'
         required: true
         default: 'send-push'
         type: choice
@@ -27,6 +27,7 @@ on:
           - send-push
           - delete-account
           - institution-verification
+          - contacts-match
           - todas
 
 # El ref del proyecto no es secreto: ya está en supabase/config.toml y en la

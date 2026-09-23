@@ -18,6 +18,12 @@ const MyEvents = lazy(() => import('@/pages/MyEvents'));
 const Friends = lazy(() => import('@/pages/Friends'));
 const Profile = lazy(() => import('@/pages/Profile'));
 const GroupChat = lazy(() => import('@/pages/GroupChat'));
+const EventChat = lazy(() => import('@/pages/EventChat'));
+const FindFriends = lazy(() => import('@/pages/FindFriends'));
+const InviteLanding = lazy(() => import('@/pages/InviteLanding'));
+const Notifications = lazy(() => import('@/pages/Notifications'));
+const NotificationSettings = lazy(() => import('@/pages/NotificationSettings'));
+const EventDetail = lazy(() => import('@/pages/EventDetail'));
 const NotFound = lazy(() => import('@/pages/NotFound'));
 const ResetPassword = lazy(() => import('@/pages/ResetPassword'));
 
@@ -100,11 +106,18 @@ const App = () => (
     <BrowserRouter>
       <Suspense fallback={<PageSpinner />}>
         <Routes>
+          {/* Pública: quien abre una invitación sin la app ni cuenta. */}
+          <Route path="/i/:code" element={<InviteLanding />} />
           <Route path="/*" element={<AuthGate />}>
             <Route index element={<MapHome />} />
             <Route path="events" element={<MyEvents />} />
             <Route path="friends" element={<Friends />} />
+            <Route path="friends/find" element={<FindFriends />} />
             <Route path="groups/:id" element={<GroupChat />} />
+            <Route path="events/:eventId/chat" element={<EventChat />} />
+            <Route path="event/:id" element={<EventDetail />} />
+            <Route path="notifications" element={<Notifications />} />
+            <Route path="settings/notifications" element={<NotificationSettings />} />
             <Route path="profile" element={<Profile />} />
             {/* Dentro de AuthGate a propósito: la ruta padre es "/*" y captura
                 todo, así que un "*" hermano nunca llegaba a evaluarse y una URL

@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { LogOut, Award, TrendingUp, Calendar, Star, Pencil, Zap, Ban, Trash2, FileText, Shield, Loader2, ChevronRight } from 'lucide-react';
+import { LogOut, Award, TrendingUp, Calendar, Star, Pencil, Zap, Ban, Trash2, FileText, Shield, Loader2, ChevronRight, Bell, Contact } from 'lucide-react';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
+import { useNavigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import { BADGE_ICONS } from '@/lib/categoryIcons';
 import { EditProfileSheet } from '@/components/profile/EditProfileSheet';
@@ -37,6 +39,7 @@ import type { BadgeType } from '@/lib/categoryIcons';
 
 export default function Profile() {
   const { profile, signOut, fetchProfile } = useAuthStore();
+  const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const [stats, setStats] = useState({ attended: 0, created: 0 });
   const [badges, setBadges] = useState<string[]>([]);
@@ -188,6 +191,7 @@ export default function Profile() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-extrabold text-foreground">{t('profile.title')}</h1>
         <div className="flex items-center gap-3">
+          <NotificationBell className="-m-1" />
           <LanguageSwitcher />
           <AlertDialog>
             <AlertDialogTrigger asChild>
@@ -405,6 +409,24 @@ export default function Profile() {
       {/* Cuenta, privacidad y seguridad */}
       <div className="bg-card rounded-2xl shadow-soft mt-5 overflow-hidden">
         <h3 className="text-sm font-bold text-foreground px-5 pt-5 pb-2">{t('account.title')}</h3>
+
+        <button
+          onClick={() => navigate('/settings/notifications')}
+          className="w-full flex items-center gap-3 px-5 py-3.5 border-t border-border text-left hover:bg-muted/40 transition-colors"
+        >
+          <Bell className="w-4 h-4 text-muted-foreground shrink-0" />
+          <span className="flex-1 text-sm font-medium text-foreground">{t('notificationSettings.title')}</span>
+          <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+        </button>
+
+        <button
+          onClick={() => navigate('/friends/find')}
+          className="w-full flex items-center gap-3 px-5 py-3.5 border-t border-border text-left hover:bg-muted/40 transition-colors"
+        >
+          <Contact className="w-4 h-4 text-muted-foreground shrink-0" />
+          <span className="flex-1 text-sm font-medium text-foreground">{t('findFriends.contactsSettings')}</span>
+          <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+        </button>
 
         <button
           onClick={() => setBlockedOpen(true)}

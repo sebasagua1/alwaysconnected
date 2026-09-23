@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { supabase } from '@/integrations/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/ui/password-input';
 import { Label } from '@/components/ui/label';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { useToast } from '@/hooks/use-toast';
@@ -248,9 +249,8 @@ export default function Auth() {
           {!forgot && (
             <div className="space-y-2">
               <Label htmlFor="auth-password">{t('auth.password')}</Label>
-              <Input
+              <PasswordInput
                 id="auth-password"
-                type="password"
                 placeholder={t('auth.passwordPlaceholder')}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

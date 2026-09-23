@@ -41,6 +41,8 @@ const row = (over: Partial<EventRow> = {}): EventRow => ({
   repeated_from: null,
   institution_id: 'i1',
   created_at: '2026-08-01T00:00:00+00:00',
+  start_push_sent_at: null,
+  recommended_at: null,
   ...over,
 });
 

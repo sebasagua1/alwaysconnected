@@ -3,7 +3,7 @@
 -- Pegar en el SQL Editor de un proyecto Supabase NUEVO y ejecutar.
 --
 -- NO EDITAR A MANO: lo genera scripts/gen-full-schema.mjs.
--- Migraciones incluidas: 48 (hasta 20260921010000_programar-push-inicio.sql).
+-- Migraciones incluidas: 57 (hasta 20260925010000_programar-notificaciones.sql).
 --
 -- NOTA: se omite el bloque de RLS sobre realtime.messages (tabla
 -- interna de Supabase) porque el SQL Editor no es su dueño. El
@@ -4978,6 +4978,439 @@ FROM (VALUES
   ('x@u.icesi.edu.co'), ('x@purdue.edu'), ('x@purdue.edu.co'), ('x@unam.mx'), ('x@gmail.com')
 ) AS t(correo);
 
+-- >>> 20260916000000_buscar-personas.sql <<<
+-- ============================================================
+-- Buscar personas: busqueda instantanea, sugerencias y amistades a prueba
+-- de duplicados
+--
+-- 1. Amistades
+--
+--    La politica de INSERT de friendships solo exige ser el solicitante y no
+--    estar bloqueado. Con eso, cualquiera podia:
+--
+--      - insertar la fila ya con status = 'accepted' y hacerse "amigo" de
+--        quien quisiera sin que aceptara, con acceso a sus eventos de amigos;
+--      - pedirse amistad a si mismo;
+--      - crear A->B y B->A a la vez (el UNIQUE es por par ordenado), con dos
+--        filas para una misma relacion;
+--      - pedir amistad a alguien de otro campus, que ni siquiera la ve;
+--      - disparar solicitudes en bucle, cada una con su notificacion push.
+--
+--    Y quien la recibe podia, en el UPDATE, cambiar requester_id por otra
+--    persona.
+--
+--    Todo se cierra en la base, no en la interfaz. A 2026-09-15 produccion
+--    no tiene ninguna fila que choque con estas reglas (0 consigo mismo,
+--    0 pares duplicados, 0 entre campus), asi que no se toca ni se borra
+--    ninguna amistad existente.
+--
+-- 2. search_people(): por nombre, apellido o nombre completo, sin distinguir
+--    mayusculas ni acentos, acotada al campus propio (como public_profiles),
+--    sin bloqueados, sin uno mismo y con el estado de la relacion.
+--
+-- 3. people_suggestions(): "personas que quiza conozcas", con senales que la
+--    base ya tiene: amigos en comun y grupos compartidos. No hay usuario
+--    (@handle) ni telefono en los perfiles, asi que no se usan.
+--
+-- Idempotente: se puede pegar dos veces en el SQL Editor.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 0. Extensiones para buscar sin acentos y con indice
+-- ------------------------------------------------------------
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pg_trgm  WITH SCHEMA extensions;
+
+-- Minusculas, sin acentos y con los espacios colapsados. IMMUTABLE para
+-- poder indexarla: el diccionario va nombrado, que es lo que la hace estable.
+CREATE OR REPLACE FUNCTION public.search_normalize(_t text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = ''
+AS $$
+  SELECT btrim(regexp_replace(
+    lower(extensions.unaccent('extensions.unaccent'::regdictionary, coalesce(_t, ''))),
+    '\s+', ' ', 'g'
+  ));
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.search_normalize(text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.search_normalize(text) TO authenticated;
+
+-- ------------------------------------------------------------
+-- 1. Indices
+-- ------------------------------------------------------------
+-- La busqueda y las sugerencias filtran primero por campus.
+CREATE INDEX IF NOT EXISTS profiles_campus_id_idx ON public.profiles (campus_id);
+
+-- LIKE '%texto%' sobre el nombre normalizado, desde 3 letras.
+CREATE INDEX IF NOT EXISTS profiles_name_search_trgm_idx
+  ON public.profiles USING gin (public.search_normalize(name) extensions.gin_trgm_ops);
+
+-- Una sola fila por pareja, en cualquier sentido. Tambien sirve para buscar
+-- la relacion entre dos personas sin mirar los dos ordenes.
+CREATE UNIQUE INDEX IF NOT EXISTS friendships_pair_key
+  ON public.friendships (least(requester_id, addressee_id), greatest(requester_id, addressee_id));
+
+-- ------------------------------------------------------------
+-- 2. Nadie es amigo de si mismo
+-- ------------------------------------------------------------
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.friendships'::regclass AND conname = 'friendships_no_self'
+  ) THEN
+    ALTER TABLE public.friendships
+      ADD CONSTRAINT friendships_no_self CHECK (requester_id <> addressee_id);
+  END IF;
+END $$;
+
+-- ------------------------------------------------------------
+-- 3. Registro minimo para el limite de solicitudes
+--
+-- Contar filas de friendships no basta: pedir, cancelar y volver a pedir no
+-- deja rastro y cada vez sale una push. Solo quien pidio y cuando; se purga
+-- sola al pasar un dia. Sin politicas: solo la ve el disparador (DEFINER).
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.friend_request_attempts (
+  user_id    uuid        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS friend_request_attempts_user_idx
+  ON public.friend_request_attempts (user_id, created_at);
+ALTER TABLE public.friend_request_attempts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.friend_request_attempts FROM PUBLIC, anon, authenticated;
+
+-- ------------------------------------------------------------
+-- 4. Reglas de escritura de friendships
+--
+-- Codigos estables que traduce rpcErrors.ts. FRIEND_REQUEST_EXISTS sale con
+-- SQLSTATE 23505, el mismo que daba el UNIQUE: la version publicada en App
+-- Store ya lo reconoce como "ya enviaste solicitud".
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.guard_friendship_write()
+RETURNS trigger
+LANGUAGE plpgsql
+-- DEFINER: tiene que ver la fila en sentido contrario y el registro de
+-- intentos, que la RLS de quien escribe no deja ver entero.
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid    uuid := auth.uid();
+  v_otra   public.friendships%ROWTYPE;
+  v_hora   int;
+  v_dia    int;
+BEGIN
+  -- Sin sesion: service_role, borrado de cuenta, migraciones.
+  IF v_uid IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.id           IS DISTINCT FROM OLD.id
+    OR NEW.requester_id IS DISTINCT FROM OLD.requester_id
+    OR NEW.addressee_id IS DISTINCT FROM OLD.addressee_id
+    OR NEW.created_at   IS DISTINCT FROM OLD.created_at
+    OR (NEW.status IS DISTINCT FROM OLD.status
+        AND NOT (OLD.status = 'pending' AND NEW.status = 'accepted')) THEN
+      RAISE EXCEPTION 'FRIENDSHIP_FIELD_LOCKED';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- INSERT
+  IF NEW.requester_id = NEW.addressee_id THEN
+    RAISE EXCEPTION 'FRIEND_SELF';
+  END IF;
+
+  -- Una solicitud nace pendiente: aceptar es cosa de quien la recibe.
+  IF NEW.status IS DISTINCT FROM 'pending' THEN
+    RAISE EXCEPTION 'FRIENDSHIP_FIELD_LOCKED';
+  END IF;
+
+  -- Mismo alcance que public_profiles: no se pide amistad a quien no se ve.
+  IF public.is_blocked(NEW.requester_id, NEW.addressee_id)
+     OR NOT public.same_institution(NEW.requester_id, NEW.addressee_id) THEN
+    RAISE EXCEPTION 'FRIEND_NOT_AVAILABLE';
+  END IF;
+
+  SELECT * INTO v_otra
+  FROM public.friendships f
+  WHERE least(f.requester_id, f.addressee_id)    = least(NEW.requester_id, NEW.addressee_id)
+    AND greatest(f.requester_id, f.addressee_id) = greatest(NEW.requester_id, NEW.addressee_id)
+  LIMIT 1;
+
+  IF FOUND THEN
+    IF v_otra.status = 'accepted' THEN
+      RAISE EXCEPTION 'ALREADY_FRIENDS';
+    ELSIF v_otra.requester_id = NEW.requester_id THEN
+      RAISE EXCEPTION 'FRIEND_REQUEST_EXISTS' USING ERRCODE = '23505';
+    ELSE
+      RAISE EXCEPTION 'FRIEND_REQUEST_INCOMING';
+    END IF;
+  END IF;
+
+  DELETE FROM public.friend_request_attempts
+  WHERE user_id = v_uid AND created_at < now() - interval '1 day';
+
+  SELECT
+    count(*) FILTER (WHERE created_at > now() - interval '1 hour'),
+    count(*)
+  INTO v_hora, v_dia
+  FROM public.friend_request_attempts
+  WHERE user_id = v_uid;
+
+  -- Holgado: agregar a 30 personas en una hora es mucho para una persona y
+  -- poco para un script.
+  IF v_hora >= 30 OR v_dia >= 100 THEN
+    RAISE EXCEPTION 'FRIEND_RATE_LIMIT';
+  END IF;
+
+  INSERT INTO public.friend_request_attempts (user_id) VALUES (v_uid);
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_friendship_write() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_friendship_write ON public.friendships;
+CREATE TRIGGER trg_guard_friendship_write
+  BEFORE INSERT OR UPDATE ON public.friendships
+  FOR EACH ROW EXECUTE FUNCTION public.guard_friendship_write();
+
+-- ------------------------------------------------------------
+-- 5. search_people
+--
+-- DEFINER porque el estado de la relacion y los amigos en comun necesitan
+-- leer amistades ajenas; a cambio, los filtros de public_profiles van
+-- escritos aqui a mano: sesion, mismo campus, sin bloqueos, sin uno mismo.
+-- Solo devuelve columnas que public_profiles ya expone, mas la relacion con
+-- quien busca y un recuento.
+--
+-- Cada palabra escrita tiene que aparecer en el nombre: "ana lop" encuentra
+-- a "Ana Lopez" y a "Lopez, Ana". Con 1 o 2 letras, al principio de una
+-- palabra (una sola letra dentro de cualquier nombre seria ruido); desde 3,
+-- en cualquier parte.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.search_people(
+  _query  text,
+  _limit  integer DEFAULT 20,
+  _offset integer DEFAULT 0
+)
+RETURNS TABLE (
+  id             uuid,
+  name           text,
+  avatar_url     text,
+  major          text,
+  relation       text,
+  friendship_id  uuid,
+  mutual_friends integer
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_uid    uuid := auth.uid();
+  v_campus uuid;
+  v_q      text;
+  v_tokens text[];
+  v_largo  text;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED';
+  END IF;
+
+  SELECT p.campus_id INTO v_campus FROM public.profiles p WHERE p.id = v_uid;
+  IF v_campus IS NULL THEN
+    RETURN;
+  END IF;
+
+  v_q := public.search_normalize(left(coalesce(_query, ''), 100));
+  IF v_q = '' THEN
+    RETURN;
+  END IF;
+
+  SELECT array_agg(t ORDER BY o) INTO v_tokens
+  FROM (
+    SELECT t, o FROM unnest(string_to_array(v_q, ' ')) WITH ORDINALITY AS u(t, o)
+    WHERE t <> '' LIMIT 5
+  ) x;
+
+  -- La palabra mas larga, para que el indice trigram descarte lo que pueda.
+  SELECT t INTO v_largo FROM unnest(v_tokens) t ORDER BY length(t) DESC LIMIT 1;
+
+  RETURN QUERY
+  WITH mis_amigos AS (
+    SELECT CASE WHEN f.requester_id = v_uid THEN f.addressee_id ELSE f.requester_id END AS fid
+    FROM public.friendships f
+    WHERE f.status = 'accepted' AND (f.requester_id = v_uid OR f.addressee_id = v_uid)
+  ),
+  cand AS (
+    SELECT p.id, p.name, p.avatar_url, p.major, public.search_normalize(p.name) AS n
+    FROM public.profiles p
+    WHERE p.campus_id = v_campus
+      AND p.id <> v_uid
+      AND nullif(btrim(p.name), '') IS NOT NULL
+      AND (length(v_largo) < 3
+           OR public.search_normalize(p.name) LIKE '%' || replace(replace(replace(v_largo, '\', '\\'), '%', '\%'), '_', '\_') || '%')
+  ),
+  coinciden AS (
+    SELECT c.*,
+      CASE
+        WHEN c.n = v_q THEN 0
+        WHEN left(c.n, length(v_q)) = v_q THEN 1
+        WHEN NOT EXISTS (
+          SELECT 1 FROM unnest(v_tokens) t
+          WHERE position(' ' || t IN ' ' || c.n) = 0
+        ) THEN 2
+        ELSE 3
+      END AS rango
+    FROM cand c
+    WHERE NOT EXISTS (
+      SELECT 1 FROM unnest(v_tokens) t
+      WHERE CASE WHEN length(t) < 3
+                 THEN position(' ' || t IN ' ' || c.n) = 0
+                 ELSE position(t IN c.n) = 0
+            END
+    )
+      AND NOT public.is_blocked(v_uid, c.id)
+  )
+  SELECT
+    c.id,
+    c.name,
+    c.avatar_url,
+    c.major,
+    CASE
+      WHEN f.status = 'accepted'                          THEN 'friends'
+      WHEN f.status = 'pending' AND f.requester_id = v_uid THEN 'outgoing'
+      WHEN f.status = 'pending'                           THEN 'incoming'
+      ELSE 'none'
+    END::text,
+    CASE WHEN f.status = 'pending' THEN f.id END,
+    (SELECT count(*)::int
+     FROM public.friendships g
+     JOIN mis_amigos m
+       ON m.fid = CASE WHEN g.requester_id = c.id THEN g.addressee_id ELSE g.requester_id END
+     WHERE g.status = 'accepted' AND (g.requester_id = c.id OR g.addressee_id = c.id))
+  FROM coinciden c
+  LEFT JOIN public.friendships f
+    ON least(f.requester_id, f.addressee_id)    = least(v_uid, c.id)
+   AND greatest(f.requester_id, f.addressee_id) = greatest(v_uid, c.id)
+  ORDER BY c.rango, 7 DESC, c.name, c.id
+  LIMIT  least(greatest(coalesce(_limit, 20), 1), 50)
+  OFFSET least(greatest(coalesce(_offset, 0), 0), 500);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.search_people(text, integer, integer) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.search_people(text, integer, integer) TO authenticated;
+
+-- ------------------------------------------------------------
+-- 6. people_suggestions
+--
+-- Candidatos: amigos de mis amigos, gente de mis grupos (no DM) y, para
+-- rellenar, lo mas reciente del campus. Fuera quien ya tiene cualquier
+-- relacion conmigo (las solicitudes recibidas ya salen en su seccion),
+-- bloqueados y uno mismo. Solo se devuelven recuentos, nunca quienes son
+-- esos amigos o grupos.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.people_suggestions(_limit integer DEFAULT 10)
+RETURNS TABLE (
+  id             uuid,
+  name           text,
+  avatar_url     text,
+  major          text,
+  mutual_friends integer,
+  shared_groups  integer
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_uid    uuid := auth.uid();
+  v_campus uuid;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED';
+  END IF;
+
+  SELECT p.campus_id INTO v_campus FROM public.profiles p WHERE p.id = v_uid;
+  IF v_campus IS NULL THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  WITH mis_amigos AS (
+    SELECT CASE WHEN f.requester_id = v_uid THEN f.addressee_id ELSE f.requester_id END AS fid
+    FROM public.friendships f
+    WHERE f.status = 'accepted' AND (f.requester_id = v_uid OR f.addressee_id = v_uid)
+  ),
+  comun AS (
+    SELECT CASE WHEN g.requester_id = m.fid THEN g.addressee_id ELSE g.requester_id END AS pid,
+           count(*)::int AS n
+    FROM mis_amigos m
+    JOIN public.friendships g
+      ON g.status = 'accepted' AND (g.requester_id = m.fid OR g.addressee_id = m.fid)
+    GROUP BY 1
+  ),
+  grupos AS (
+    SELECT otro.user_id AS pid, count(DISTINCT yo.group_id)::int AS n
+    FROM public.group_members yo
+    JOIN public.groups gr ON gr.id = yo.group_id AND gr.name NOT LIKE '\_\_dm\_%'
+    JOIN public.group_members otro ON otro.group_id = yo.group_id AND otro.user_id <> v_uid
+    WHERE yo.user_id = v_uid
+    GROUP BY 1
+  ),
+  recientes AS (
+    SELECT p.id AS pid
+    FROM public.profiles p
+    WHERE p.campus_id = v_campus AND p.id <> v_uid
+    ORDER BY p.created_at DESC
+    LIMIT 50
+  ),
+  cand AS (
+    SELECT pid FROM comun
+    UNION SELECT pid FROM grupos
+    UNION SELECT pid FROM recientes
+  )
+  SELECT p.id, p.name, p.avatar_url, p.major,
+         coalesce(c.n, 0), coalesce(g.n, 0)
+  FROM cand
+  JOIN public.profiles p ON p.id = cand.pid
+  LEFT JOIN comun  c ON c.pid = p.id
+  LEFT JOIN grupos g ON g.pid = p.id
+  WHERE p.id <> v_uid
+    AND p.campus_id = v_campus
+    AND nullif(btrim(p.name), '') IS NOT NULL
+    AND NOT public.is_blocked(v_uid, p.id)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.friendships f
+      WHERE least(f.requester_id, f.addressee_id)    = least(v_uid, p.id)
+        AND greatest(f.requester_id, f.addressee_id) = greatest(v_uid, p.id)
+    )
+  ORDER BY coalesce(c.n, 0) DESC, coalesce(g.n, 0) DESC, p.created_at DESC, p.id
+  LIMIT least(greatest(coalesce(_limit, 10), 1), 20);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.people_suggestions(integer) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.people_suggestions(integer) TO authenticated;
+
+COMMIT;
+
 -- >>> 20260917000000_verificacion-institucional.sql <<<
 -- ============================================================
 -- Verificacion institucional y catalogo ampliado (esquema)
@@ -5020,8 +5453,12 @@ CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pg_trgm  WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
--- Misma definicion que en 20260916000000_buscar-personas.sql: la que se
--- aplique primero la crea y la otra la deja igual.
+-- Aqui se define search_normalize(). El comentario anterior la daba por
+-- compartida con 20260916000000_buscar-personas.sql, un archivo que no esta
+-- en el repositorio (vive sin aplicar en la rama feat/buscar-personas). La
+-- busqueda de personas de hoy es un ilike sobre public_profiles
+-- (Friends.tsx), no esta funcion. Si algun dia entra esa migracion, el
+-- CREATE OR REPLACE deja la definicion igual y no hay conflicto.
 CREATE OR REPLACE FUNCTION public.search_normalize(_t text)
 RETURNS text
 LANGUAGE sql
@@ -8256,6 +8693,463 @@ GRANT  EXECUTE ON FUNCTION public.notification_counts() TO authenticated;
 
 COMMIT;
 
+-- >>> 20260920000000_auditoria-columnas-escribibles.sql <<<
+-- ============================================================
+-- Auditoria 2026-09-18: columnas escribibles que nadie protegia
+--
+-- Causa raiz unica de los tres huecos (SEC-01, SEC-02, SEC-04) y de los
+-- dos derivados (SEC-05, SEC-08):
+--
+--   En Supabase, el rol `authenticated` puede escribir TODA columna de una
+--   tabla que tenga politica de escritura, salvo que un disparador o un
+--   WITH CHECK lo impida explicitamente.
+--
+-- El proyecto protegia valores concretos con disparadores dirigidos
+-- (prevent_status_tampering, prevent_score_tampering, guard_message_update)
+-- y esos funcionan. Lo que faltaba era el invariante general: las rutas
+-- LATERALES quedaron abiertas.
+--
+-- Lo que cierra, por hallazgo:
+--   1. SEC-01 (P0) event_participants UPDATE sin WITH CHECK: se podia mover
+--      la propia fila a CUALQUIER event_id, saltandose aprobacion, aforo y
+--      aislamiento por institucion.
+--   2. SEC-02 (P1) friendships INSERT con status='accepted': amistad
+--      autoconcedida, que es la llave de create_dm, add_group_member y los
+--      eventos privacy='friends'.
+--   3. SEC-04 (P1) events.created_at escribible: anulaba el limite de
+--      creacion de 20260903000000 (200/200 eventos en la prueba).
+--   4. Bonus del mismo invariante: events.institution_id y events.creator_id
+--      tampoco estaban protegidos en UPDATE (trg_set_event_institution es
+--      BEFORE INSERT). Un evento podia mudarse de campus despues de creado.
+--   5. SEC-08 (P2) messages.created_at futuro: contador de no leidos que no
+--      se apaga nunca (mark_group_read fija last_read_at = now()).
+--   6. SEC-05 (P2) sin limites de longitud en servidor, y el titulo sin
+--      truncar en la push de plan repetido (APNs corta en 4 KB).
+--   7. PERF-01 (P2) los dos indices que faltan.
+--
+-- Por que SECURITY INVOKER en los guardianes nuevos: necesitan ver
+-- current_user = 'authenticated' para distinguir al cliente del
+-- service_role. Dentro de SECURITY DEFINER, current_user es el DUENO de la
+-- funcion (postgres) y la condicion no se cumple NUNCA. Es exactamente la
+-- trampa que documenta 20260820000000.
+--
+-- No borra ni reescribe datos de usuario. ASCII puro. Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. SEC-01 (P0): la participacion no se muda de evento
+--
+-- La politica declaraba USING sin WITH CHECK. En PostgreSQL eso reutiliza
+-- USING como comprobacion de la fila NUEVA, y USING solo mira user_id: la
+-- fila resultante pasaba siempre que el atacante siguiera siendo su dueno.
+-- event_id no lo miraba nadie.
+--
+-- Los tres disparadores que ya habia no cubrian el hueco:
+--   * set_participant_initial_status  BEFORE INSERT  (no corre en UPDATE)
+--   * prevent_status_tampering        BEFORE UPDATE  (solo compara status)
+--   * recalc_event_spots              AFTER UPDATE OF status
+--     WHEN (OLD.status IS DISTINCT FROM NEW.status) -> un cambio de
+--     event_id ni siquiera recalculaba current_spots.
+-- ------------------------------------------------------------
+DROP POLICY IF EXISTS "Users can update own participation" ON public.event_participants;
+
+CREATE POLICY "Users can update own participation"
+  ON public.event_participants FOR UPDATE TO authenticated
+  USING      (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
+-- Cinturon ademas del tirante: event_id, user_id y joined_at son inmutables
+-- desde el cliente. El WITH CHECK de arriba ya cierra el ataque; esto deja
+-- el invariante escrito donde se ve, y da un codigo estable que el cliente
+-- traduce en vez del error generico de RLS.
+CREATE OR REPLACE FUNCTION public.guard_participation_update()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera.
+SET search_path = public
+AS $$
+BEGIN
+  IF current_user = 'authenticated'
+     AND (NEW.event_id  IS DISTINCT FROM OLD.event_id
+       OR NEW.user_id   IS DISTINCT FROM OLD.user_id
+       OR NEW.joined_at IS DISTINCT FROM OLD.joined_at) THEN
+    RAISE EXCEPTION 'PARTICIPATION_FIELD_LOCKED'
+      USING ERRCODE = '42501',
+            HINT    = 'event_id, user_id y joined_at no se cambian desde el cliente.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_participation_update() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_participation_update ON public.event_participants;
+CREATE TRIGGER trg_guard_participation_update
+  BEFORE UPDATE ON public.event_participants
+  FOR EACH ROW EXECUTE FUNCTION public.guard_participation_update();
+
+
+-- ------------------------------------------------------------
+-- 2. SEC-02 (P1): el estado de una amistad lo decide el servidor
+--
+-- La politica de INSERT comprueba requester_id y bloqueo, pero no status,
+-- y la columna acepta 'accepted' directamente. No habia ningun BEFORE
+-- INSERT sobre friendships: el unico disparador es trg_friend_request_push,
+-- AFTER INSERT y ademas WHEN (NEW.status = 'pending'), asi que la via de
+-- ataque ni siquiera generaba la notificacion que alertaria a la victima.
+--
+-- Mismo patron que set_participant_initial_status, que ya hacia esto bien
+-- en event_participants. La leccion se habia aplicado en una tabla y no en
+-- la otra.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.set_friendship_initial_status()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera.
+SET search_path = public
+AS $$
+BEGIN
+  -- Las escrituras de service_role y las migraciones pasan tal cual.
+  IF current_user = 'authenticated' THEN
+    NEW.status     := 'pending';
+    NEW.created_at := now();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_friendship_initial_status() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_set_friendship_initial_status ON public.friendships;
+CREATE TRIGGER trg_set_friendship_initial_status
+  BEFORE INSERT ON public.friendships
+  FOR EACH ROW EXECUTE FUNCTION public.set_friendship_initial_status();
+
+
+-- ------------------------------------------------------------
+-- 3. SEC-04 (P1) + aislamiento: lo que el cliente no pone en events
+--
+-- created_at tenia DEFAULT now() pero ningun disparador la fijaba, y el
+-- limite de 20260903000000 cuenta filas filtrando por esa misma columna:
+-- mandando created_at en el pasado, el recuento siempre daba cero.
+--
+-- institution_id y creator_id son el mismo descuido en UPDATE:
+-- trg_set_event_institution es BEFORE INSERT, asi que un evento ya creado
+-- podia mudarse a otro campus con un solo PATCH.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.set_event_created_at()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera.
+SET search_path = public
+AS $$
+BEGIN
+  IF current_user = 'authenticated' THEN
+    NEW.created_at := now();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_event_created_at() FROM PUBLIC, anon, authenticated;
+
+-- Prefijo 'a_' A PROPOSITO: los BEFORE de la misma tabla y evento se
+-- ejecutan en orden ALFABETICO, y este tiene que correr ANTES de
+-- trg_event_rate_limit o el limite seguiria contando con el created_at que
+-- mando el cliente. Mismo razonamiento que documenta 20260915000000 para
+-- trg_set_profile_campus.
+DROP TRIGGER IF EXISTS a_trg_set_event_created_at ON public.events;
+CREATE TRIGGER a_trg_set_event_created_at
+  BEFORE INSERT ON public.events
+  FOR EACH ROW EXECUTE FUNCTION public.set_event_created_at();
+
+CREATE OR REPLACE FUNCTION public.guard_event_update()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera.
+SET search_path = public
+AS $$
+BEGIN
+  IF current_user = 'authenticated'
+     AND (NEW.creator_id     IS DISTINCT FROM OLD.creator_id
+       OR NEW.institution_id IS DISTINCT FROM OLD.institution_id
+       OR NEW.created_at     IS DISTINCT FROM OLD.created_at) THEN
+    RAISE EXCEPTION 'EVENT_FIELD_LOCKED'
+      USING ERRCODE = '42501',
+            HINT    = 'creator_id, institution_id y created_at los pone el servidor.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_event_update() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_event_update ON public.events;
+CREATE TRIGGER trg_guard_event_update
+  BEFORE UPDATE ON public.events
+  FOR EACH ROW EXECUTE FUNCTION public.guard_event_update();
+
+-- La politica de UPDATE tampoco declaraba WITH CHECK. Explicito, por lo
+-- mismo que en event_participants.
+DROP POLICY IF EXISTS "Creators can update their events" ON public.events;
+
+CREATE POLICY "Creators can update their events"
+  ON public.events FOR UPDATE TO authenticated
+  USING      (auth.uid() = creator_id)
+  WITH CHECK (auth.uid() = creator_id);
+
+DROP POLICY IF EXISTS "Creators can update groups" ON public.groups;
+
+CREATE POLICY "Creators can update groups"
+  ON public.groups FOR UPDATE TO authenticated
+  USING      (auth.uid() = created_by)
+  WITH CHECK (auth.uid() = created_by);
+
+
+-- ------------------------------------------------------------
+-- 4. SEC-08 (P2): la fecha de envio de un mensaje la pone el servidor
+--
+-- mark_group_read() fija last_read_at = now(). Un mensaje con created_at en
+-- 2099 satisface `m.created_at > gm.last_read_at` para siempre: globo rojo
+-- permanente para todo el grupo, mensaje anclado al final del chat, y el
+-- chat fijado en lo alto de la lista por chat_summaries()/friends_page().
+--
+-- set_message_expiry ya hacia bien lo que a created_at le faltaba, asi que
+-- se le anade ahi mismo. OJO: pierde SECURITY DEFINER. Dentro de DEFINER,
+-- current_user es postgres y la condicion no se cumpliria nunca. La funcion
+-- no necesita privilegios: solo escribe en NEW.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.set_message_expiry()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera. Antes era DEFINER sin necesitarlo.
+SET search_path = public
+AS $$
+BEGIN
+  -- Lo decide el servidor, no el cliente: si no, cualquiera podria mandar
+  -- mensajes que no caducan nunca (o que caducan al instante en la
+  -- conversacion de otro).
+  NEW.expires_at := now() + interval '90 days';
+
+  -- Y la fecha de envio, por la misma razon.
+  IF current_user = 'authenticated' THEN
+    NEW.created_at := now();
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_message_expiry() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_set_message_expiry ON public.messages;
+CREATE TRIGGER trg_set_message_expiry
+  BEFORE INSERT ON public.messages
+  FOR EACH ROW EXECUTE FUNCTION public.set_message_expiry();
+
+
+-- ------------------------------------------------------------
+-- 5. SEC-05 (P2): limites de longitud en el servidor
+--
+-- El cliente valida con zod (title 3-80, description <=500, address <=120)
+-- y EditEventSheet solo comprueba !title.trim(), pero eso es una
+-- comprobacion de navegador. Un title de 1 MB entraba sin problema, y el
+-- mapa descarga hasta 500 eventos de una vez.
+--
+-- NOT VALID a proposito: solo se aplica a filas NUEVAS, asi que la
+-- migracion no falla si ya existe alguna fila fuera de rango. El VALIDATE
+-- va justo despues y, si alguna fila historica lo impidiera, se puede
+-- quitar sin tocar la proteccion de lo nuevo.
+-- ------------------------------------------------------------
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'events_title_len') THEN
+    ALTER TABLE public.events
+      ADD CONSTRAINT events_title_len
+      CHECK (length(title) BETWEEN 3 AND 80) NOT VALID;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'events_description_len') THEN
+    ALTER TABLE public.events
+      ADD CONSTRAINT events_description_len
+      CHECK (description IS NULL OR length(description) <= 500) NOT VALID;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'events_address_len') THEN
+    ALTER TABLE public.events
+      ADD CONSTRAINT events_address_len
+      CHECK (address IS NULL OR length(address) <= 120) NOT VALID;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'groups_name_len') THEN
+    ALTER TABLE public.groups
+      ADD CONSTRAINT groups_name_len
+      CHECK (length(name) BETWEEN 1 AND 120) NOT VALID;
+  END IF;
+
+  -- deleted_at IS NOT NULL: borrar un mensaje lo deja con content vacio
+  -- (20260914000000 vacia el texto en vez de borrar la fila), y esa fila
+  -- tiene que seguir siendo valida.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_content_len') THEN
+    ALTER TABLE public.messages
+      ADD CONSTRAINT messages_content_len
+      CHECK (length(content) <= 2000
+             AND (deleted_at IS NOT NULL OR length(btrim(content)) > 0)) NOT VALID;
+  END IF;
+END;
+$$;
+
+-- Validar lo que ya hay. Si alguna fila historica lo impidiera, el CHECK
+-- seguiria protegiendo lo nuevo: se quita este bloque y ya.
+ALTER TABLE public.events   VALIDATE CONSTRAINT events_title_len;
+ALTER TABLE public.events   VALIDATE CONSTRAINT events_description_len;
+ALTER TABLE public.events   VALIDATE CONSTRAINT events_address_len;
+ALTER TABLE public.groups   VALIDATE CONSTRAINT groups_name_len;
+ALTER TABLE public.messages VALIDATE CONSTRAINT messages_content_len;
+
+
+-- ------------------------------------------------------------
+-- 6. SEC-05 (P2): truncar el titulo en la push de plan repetido
+--
+-- APNs rechaza cargas de mas de 4 KB, asi que un titulo largo rompia la
+-- notificacion EN SILENCIO. on_message_push ya trunca a 120; esto aplica el
+-- mismo patron. Con el CHECK de arriba el titulo ya no pasa de 80, pero la
+-- push no deberia depender de eso.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.on_event_repeat_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_who   text;
+  v_title text;
+  r       record;
+BEGIN
+  -- Publicar y borrar para volver a publicar no vuelve a avisar.
+  IF EXISTS (
+    SELECT 1 FROM public.events e
+    WHERE e.repeated_from = NEW.repeated_from
+      AND e.creator_id = NEW.creator_id
+      AND e.id <> NEW.id
+      AND e.created_at > now() - interval '12 hours'
+  ) THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT COALESCE(NULLIF(p.name, ''), 'Alguien') INTO v_who
+  FROM public.profiles p WHERE p.id = NEW.creator_id;
+
+  v_title := left(NEW.title, 80);
+  IF length(NEW.title) > 80 THEN
+    v_title := v_title || U&'\2026';
+  END IF;
+
+  FOR r IN
+    SELECT DISTINCT g.uid
+    FROM (
+      SELECT o.creator_id AS uid FROM public.events o WHERE o.id = NEW.repeated_from
+      UNION
+      SELECT ep.user_id FROM public.event_participants ep
+      WHERE ep.event_id = NEW.repeated_from AND ep.status = 'joined'
+    ) g
+    WHERE g.uid <> NEW.creator_id
+      AND NOT public.is_blocked(g.uid, NEW.creator_id)
+      AND public.same_institution(g.uid, NEW.creator_id)
+      AND (
+        NEW.privacy IN ('open', 'private')
+        OR (NEW.privacy = 'friends' AND public.are_friends(NEW.creator_id, g.uid))
+      )
+    LIMIT 100
+  LOOP
+    PERFORM public.push_send(
+      r.uid,
+      'Se repite un plan',
+      COALESCE(v_who, 'Alguien') || U&' organiz\00F3 otra vez \00AB' || v_title || U&'\00BB. \00BFTe apuntas?',
+      jsonb_build_object('type', 'event_repeat', 'event_id', NEW.id)
+    );
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.on_event_repeat_push() FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 7. PERF-01 (P2): los dos indices que faltaban
+--
+-- profiles.campus_id: search_institutions cuenta perfiles por campus, y se
+-- llama en CADA pulsacion del selector del alta (hasta 50 campus por
+-- respuesta) -> recorrido secuencial de profiles por cada uno.
+--
+-- groups.name: friends_page busca el grupo de DM por nombre construido
+-- ('__dm_' || least || '_' || greatest) en un LATERAL, una vez por amigo de
+-- la pagina (hasta 100).
+--
+-- Sin CONCURRENTLY, por lo mismo que documentan 20260824000000 y
+-- 20260901000000: el SQL Editor ejecuta dentro de una transaccion.
+-- ------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS profiles_campus_id_idx
+  ON public.profiles (campus_id) WHERE campus_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS groups_name_idx
+  ON public.groups (name);
+
+
+-- ------------------------------------------------------------
+-- 8. DEBT-01 (P3): la rama muerta de messages.event_id
+--
+-- El chat de evento nunca llego a usarse: messages.event_id es NULL en
+-- todas las filas y el propio 20260827000000 lo reconoce por escrito. Pero
+-- las tres politicas de messages seguian evaluando esa rama en CADA lectura
+-- de mensaje, llamando a is_event_participant() para nada.
+--
+-- La COLUMNA se queda (borrarla es irreversible) con un COMMENT que lo
+-- explique. Lo que se va es la rama de las politicas.
+-- ------------------------------------------------------------
+DROP POLICY IF EXISTS "Users can view messages in their events or groups" ON public.messages;
+CREATE POLICY "Users can view messages in their events or groups"
+  ON public.messages FOR SELECT TO authenticated
+  USING (
+    NOT public.is_blocked(auth.uid(), sender_id)
+    AND (
+      sender_id = auth.uid()
+      OR (group_id IS NOT NULL AND public.is_group_member(group_id, auth.uid()))
+    )
+  );
+
+DROP POLICY IF EXISTS "Members can send messages" ON public.messages;
+CREATE POLICY "Members can send messages"
+  ON public.messages FOR INSERT TO authenticated
+  WITH CHECK (
+    sender_id = auth.uid()
+    AND group_id IS NOT NULL
+    AND public.is_group_member(group_id, auth.uid())
+  );
+
+DROP POLICY IF EXISTS "Senders can edit own messages" ON public.messages;
+CREATE POLICY "Senders can edit own messages"
+  ON public.messages FOR UPDATE TO authenticated
+  USING (
+    sender_id = auth.uid()
+    AND deleted_at IS NULL
+    AND group_id IS NOT NULL
+    AND public.is_group_member(group_id, auth.uid())
+  )
+  WITH CHECK (sender_id = auth.uid());
+
+COMMENT ON COLUMN public.messages.event_id IS
+  'MUERTA. El chat de evento nunca se implemento: NULL en todas las filas. '
+  'Se conserva la columna porque borrarla es irreversible, pero ninguna '
+  'politica ni consulta la mira desde 20260920000000.';
+
+COMMIT;
+
 -- >>> 20260920000000_perfiles-huerfanos.sql <<<
 -- ============================================================
 -- Cuentas sin perfil: rellenar las que faltan y cerrar el agujero
@@ -8497,6 +9391,107 @@ CREATE TRIGGER trg_prevent_orphan_profile_delete
 
 COMMIT;
 
+-- >>> 20260920010000_auditoria-bucket-avatars.sql <<<
+-- ============================================================
+-- Auditoria 2026-09-18: el bucket de avatares no tenia ningun limite
+--
+-- SEC-06 (P2). El bucket se creo en 20260325002039 asi:
+--
+--   INSERT INTO storage.buckets (id, name, public) VALUES ('avatars','avatars',true);
+--
+-- Sin file_size_limit y sin allowed_mime_types. La politica de INSERT solo
+-- acotaba la CARPETA (la primera parte del nombre tiene que ser tu uuid).
+-- El cliente se comporta bien --reduce la imagen y sube siempre a
+-- `<uuid>/avatar.jpg` con contentType image/jpeg-- pero eso es una
+-- convencion del cliente, no una restriccion.
+--
+-- Por la API directa, una cuenta autenticada podia:
+--   * subir archivos de cualquier tamano y en cualquier cantidad
+--     (almacenamiento y ancho de banda sin techo, y facturables), y
+--   * subir un archivo con Content-Type: text/html a un bucket PUBLICO,
+--     o sea alojar phishing servido desde un dominio *.supabase.co.
+--
+-- Se encadena con SEC-07 (el borrado de cuenta paginaba de 100 en 100 y
+-- dejaba lo que pasara del archivo 101).
+--
+-- VA EN MIGRACION APARTE a proposito: es la unica de esta tanda que puede
+-- rechazar algo que hoy existe. El bloque 2 comprueba primero si hay
+-- avatares con otro nombre y solo aprieta la politica si no los hay.
+--
+-- ASCII puro. Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. Limites del bucket
+--
+-- 2 MB y tres tipos de imagen. El recorte del cliente sale en JPEG y pesa
+-- muy por debajo; esto es el techo, no el objetivo.
+-- ------------------------------------------------------------
+UPDATE storage.buckets
+SET file_size_limit    = 2097152,
+    allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp']
+WHERE id = 'avatars';
+
+
+-- ------------------------------------------------------------
+-- 2. Un archivo por persona, con el nombre que usa la app
+--
+-- La politica pasa de "tu carpeta" a "tu unico archivo". Con esto, la
+-- cantidad deja de ser ilimitada: no se pueden acumular archivos porque
+-- solo cabe un nombre.
+--
+-- Si ya existe algun avatar con otro nombre (subido antes de que el cliente
+-- fijara la extension, o por la API a mano), apretar la politica dejaria a
+-- esa gente sin poder volver a subir foto. Asi que se comprueba antes y, si
+-- los hay, se deja la politica floja y se avisa: hay que renombrarlos o
+-- borrarlos primero y volver a pasar esta migracion.
+-- ------------------------------------------------------------
+DO $$
+DECLARE
+  v_raros int;
+BEGIN
+  SELECT count(*) INTO v_raros
+  FROM storage.objects
+  WHERE bucket_id = 'avatars'
+    AND name !~ '^[0-9a-fA-F-]{36}/avatar\.jpg$';
+
+  IF v_raros > 0 THEN
+    RAISE WARNING 'avatars: % objeto(s) con un nombre que la politica estricta rechazaria. Se deja la politica por carpeta. Revisalos con: SELECT name FROM storage.objects WHERE bucket_id=''avatars'' AND name !~ ''^[0-9a-fA-F-]{36}/avatar\.jpg$'';', v_raros;
+    RETURN;
+  END IF;
+
+  DROP POLICY IF EXISTS "Authenticated can upload own avatar" ON storage.objects;
+  CREATE POLICY "Authenticated can upload own avatar"
+  ON storage.objects FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'avatars'
+    AND auth.uid()::text = (storage.foldername(name))[1]
+    AND name = auth.uid()::text || '/avatar.jpg'
+  );
+
+  -- El cliente sube con upsert:true, asi que la segunda foto de cada
+  -- persona entra por UPDATE, no por INSERT. Sin WITH CHECK aqui, esa ruta
+  -- se saltaria el limite de nombre entero.
+  DROP POLICY IF EXISTS "Users can update own avatar" ON storage.objects;
+  CREATE POLICY "Users can update own avatar"
+  ON storage.objects FOR UPDATE TO authenticated
+  USING (
+    bucket_id = 'avatars'
+    AND auth.uid()::text = (storage.foldername(name))[1]
+  )
+  WITH CHECK (
+    bucket_id = 'avatars'
+    AND name = auth.uid()::text || '/avatar.jpg'
+  );
+
+  RAISE NOTICE 'avatars: politica estricta aplicada (un solo archivo por persona).';
+END;
+$$;
+
+COMMIT;
+
 -- >>> 20260920010000_reconciliar-perfiles-cron.sql <<<
 -- ============================================================
 -- Programar la reconciliacion de perfiles.
@@ -8535,6 +9530,254 @@ SELECT cron.schedule(
   '43 4 * * *',                       -- 04:43 cada dia, despues del purgado
   $$SELECT public.backfill_missing_profiles()$$
 );
+
+-- >>> 20260921000000_aviso-cambio-evento-y-reportes.sql <<<
+-- ============================================================
+-- Auditoria 2026-09-18: avisar de los cambios, y no perder los reportes
+--
+-- 1. UX-02 (P2). El organizador podia cambiar la HORA, el SITIO o cancelar
+--    un evento, y nadie se enteraba. No habia ningun disparador de push
+--    sobre UPDATE de events: los cuatro de 20260827000000 cubren solicitud,
+--    aprobacion, mensaje y amistad, y el de 20260919000000 el plan repetido.
+--    Ninguno cubria el cambio.
+--
+--    Para una app cuyo proposito es que la gente se encuentre FISICAMENTE,
+--    presentarse a un evento cancelado o en el sitio equivocado erosiona la
+--    confianza mas que cualquier fallo tecnico.
+--
+--    Tres casos, y un cuarto que se trata aparte:
+--      * is_active pasa a false  -> "se cancelo"
+--      * cambia starts_at        -> "cambio la hora"
+--      * cambian lat/lng         -> "cambio el lugar"
+--      * privacy de open/private a friends: la RLS deja de mostrarles el
+--        evento aunque su fila siga ahi, asi que pierden de vista algo a lo
+--        que estan apuntados. Se avisa igual, porque es lo unico que van a
+--        recibir: despues ya no lo veran.
+--
+--    Va a quien tiene status='joined' y no ha bloqueado a quien organiza,
+--    igual que on_event_repeat_push. Se reutiliza push_send tal cual: una
+--    push fallida nunca tumba el UPDATE que la provoco.
+--
+-- 2. SEC-09 (P3). reports.reported_user_id era ON DELETE CASCADE, asi que
+--    alguien reportado por acoso borraba su cuenta, se registraba otra vez
+--    con el mismo correo, y el historial de moderacion sobre el desaparecia.
+--    Apple pide actuar sobre el contenido reportado (guideline 1.2) y el
+--    README documenta que la triage se hace a mano desde el SQL Editor: si
+--    los reportes se evaporan antes de que alguien los mire, la cola nunca
+--    los ve.
+--
+--    reports.reporter_id ya se paso a SET NULL en 20260817010000 por esta
+--    misma razon, y blocks guarda blocked_name desnormalizado por si el
+--    bloqueado se va. Aqui se aplica el mismo patron, ya probado en el
+--    propio proyecto, al lado que faltaba.
+--
+-- ASCII puro. Idempotente. No borra datos.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. Aviso al cambiar o cancelar un evento
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.on_event_change_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_title  text;
+  v_cuerpo text;
+  v_tipo   text;
+  r        record;
+BEGIN
+  -- El titulo, truncado por lo mismo que en on_event_repeat_push: APNs
+  -- rechaza cargas de mas de 4 KB y una push rota no avisa de nada.
+  v_title := left(NEW.title, 80);
+  IF length(NEW.title) > 80 THEN
+    v_title := v_title || U&'\2026';
+  END IF;
+
+  -- Un solo aviso por UPDATE, con el cambio mas grave que haya ocurrido.
+  -- Cancelar gana a todo: si el evento ya no existe, la hora da igual.
+  IF OLD.is_active AND NOT NEW.is_active THEN
+    v_tipo   := 'event_cancelled';
+    v_cuerpo := U&'Se cancel\00F3 \00AB' || v_title || U&'\00BB';
+  ELSIF NEW.starts_at IS DISTINCT FROM OLD.starts_at THEN
+    v_tipo   := 'event_changed';
+    v_cuerpo := U&'Cambi\00F3 la hora de \00AB' || v_title || U&'\00BB';
+  ELSIF NEW.lat IS DISTINCT FROM OLD.lat OR NEW.lng IS DISTINCT FROM OLD.lng THEN
+    v_tipo   := 'event_changed';
+    v_cuerpo := U&'Cambi\00F3 el lugar de \00AB' || v_title || U&'\00BB';
+  ELSIF NEW.privacy = 'friends' AND OLD.privacy <> 'friends' THEN
+    -- El ultimo aviso que van a ver: despues la RLS ya no les muestra el
+    -- evento, aunque su fila de participacion siga ahi.
+    v_tipo   := 'event_changed';
+    v_cuerpo := U&'\00AB' || v_title || U&'\00BB ahora es solo para amigos';
+  ELSE
+    RETURN NEW;
+  END IF;
+
+  FOR r IN
+    SELECT ep.user_id
+    FROM   public.event_participants ep
+    WHERE  ep.event_id = NEW.id
+      AND  ep.status   = 'joined'
+      AND  ep.user_id <> NEW.creator_id
+      AND  NOT public.is_blocked(ep.user_id, NEW.creator_id)
+    LIMIT 200
+  LOOP
+    PERFORM public.push_send(
+      r.user_id,
+      CASE WHEN v_tipo = 'event_cancelled' THEN U&'Plan cancelado' ELSE U&'Cambi\00F3 un plan' END,
+      v_cuerpo,
+      jsonb_build_object('type', v_tipo, 'event_id', NEW.id)
+    );
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.on_event_change_push() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_event_change_push ON public.events;
+CREATE TRIGGER trg_event_change_push
+  AFTER UPDATE OF starts_at, lat, lng, is_active, privacy ON public.events
+  FOR EACH ROW
+  -- Sin el WHEN, guardar el evento sin tocar nada disparia la funcion en
+  -- vano para cada participante.
+  WHEN (OLD.is_active  IS DISTINCT FROM NEW.is_active
+     OR OLD.starts_at  IS DISTINCT FROM NEW.starts_at
+     OR OLD.lat        IS DISTINCT FROM NEW.lat
+     OR OLD.lng        IS DISTINCT FROM NEW.lng
+     OR OLD.privacy    IS DISTINCT FROM NEW.privacy)
+  EXECUTE FUNCTION public.on_event_change_push();
+
+
+-- ------------------------------------------------------------
+-- 2. Los reportes sobreviven a que el reportado borre su cuenta
+--
+-- No basta con pasar la clave ajena a SET NULL: reports_one_target exige
+-- que cada reporte apunte a EXACTAMENTE una cosa, y un CHECK se comprueba
+-- tambien en el UPDATE que provoca el SET NULL. El borrado de cuenta
+-- fallaria entero.
+--
+-- Asi que el objetivo se parte en dos columnas:
+--   * reported_user_id  sigue siendo el enlace VIVO, con clave ajena; pasa
+--     a NULL cuando la cuenta se va, y por eso ya no puede sostener el
+--     CHECK.
+--   * reported_user_ref es la copia DURADERA del uuid, SIN clave ajena, que
+--     es la que el CHECK mira. Mas reported_name, para que la cola no tenga
+--     que descifrar un uuid a mano.
+--
+-- Mismo patron que blocks.blocked_name, que ya existe en el proyecto.
+-- ------------------------------------------------------------
+ALTER TABLE public.reports
+  ADD COLUMN IF NOT EXISTS reported_user_ref uuid,
+  ADD COLUMN IF NOT EXISTS reported_name     text;
+
+COMMENT ON COLUMN public.reports.reported_user_ref IS
+  'Copia del uuid reportado, SIN clave ajena a proposito: sobrevive a que la '
+  'cuenta se borre. Es la que sostiene reports_one_target; reported_user_id '
+  'es el enlace vivo y pasa a NULL.';
+COMMENT ON COLUMN public.reports.reported_name IS
+  'Nombre de la persona reportada en el momento del reporte. Desnormalizado '
+  'para que la cola de moderacion siga sabiendo sobre quien era. Mismo patron '
+  'que blocks.blocked_name.';
+
+-- Rellenar lo que ya hay ANTES de tocar el CHECK y la clave ajena.
+UPDATE public.reports r
+SET    reported_user_ref = r.reported_user_id
+WHERE  r.reported_user_id IS NOT NULL
+  AND  r.reported_user_ref IS NULL;
+
+UPDATE public.reports r
+SET    reported_name = p.name
+FROM   public.profiles p
+WHERE  p.id = r.reported_user_id
+  AND  r.reported_name IS NULL;
+
+-- Las dos las pone el servidor en cada reporte nuevo, no el cliente.
+CREATE OR REPLACE FUNCTION public.set_report_reported_target()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  NEW.reported_user_ref := NEW.reported_user_id;
+  NEW.reported_name     := NULL;
+
+  IF NEW.reported_user_id IS NOT NULL THEN
+    SELECT p.name INTO NEW.reported_name
+    FROM public.profiles p WHERE p.id = NEW.reported_user_id;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_report_reported_target() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_set_report_reported_target ON public.reports;
+CREATE TRIGGER trg_set_report_reported_target
+  BEFORE INSERT ON public.reports
+  FOR EACH ROW EXECUTE FUNCTION public.set_report_reported_target();
+
+-- El CHECK pasa a mirar la copia duradera.
+ALTER TABLE public.reports DROP CONSTRAINT IF EXISTS reports_one_target;
+ALTER TABLE public.reports
+  ADD CONSTRAINT reports_one_target CHECK (
+    (reported_user_ref   IS NOT NULL)::int
+  + (reported_event_id   IS NOT NULL)::int
+  + (reported_message_id IS NOT NULL)::int = 1
+  );
+
+-- El indice unico tambien: si no, borrar la cuenta y volver a registrarse
+-- con el mismo correo permitiria un reporte duplicado del mismo denunciante.
+DROP INDEX IF EXISTS public.reports_unique_user_target;
+CREATE UNIQUE INDEX IF NOT EXISTS reports_unique_user_target
+  ON public.reports (reporter_id, reported_user_ref) WHERE reported_user_ref IS NOT NULL;
+
+-- Y la cola de moderacion se lee por aqui.
+CREATE INDEX IF NOT EXISTS reports_pending_idx
+  ON public.reports (created_at DESC) WHERE status = 'pending';
+
+-- CASCADE -> SET NULL. El nombre del constraint lo pone Postgres al crear la
+-- tabla, asi que se busca en el catalogo en vez de darlo por sabido.
+DO $$
+DECLARE
+  v_nombre text;
+  v_tipo   "char";
+BEGIN
+  SELECT con.conname, con.confdeltype INTO v_nombre, v_tipo
+  FROM   pg_constraint con
+  JOIN   pg_attribute  att ON att.attrelid = con.conrelid AND att.attnum = con.conkey[1]
+  WHERE  con.conrelid = 'public.reports'::regclass
+    AND  con.contype  = 'f'
+    AND  att.attname  = 'reported_user_id'
+    AND  array_length(con.conkey, 1) = 1;
+
+  IF v_nombre IS NULL THEN
+    RAISE NOTICE 'reports.reported_user_id ya no tiene clave ajena de una sola columna; nada que cambiar.';
+    RETURN;
+  END IF;
+
+  IF v_tipo = 'n' THEN
+    RAISE NOTICE 'reports.reported_user_id ya estaba en SET NULL.';
+    RETURN;
+  END IF;
+
+  EXECUTE format('ALTER TABLE public.reports DROP CONSTRAINT %I', v_nombre);
+  ALTER TABLE public.reports
+    ADD CONSTRAINT reports_reported_user_id_fkey
+    FOREIGN KEY (reported_user_id) REFERENCES auth.users(id) ON DELETE SET NULL;
+  RAISE NOTICE 'reports.reported_user_id: CASCADE -> SET NULL.';
+END;
+$$;
+
+COMMIT;
 
 -- >>> 20260921000000_push-empieza-el-evento.sql <<<
 -- ============================================================
@@ -8693,3 +9936,4371 @@ SELECT cron.schedule(
   '*/5 * * * *',
   $$SELECT public.notify_started_events()$$
 );
+
+-- >>> 20260922000000_grupos-sobreviven-a-su-creador.sql <<<
+-- ============================================================
+-- Auditoria 2026-09-18: borrar tu cuenta no borra el grupo de los demas
+--
+-- UX-03 (P3). groups.created_by era NOT NULL ... ON DELETE CASCADE, asi que
+-- borrar una cuenta eliminaba TODOS los grupos que esa persona hubiera
+-- creado y, en cascada, sus group_members y todos los messages de esos
+-- grupos -- incluidos los de las demas personas.
+--
+-- Desde la privacidad de quien se va es correcto que desaparezca lo suyo.
+-- Para el resto del grupo es una perdida de datos inesperada causada por un
+-- tercero, y con create_group_from_event (20260919000000) los grupos pasaron
+-- a ser objetos compartidos con vida propia, lo que lo agrava.
+--
+-- Lo que hace esta migracion:
+--   1. created_by pasa a ser nullable y su clave ajena a ON DELETE SET NULL.
+--   2. Un disparador recoge ese NULL y traspasa el grupo al miembro mas
+--      antiguo que quede. Si no queda nadie, el grupo se borra: un grupo sin
+--      miembros no le sirve a nadie y solo acumularia mensajes huerfanos.
+--   3. Los DM son un caso aparte. Son grupos llamados '__dm_<uuid>_<uuid>'
+--      y solo tienen sentido entre DOS personas concretas: si una se va, el
+--      chat se borra, que es EXACTAMENTE lo que pasaba antes. Traspasarlo
+--      dejaria a la otra persona con un DM sin interlocutor.
+--
+-- Ninguna politica se rompe: las tres que miran created_by lo comparan con
+-- auth.uid(), y NULL = <uuid> no es cierto, asi que un grupo sin dueno
+-- simplemente deja de conceder nada por esa via. Lo comprobe una por una:
+--   * "Members and creators can view groups"        (SELECT groups)
+--   * "Creators can update groups"                  (UPDATE groups)
+--   * la rama de creador en el SELECT de group_members
+-- Todas siguen concediendo por is_group_member, que es lo que importa.
+--
+-- ASCII puro. Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. created_by puede quedarse sin dueno mientras se traspasa
+-- ------------------------------------------------------------
+ALTER TABLE public.groups ALTER COLUMN created_by DROP NOT NULL;
+
+DO $$
+DECLARE
+  v_nombre text;
+  v_tipo   "char";
+BEGIN
+  SELECT con.conname, con.confdeltype INTO v_nombre, v_tipo
+  FROM   pg_constraint con
+  JOIN   pg_attribute  att ON att.attrelid = con.conrelid AND att.attnum = con.conkey[1]
+  WHERE  con.conrelid = 'public.groups'::regclass
+    AND  con.contype  = 'f'
+    AND  att.attname  = 'created_by'
+    AND  array_length(con.conkey, 1) = 1;
+
+  IF v_nombre IS NULL THEN
+    RAISE NOTICE 'groups.created_by no tiene clave ajena de una sola columna; nada que cambiar.';
+  ELSIF v_tipo = 'n' THEN
+    RAISE NOTICE 'groups.created_by ya estaba en SET NULL.';
+  ELSE
+    EXECUTE format('ALTER TABLE public.groups DROP CONSTRAINT %I', v_nombre);
+    ALTER TABLE public.groups
+      ADD CONSTRAINT groups_created_by_fkey
+      FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE SET NULL;
+    RAISE NOTICE 'groups.created_by: CASCADE -> SET NULL.';
+  END IF;
+END;
+$$;
+
+
+-- ------------------------------------------------------------
+-- 2. El traspaso
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.transfer_group_on_owner_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_heredero uuid;
+BEGIN
+  -- Un DM no se traspasa: se va con quien se va.
+  IF left(COALESCE(NEW.name, ''), 5) = '__dm_' THEN
+    DELETE FROM public.groups WHERE id = NEW.id;
+    RETURN NULL;
+  END IF;
+
+  -- El miembro mas antiguo que quede, excluyendo a quien se va. Hay que
+  -- excluirlo a mano: el borrado de auth.users dispara varias cascadas y no
+  -- garantiza que su propia fila de group_members se haya ido ya, asi que sin
+  -- esto podria heredar el grupo la misma persona que lo esta dejando.
+  SELECT gm.user_id INTO v_heredero
+  FROM   public.group_members gm
+  WHERE  gm.group_id = NEW.id
+    AND  gm.user_id <> OLD.created_by
+  ORDER  BY gm.joined_at ASC, gm.user_id ASC
+  LIMIT  1;
+
+  IF v_heredero IS NULL THEN
+    -- Nadie mas dentro: el grupo no le sirve a nadie y solo dejaria mensajes
+    -- huerfanos. Mismo efecto que antes de esta migracion.
+    DELETE FROM public.groups WHERE id = NEW.id;
+    RETURN NULL;
+  END IF;
+
+  UPDATE public.groups SET created_by = v_heredero WHERE id = NEW.id;
+  RETURN NULL;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.transfer_group_on_owner_delete() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_transfer_group_on_owner_delete ON public.groups;
+CREATE TRIGGER trg_transfer_group_on_owner_delete
+  AFTER UPDATE OF created_by ON public.groups
+  FOR EACH ROW
+  -- Solo el paso a NULL, que es el que provoca el SET NULL del borrado de
+  -- cuenta. Un cambio normal de dueno no entra aqui.
+  WHEN (NEW.created_by IS NULL AND OLD.created_by IS NOT NULL)
+  EXECUTE FUNCTION public.transfer_group_on_owner_delete();
+
+COMMENT ON COLUMN public.groups.created_by IS
+  'Quien creo el grupo. Nullable desde 20260922000000 solo como paso '
+  'intermedio: si esa cuenta se borra, la clave ajena lo pone en NULL y '
+  'trg_transfer_group_on_owner_delete traspasa el grupo al miembro mas '
+  'antiguo (o lo borra si no queda nadie, y siempre si es un DM).';
+
+COMMIT;
+
+-- >>> 20260923000000_chat-de-actividad.sql <<<
+-- ============================================================
+-- Chat de grupo de cada actividad
+--
+-- Cada evento tiene EXACTAMENTE un chat: el que forman sus mensajes con
+-- messages.event_id = <evento>. La columna existe desde la primera
+-- migracion para esto mismo y nunca se llego a usar (20260920000000, de la
+-- PR #17, la marco como "muerta" y quito su rama de las politicas). Aqui se
+-- reactiva, en vez de crear una tabla de chats o de miembros paralela.
+--
+-- Quien esta en el chat NO se guarda aparte: se calcula en cada lectura.
+--   miembro = quien organiza  +  participantes con status = 'joined'
+--             y que no esten bloqueados con quien organiza
+-- Asi no hay una segunda lista de miembros que pueda desincronizarse:
+-- salir del evento, que te expulsen o que haya un bloqueo corta el acceso
+-- en la misma transaccion, y los mensajes anteriores se quedan donde estan.
+--
+-- Lo que hay:
+--   1. messages: menciones, aviso del organizador y quien borro.
+--   2. event_removals: expulsiones (no se puede volver a entrar solo).
+--   3. event_chat_state: leido, silenciado y "lo estoy viendo" por persona.
+--   4. event_moderation_log: registro de lo que hace el organizador.
+--   5. Funciones de acceso y politicas de messages (las tres).
+--   6. Disparadores: validar al enviar, al editar, al entrar y al bloquear.
+--   7. RPC del chat y de moderacion.
+--   8. notification_counts gana event_chat_unread.
+--   9. Push del chat (version sencilla; 20260925000000 la cambia por la
+--      cola de notificaciones con agrupacion y preferencias).
+--
+-- No borra ni reescribe mensajes. Compatible con la version publicada de
+-- la app: no toca ninguna columna que lea y las politicas de grupos y DM
+-- conceden exactamente lo mismo que antes.
+--
+-- ASCII puro (textos de push con U&'...'). Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. messages
+-- ------------------------------------------------------------
+ALTER TABLE public.messages
+  ADD COLUMN IF NOT EXISTS mentions        uuid[]  NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS is_announcement boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS deleted_by      uuid REFERENCES auth.users(id) ON DELETE SET NULL;
+
+COMMENT ON COLUMN public.messages.event_id IS
+  'Chat de la actividad (20260923000000). Exactamente uno de event_id y '
+  'group_id. Leen y escriben quien organiza y los participantes joined.';
+COMMENT ON COLUMN public.messages.mentions IS
+  'Personas mencionadas (@). Las filtra el servidor: solo miembros del chat, '
+  'sin quien escribe, sin bloqueados, maximo 10. No se cambian al editar.';
+COMMENT ON COLUMN public.messages.is_announcement IS
+  'Aviso del organizador. Solo en chats de actividad y solo quien organiza.';
+COMMENT ON COLUMN public.messages.deleted_by IS
+  'Quien lo borro: su autor o el organizador de la actividad.';
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_mentions_max') THEN
+    ALTER TABLE public.messages
+      ADD CONSTRAINT messages_mentions_max CHECK (cardinality(mentions) <= 10);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_announcement_in_event') THEN
+    ALTER TABLE public.messages
+      ADD CONSTRAINT messages_announcement_in_event CHECK (NOT is_announcement OR event_id IS NOT NULL);
+  END IF;
+  -- El mismo tope que puso 20260920000000 (PR #17, ya aplicada en
+  -- produccion). Si esa migracion ya corrio, esto no hace nada; si no,
+  -- el chat de actividad no queda sin limite de longitud.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_content_len') THEN
+    ALTER TABLE public.messages
+      ADD CONSTRAINT messages_content_len
+      CHECK (length(content) <= 2000
+             AND (deleted_at IS NOT NULL OR length(btrim(content)) > 0)) NOT VALID;
+  END IF;
+  -- Un mensaje pertenece a UN chat. NOT VALID para que la migracion no
+  -- dependa de filas historicas; se valida justo debajo.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_one_chat') THEN
+    ALTER TABLE public.messages
+      ADD CONSTRAINT messages_one_chat CHECK (num_nonnulls(event_id, group_id) = 1) NOT VALID;
+  END IF;
+END $$;
+
+-- Si alguna fila vieja lo impidiera, el CHECK sigue protegiendo lo nuevo y
+-- solo se avisa. No hay que tocar datos para aplicar la migracion.
+DO $$
+BEGIN
+  ALTER TABLE public.messages VALIDATE CONSTRAINT messages_one_chat;
+EXCEPTION WHEN check_violation THEN
+  RAISE NOTICE 'messages_one_chat queda NOT VALID: hay filas antiguas sin chat o con dos.';
+END $$;
+
+-- El chat se pide por evento y fecha, como el de grupo por grupo y fecha.
+CREATE INDEX IF NOT EXISTS messages_event_created_idx
+  ON public.messages (event_id, created_at DESC)
+  WHERE event_id IS NOT NULL;
+
+-- Para el limite de envio (abajo): los mensajes recientes de una persona.
+CREATE INDEX IF NOT EXISTS messages_sender_created_idx
+  ON public.messages (sender_id, created_at DESC);
+
+
+-- ------------------------------------------------------------
+-- 2. Expulsiones
+--
+-- Expulsar borra la participacion (libera la plaza y corta el chat) y deja
+-- esta fila para que la persona no pueda volver a unirse por su cuenta. El
+-- organizador puede deshacerlo.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.event_removals (
+  event_id   uuid NOT NULL REFERENCES public.events(id) ON DELETE CASCADE,
+  user_id    uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  removed_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  reason     text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (event_id, user_id),
+  CONSTRAINT event_removals_reason_len CHECK (reason IS NULL OR length(reason) <= 300)
+);
+
+CREATE INDEX IF NOT EXISTS event_removals_user_idx ON public.event_removals (user_id);
+
+ALTER TABLE public.event_removals ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.event_removals FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.event_removals TO authenticated;
+
+-- Lo ve quien organiza y la persona afectada (para decirle por que no
+-- puede volver a entrar). Nadie escribe directo: solo las RPC de abajo.
+DROP POLICY IF EXISTS "Organizer and removed user can read removals" ON public.event_removals;
+CREATE POLICY "Organizer and removed user can read removals"
+  ON public.event_removals FOR SELECT TO authenticated
+  USING (user_id = auth.uid() OR public.is_event_creator(event_id, auth.uid()));
+
+
+-- ------------------------------------------------------------
+-- 3. Estado del chat por persona
+--
+-- last_read_at   hasta donde leyo (no leidos).
+-- muted          no avisar de mensajes normales (menciones y avisos del
+--                organizador si llegan).
+-- active_until   la pantalla del chat esta abierta: no hace falta push.
+-- last_pushed_at para agrupar mensajes seguidos en un solo aviso.
+--
+-- Se crea al entrar (organizador al crear, participante al unirse o ser
+-- aprobado) y se borra al salir. Solo se escribe por RPC.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.event_chat_state (
+  event_id       uuid NOT NULL REFERENCES public.events(id) ON DELETE CASCADE,
+  user_id        uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  last_read_at   timestamptz NOT NULL DEFAULT now(),
+  muted          boolean NOT NULL DEFAULT false,
+  active_until   timestamptz,
+  last_pushed_at timestamptz,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (event_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS event_chat_state_user_idx ON public.event_chat_state (user_id);
+
+ALTER TABLE public.event_chat_state ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.event_chat_state FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.event_chat_state TO authenticated;
+
+DROP POLICY IF EXISTS "Users read own chat state" ON public.event_chat_state;
+CREATE POLICY "Users read own chat state"
+  ON public.event_chat_state FOR SELECT TO authenticated
+  USING (user_id = auth.uid());
+
+
+-- ------------------------------------------------------------
+-- 4. Registro de moderacion del organizador
+--
+-- La moderacion de la app sigue siendo reportes + bloqueos + revision a
+-- mano (supabase/setup/README.md). Esto deja constancia de lo que hace
+-- cada organizador en su actividad, para esa revision.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.event_moderation_log (
+  id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  event_id       uuid NOT NULL REFERENCES public.events(id) ON DELETE CASCADE,
+  actor_id       uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  action         text NOT NULL CHECK (action IN ('delete_message', 'remove_participant', 'readmit_participant')),
+  target_user_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  message_id     uuid REFERENCES public.messages(id) ON DELETE SET NULL,
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS event_moderation_log_event_idx
+  ON public.event_moderation_log (event_id, created_at DESC);
+
+ALTER TABLE public.event_moderation_log ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.event_moderation_log FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.event_moderation_log TO authenticated;
+
+DROP POLICY IF EXISTS "Organizer reads own event log" ON public.event_moderation_log;
+CREATE POLICY "Organizer reads own event log"
+  ON public.event_moderation_log FOR SELECT TO authenticated
+  USING (public.is_event_creator(event_id, auth.uid()));
+
+
+-- ------------------------------------------------------------
+-- 5. Quien esta en el chat
+--
+-- event_chat_member(evento, persona): para el propio servidor. No se
+-- concede a authenticated: con dos argumentos serviria para preguntar si
+-- CUALQUIERA esta en CUALQUIER evento.
+--
+-- can_access_event_chat(evento): la que usan las politicas. Pregunta
+-- siempre por quien llama.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.event_chat_member(_event_id uuid, _user_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT _event_id IS NOT NULL AND _user_id IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM public.events e
+    WHERE e.id = _event_id
+      AND (
+        e.creator_id = _user_id
+        OR (
+          EXISTS (
+            SELECT 1 FROM public.event_participants ep
+            WHERE ep.event_id = e.id
+              AND ep.user_id  = _user_id
+              AND ep.status   = 'joined'
+          )
+          AND NOT public.is_blocked(_user_id, e.creator_id)
+        )
+      )
+  );
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.event_chat_member(uuid, uuid) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.can_access_event_chat(_event_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT public.event_chat_member(_event_id, auth.uid());
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.can_access_event_chat(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.can_access_event_chat(uuid) TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 5b. Politicas de messages
+--
+-- Grupos y DM conceden lo mismo que antes (incluido leer lo propio). El
+-- chat de actividad es estricto: si ya no estas, no lees ni lo tuyo.
+-- ------------------------------------------------------------
+DROP POLICY IF EXISTS "Users can view messages in their events or groups" ON public.messages;
+CREATE POLICY "Users can view messages in their events or groups"
+  ON public.messages FOR SELECT TO authenticated
+  USING (
+    NOT public.is_blocked(auth.uid(), sender_id)
+    AND (
+      (group_id IS NOT NULL
+        AND (sender_id = auth.uid() OR public.is_group_member(group_id, auth.uid())))
+      OR (event_id IS NOT NULL AND public.can_access_event_chat(event_id))
+    )
+  );
+
+DROP POLICY IF EXISTS "Members can send messages" ON public.messages;
+CREATE POLICY "Members can send messages"
+  ON public.messages FOR INSERT TO authenticated
+  WITH CHECK (
+    sender_id = auth.uid()
+    AND (
+      (group_id IS NOT NULL AND event_id IS NULL AND public.is_group_member(group_id, auth.uid()))
+      OR (event_id IS NOT NULL AND group_id IS NULL AND public.can_access_event_chat(event_id))
+    )
+  );
+
+DROP POLICY IF EXISTS "Senders can edit own messages" ON public.messages;
+CREATE POLICY "Senders can edit own messages"
+  ON public.messages FOR UPDATE TO authenticated
+  USING (
+    sender_id = auth.uid()
+    AND deleted_at IS NULL
+    AND (
+      (group_id IS NOT NULL AND public.is_group_member(group_id, auth.uid()))
+      OR (event_id IS NOT NULL AND public.can_access_event_chat(event_id))
+    )
+  )
+  WITH CHECK (sender_id = auth.uid());
+
+
+-- ------------------------------------------------------------
+-- 6a. Al enviar
+--
+-- DEFINER: tiene que mirar si cada mencionado esta en el chat. Sin sesion
+-- (service_role, migraciones) no toca nada.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.guard_message_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid     uuid := auth.uid();
+  v_recent  integer;
+BEGIN
+  IF v_uid IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  -- Lo que describe el estado del mensaje lo pone el servidor.
+  NEW.edited_at  := NULL;
+  NEW.deleted_at := NULL;
+  NEW.deleted_by := NULL;
+
+  -- Un script no inunda un chat: 30 mensajes por minuto es mucho para una
+  -- persona escribiendo.
+  SELECT count(*) INTO v_recent
+  FROM public.messages m
+  WHERE m.sender_id = v_uid
+    AND m.created_at > now() - interval '1 minute';
+  IF v_recent >= 30 THEN
+    RAISE EXCEPTION 'MESSAGE_RATE_LIMIT' USING ERRCODE = 'P0001';
+  END IF;
+
+  IF NEW.is_announcement THEN
+    IF NEW.event_id IS NULL OR NOT public.is_event_creator(NEW.event_id, v_uid) THEN
+      RAISE EXCEPTION 'ANNOUNCEMENT_NOT_ALLOWED' USING ERRCODE = '42501';
+    END IF;
+    -- Un aviso llega aunque el chat este silenciado: se acota.
+    IF (SELECT count(*) FROM public.messages m
+        WHERE m.event_id = NEW.event_id AND m.is_announcement
+          AND m.created_at > now() - interval '1 day') >= 5 THEN
+      RAISE EXCEPTION 'ANNOUNCEMENT_RATE_LIMIT' USING ERRCODE = 'P0001';
+    END IF;
+  END IF;
+
+  -- Menciones: se quedan solo las validas, sin error, igual que un @ mal
+  -- escrito en cualquier chat simplemente no menciona a nadie.
+  NEW.mentions := COALESCE(ARRAY(
+    SELECT DISTINCT m
+    FROM unnest(COALESCE(NEW.mentions, '{}'::uuid[])) AS m
+    WHERE m IS NOT NULL
+      AND m <> v_uid
+      AND NOT public.is_blocked(v_uid, m)
+      AND CASE
+            WHEN NEW.event_id IS NOT NULL THEN public.event_chat_member(NEW.event_id, m)
+            ELSE public.is_group_member(NEW.group_id, m)
+          END
+    LIMIT 10
+  ), '{}'::uuid[]);
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_message_insert() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_message_insert ON public.messages;
+CREATE TRIGGER trg_guard_message_insert
+  BEFORE INSERT ON public.messages
+  FOR EACH ROW EXECUTE FUNCTION public.guard_message_insert();
+
+
+-- ------------------------------------------------------------
+-- 6b. Al editar o borrar
+--
+-- Mismo cuerpo que en 20260914000000 mas tres columnas bloqueadas y
+-- deleted_by, que lo pone el servidor: quien borra (autor u organizador).
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.guard_message_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.id              IS DISTINCT FROM OLD.id
+  OR NEW.sender_id       IS DISTINCT FROM OLD.sender_id
+  OR NEW.group_id        IS DISTINCT FROM OLD.group_id
+  OR NEW.event_id        IS DISTINCT FROM OLD.event_id
+  OR NEW.created_at      IS DISTINCT FROM OLD.created_at
+  OR NEW.expires_at      IS DISTINCT FROM OLD.expires_at
+  OR NEW.mentions        IS DISTINCT FROM OLD.mentions
+  OR NEW.is_announcement IS DISTINCT FROM OLD.is_announcement THEN
+    RAISE EXCEPTION 'MESSAGE_FIELD_LOCKED' USING ERRCODE = '42501';
+  END IF;
+
+  IF OLD.deleted_at IS NOT NULL THEN
+    RAISE EXCEPTION 'MESSAGE_DELETED' USING ERRCODE = 'P0001';
+  END IF;
+
+  IF NEW.deleted_at IS NOT NULL THEN
+    NEW.deleted_at := now();
+    NEW.deleted_by := auth.uid();
+    NEW.content    := '';
+    NEW.edited_at  := OLD.edited_at;
+    RETURN NEW;
+  END IF;
+
+  NEW.deleted_by := OLD.deleted_by;
+
+  IF NEW.content IS DISTINCT FROM OLD.content THEN
+    IF NEW.content IS NULL OR length(btrim(NEW.content)) = 0 THEN
+      RAISE EXCEPTION 'EMPTY_MESSAGE' USING ERRCODE = 'P0001';
+    END IF;
+    NEW.content   := btrim(NEW.content);
+    NEW.edited_at := now();
+  ELSE
+    NEW.edited_at := OLD.edited_at;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_message_update() FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 6c. Entrar y salir del chat va con la participacion
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.sync_event_chat_state()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'events' THEN
+    INSERT INTO public.event_chat_state (event_id, user_id)
+    VALUES (NEW.id, NEW.creator_id)
+    ON CONFLICT (event_id, user_id) DO NOTHING;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    DELETE FROM public.event_chat_state
+    WHERE event_id = OLD.event_id AND user_id = OLD.user_id
+      AND NOT EXISTS (SELECT 1 FROM public.events e WHERE e.id = OLD.event_id AND e.creator_id = OLD.user_id);
+    RETURN OLD;
+  END IF;
+
+  -- INSERT o UPDATE hacia 'joined': quien entra empieza al dia. Lo que se
+  -- dijo antes lo puede leer, pero no le aparece como pendiente.
+  IF NEW.status = 'joined' THEN
+    INSERT INTO public.event_chat_state (event_id, user_id)
+    VALUES (NEW.event_id, NEW.user_id)
+    ON CONFLICT (event_id, user_id) DO UPDATE
+      SET last_read_at = now(), updated_at = now();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.sync_event_chat_state() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_event_chat_state_creator ON public.events;
+CREATE TRIGGER trg_event_chat_state_creator
+  AFTER INSERT ON public.events
+  FOR EACH ROW EXECUTE FUNCTION public.sync_event_chat_state();
+
+DROP TRIGGER IF EXISTS trg_event_chat_state_join ON public.event_participants;
+CREATE TRIGGER trg_event_chat_state_join
+  AFTER INSERT OR UPDATE OF status ON public.event_participants
+  FOR EACH ROW
+  WHEN (NEW.status = 'joined')
+  EXECUTE FUNCTION public.sync_event_chat_state();
+
+DROP TRIGGER IF EXISTS trg_event_chat_state_leave ON public.event_participants;
+CREATE TRIGGER trg_event_chat_state_leave
+  AFTER DELETE ON public.event_participants
+  FOR EACH ROW EXECUTE FUNCTION public.sync_event_chat_state();
+
+-- Los que ya estaban: al dia (el chat de actividad no tenia mensajes).
+INSERT INTO public.event_chat_state (event_id, user_id)
+SELECT e.id, e.creator_id FROM public.events e
+ON CONFLICT (event_id, user_id) DO NOTHING;
+
+INSERT INTO public.event_chat_state (event_id, user_id)
+SELECT ep.event_id, ep.user_id FROM public.event_participants ep WHERE ep.status = 'joined'
+ON CONFLICT (event_id, user_id) DO NOTHING;
+
+
+-- ------------------------------------------------------------
+-- 6d. Expulsado no vuelve a entrar solo
+--
+-- Mismo cuerpo que 20260820000000 mas la comprobacion de event_removals.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.set_participant_initial_status()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_privacy    text;
+  v_creator_id uuid;
+BEGIN
+  SELECT privacy, creator_id INTO v_privacy, v_creator_id
+  FROM public.events WHERE id = NEW.event_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'EVENT_NOT_FOUND' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM public.event_removals r
+    WHERE r.event_id = NEW.event_id AND r.user_id = NEW.user_id
+  ) THEN
+    RAISE EXCEPTION 'REMOVED_FROM_EVENT' USING ERRCODE = '42501';
+  END IF;
+
+  IF v_privacy = 'private' AND NEW.user_id <> v_creator_id THEN
+    NEW.status := 'pending';
+  ELSE
+    NEW.status := 'joined';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_participant_initial_status() FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 6e. Bloquear tambien saca de las actividades del otro
+--
+-- Mismo cuerpo que 20260817010000 mas el ultimo DELETE. El acceso al chat
+-- ya se corta solo (event_chat_member mira is_blocked); esto ademas libera
+-- la plaza en lo que todavia no ha terminado. Lo pasado se queda: borrar
+-- la participacion se llevaria el historial de asistencia.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.on_block_cleanup()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_dm_name text;
+BEGIN
+  DELETE FROM public.friendships
+  WHERE (requester_id = NEW.blocker_id AND addressee_id = NEW.blocked_id)
+     OR (requester_id = NEW.blocked_id AND addressee_id = NEW.blocker_id);
+
+  v_dm_name := '__dm_' || least(NEW.blocker_id, NEW.blocked_id)::text
+                       || '_' || greatest(NEW.blocker_id, NEW.blocked_id)::text;
+
+  DELETE FROM public.group_members
+  WHERE user_id IN (NEW.blocker_id, NEW.blocked_id)
+    AND group_id IN (SELECT id FROM public.groups WHERE name = v_dm_name);
+
+  DELETE FROM public.event_participants ep
+  USING public.events e
+  WHERE e.id = ep.event_id
+    AND e.ends_at > now()
+    AND (
+      (e.creator_id = NEW.blocker_id AND ep.user_id = NEW.blocked_id)
+      OR (e.creator_id = NEW.blocked_id AND ep.user_id = NEW.blocker_id)
+    );
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.on_block_cleanup() FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 7. RPC del chat
+-- ------------------------------------------------------------
+
+-- Cabecera del chat: lo que necesita la pantalla sobre quien la abre.
+CREATE OR REPLACE FUNCTION public.event_chat_summary(_event_id uuid)
+RETURNS TABLE (
+  can_access   boolean,
+  is_organizer boolean,
+  removed      boolean,
+  muted        boolean,
+  last_read_at timestamptz,
+  unread       bigint,
+  member_count integer
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid    uuid := auth.uid();
+  v_access boolean;
+  v_state  public.event_chat_state%ROWTYPE;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  v_access := public.event_chat_member(_event_id, v_uid);
+
+  IF NOT v_access THEN
+    -- Sin acceso no se cuenta nada del chat: solo si te expulsaron, que es
+    -- una fila tuya y ya la puedes leer por RLS.
+    RETURN QUERY SELECT false, false,
+      EXISTS (SELECT 1 FROM public.event_removals r WHERE r.event_id = _event_id AND r.user_id = v_uid),
+      false, NULL::timestamptz, 0::bigint, 0;
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_state FROM public.event_chat_state s
+  WHERE s.event_id = _event_id AND s.user_id = v_uid;
+
+  RETURN QUERY
+  SELECT
+    true,
+    public.is_event_creator(_event_id, v_uid),
+    false,
+    COALESCE(v_state.muted, false),
+    v_state.last_read_at,
+    (SELECT count(*) FROM public.messages m
+      WHERE m.event_id = _event_id
+        AND m.sender_id <> v_uid
+        AND m.deleted_at IS NULL
+        AND m.created_at > COALESCE(v_state.last_read_at, now())
+        AND NOT public.is_blocked(v_uid, m.sender_id)),
+    (SELECT 1 + count(*)::int FROM public.event_participants ep
+      JOIN public.events e ON e.id = ep.event_id
+      WHERE ep.event_id = _event_id AND ep.status = 'joined' AND ep.user_id <> e.creator_id);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.event_chat_summary(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.event_chat_summary(uuid) TO authenticated;
+
+
+-- Quien esta en el chat, para la lista de miembros y las menciones.
+-- Organizador primero. Sin bloqueados en ningun sentido.
+CREATE OR REPLACE FUNCTION public.event_chat_members(_event_id uuid)
+RETURNS TABLE (
+  user_id      uuid,
+  name         text,
+  avatar_url   text,
+  is_organizer boolean
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  WITH ev AS (
+    SELECT e.id, e.creator_id FROM public.events e
+    WHERE e.id = _event_id AND public.event_chat_member(_event_id, auth.uid())
+  ), gente AS (
+    SELECT ev.creator_id AS uid, true AS org, NULL::timestamptz AS desde FROM ev
+    UNION ALL
+    SELECT ep.user_id, false, ep.joined_at
+    FROM public.event_participants ep JOIN ev ON ev.id = ep.event_id
+    WHERE ep.status = 'joined' AND ep.user_id <> ev.creator_id
+      AND NOT public.is_blocked(ep.user_id, ev.creator_id)
+  )
+  SELECT p.id, p.name, p.avatar_url, g.org
+  FROM gente g
+  JOIN public.profiles p ON p.id = g.uid
+  WHERE p.id = auth.uid() OR NOT public.is_blocked(auth.uid(), p.id)
+  ORDER BY g.org DESC, g.desde ASC NULLS FIRST, p.id;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.event_chat_members(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.event_chat_members(uuid) TO authenticated;
+
+
+-- Marcar leido. Solo si estas en el chat.
+CREATE OR REPLACE FUNCTION public.mark_event_chat_read(_event_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL OR NOT public.event_chat_member(_event_id, v_uid) THEN
+    RETURN;
+  END IF;
+  INSERT INTO public.event_chat_state (event_id, user_id, last_read_at)
+  VALUES (_event_id, v_uid, now())
+  ON CONFLICT (event_id, user_id) DO UPDATE
+    SET last_read_at = now(), updated_at = now();
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.mark_event_chat_read(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.mark_event_chat_read(uuid) TO authenticated;
+
+
+-- Silenciar o reactivar los avisos de mensajes de una actividad.
+CREATE OR REPLACE FUNCTION public.set_event_chat_muted(_event_id uuid, _muted boolean)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL OR NOT public.event_chat_member(_event_id, v_uid) THEN
+    RAISE EXCEPTION 'NOT_A_CHAT_MEMBER' USING ERRCODE = '42501';
+  END IF;
+  INSERT INTO public.event_chat_state (event_id, user_id, muted)
+  VALUES (_event_id, v_uid, COALESCE(_muted, false))
+  ON CONFLICT (event_id, user_id) DO UPDATE
+    SET muted = COALESCE(_muted, false), updated_at = now();
+  RETURN COALESCE(_muted, false);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_event_chat_muted(uuid, boolean) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.set_event_chat_muted(uuid, boolean) TO authenticated;
+
+
+-- "Lo estoy viendo": la app lo renueva cada ~30 s con el chat abierto y lo
+-- apaga al salir. Mientras dure, no se manda push de ese chat (el mensaje
+-- ya llega por tiempo real) y cuenta como leido.
+CREATE OR REPLACE FUNCTION public.set_event_chat_presence(_event_id uuid, _active boolean)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL OR NOT public.event_chat_member(_event_id, v_uid) THEN
+    RETURN;
+  END IF;
+  INSERT INTO public.event_chat_state (event_id, user_id, last_read_at, active_until)
+  VALUES (_event_id, v_uid, now(), CASE WHEN _active THEN now() + interval '45 seconds' END)
+  ON CONFLICT (event_id, user_id) DO UPDATE
+    SET active_until = CASE WHEN _active THEN now() + interval '45 seconds' END,
+        last_read_at = now(),
+        updated_at   = now();
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_event_chat_presence(uuid, boolean) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.set_event_chat_presence(uuid, boolean) TO authenticated;
+
+
+-- No leidos por actividad, para Mis eventos y la ficha del evento.
+CREATE OR REPLACE FUNCTION public.event_chat_unread()
+RETURNS TABLE (event_id uuid, unread bigint)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT s.event_id, count(m.id)
+  FROM public.event_chat_state s
+  JOIN public.messages m
+    ON m.event_id = s.event_id
+   AND m.created_at > s.last_read_at
+   AND m.sender_id <> s.user_id
+   AND m.deleted_at IS NULL
+  WHERE s.user_id = auth.uid()
+    AND public.event_chat_member(s.event_id, s.user_id)
+    AND NOT public.is_blocked(s.user_id, m.sender_id)
+  GROUP BY s.event_id;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.event_chat_unread() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.event_chat_unread() TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 7b. Moderacion del organizador
+-- ------------------------------------------------------------
+
+-- Borra (logicamente) un mensaje de SU actividad. Pasa por
+-- guard_message_update igual que un borrado del autor: vacia el texto y
+-- apunta en deleted_by quien lo hizo.
+CREATE OR REPLACE FUNCTION public.moderate_event_message(_message_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_msg record;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT m.id, m.event_id, m.sender_id, m.deleted_at INTO v_msg
+  FROM public.messages m WHERE m.id = _message_id;
+
+  -- Mismo error si no existe o si no es de una actividad tuya.
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'NOT_THE_ORGANIZER' USING ERRCODE = '42501';
+  END IF;
+  IF v_msg.event_id IS NULL OR NOT public.is_event_creator(v_msg.event_id, v_uid) THEN
+    RAISE EXCEPTION 'NOT_THE_ORGANIZER' USING ERRCODE = '42501';
+  END IF;
+
+  IF v_msg.deleted_at IS NOT NULL THEN
+    RETURN;
+  END IF;
+
+  UPDATE public.messages SET deleted_at = now() WHERE id = _message_id;
+
+  INSERT INTO public.event_moderation_log (event_id, actor_id, action, target_user_id, message_id)
+  VALUES (v_msg.event_id, v_uid, 'delete_message', v_msg.sender_id, _message_id);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.moderate_event_message(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.moderate_event_message(uuid) TO authenticated;
+
+
+-- Expulsa a un participante (unido o pendiente) de SU actividad.
+CREATE OR REPLACE FUNCTION public.remove_event_participant(_event_id uuid, _user_id uuid, _reason text DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+  IF NOT public.is_event_creator(_event_id, v_uid) THEN
+    RAISE EXCEPTION 'NOT_THE_ORGANIZER' USING ERRCODE = '42501';
+  END IF;
+  IF _user_id IS NULL OR _user_id = v_uid THEN
+    RAISE EXCEPTION 'INVALID_TARGET' USING ERRCODE = 'P0001';
+  END IF;
+
+  -- Misma serializacion que respond_to_join_request: el evento primero.
+  PERFORM 1 FROM public.events WHERE id = _event_id FOR UPDATE;
+
+  DELETE FROM public.event_participants
+  WHERE event_id = _event_id AND user_id = _user_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'NOT_A_PARTICIPANT' USING ERRCODE = 'P0002';
+  END IF;
+
+  INSERT INTO public.event_removals (event_id, user_id, removed_by, reason)
+  VALUES (_event_id, _user_id, v_uid, left(nullif(btrim(COALESCE(_reason, '')), ''), 300))
+  ON CONFLICT (event_id, user_id) DO UPDATE
+    SET removed_by = EXCLUDED.removed_by, reason = EXCLUDED.reason, created_at = now();
+
+  INSERT INTO public.event_moderation_log (event_id, actor_id, action, target_user_id)
+  VALUES (_event_id, v_uid, 'remove_participant', _user_id);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.remove_event_participant(uuid, uuid, text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.remove_event_participant(uuid, uuid, text) TO authenticated;
+
+
+-- Deshace una expulsion: la persona puede volver a unirse (o pedirlo).
+CREATE OR REPLACE FUNCTION public.readmit_event_participant(_event_id uuid, _user_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+  IF NOT public.is_event_creator(_event_id, v_uid) THEN
+    RAISE EXCEPTION 'NOT_THE_ORGANIZER' USING ERRCODE = '42501';
+  END IF;
+
+  DELETE FROM public.event_removals WHERE event_id = _event_id AND user_id = _user_id;
+  IF FOUND THEN
+    INSERT INTO public.event_moderation_log (event_id, actor_id, action, target_user_id)
+    VALUES (_event_id, v_uid, 'readmit_participant', _user_id);
+  END IF;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.readmit_event_participant(uuid, uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.readmit_event_participant(uuid, uuid) TO authenticated;
+
+
+-- Expulsados de una actividad, para poder deshacerlo. Solo el organizador.
+CREATE OR REPLACE FUNCTION public.event_removed_people(_event_id uuid)
+RETURNS TABLE (user_id uuid, name text, avatar_url text, removed_at timestamptz)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT r.user_id, p.name, p.avatar_url, r.created_at
+  FROM public.event_removals r
+  JOIN public.profiles p ON p.id = r.user_id
+  WHERE r.event_id = _event_id
+    AND public.is_event_creator(_event_id, auth.uid())
+  ORDER BY r.created_at DESC;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.event_removed_people(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.event_removed_people(uuid) TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 8. notification_counts gana event_chat_unread
+--
+-- Cambia la forma del resultado: hay que borrarla y crearla (42P13). Las
+-- cinco columnas de antes quedan igual y en el mismo orden; la version de
+-- la App Store ignora la nueva.
+-- ------------------------------------------------------------
+DROP FUNCTION IF EXISTS public.notification_counts();
+
+CREATE FUNCTION public.notification_counts()
+RETURNS TABLE (
+  join_requests     bigint,
+  friend_requests   bigint,
+  unread_messages   bigint,
+  approvals         bigint,
+  group_invites     bigint,
+  event_chat_unread bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT
+    (SELECT count(*)
+       FROM public.event_participants p
+       JOIN public.events e ON e.id = p.event_id
+      WHERE e.creator_id = auth.uid()
+        AND e.is_active
+        AND p.status = 'pending'),
+
+    (SELECT count(*)
+       FROM public.friendships f
+      WHERE f.addressee_id = auth.uid()
+        AND f.status = 'pending'
+        AND NOT public.is_blocked(auth.uid(), f.requester_id)),
+
+    (SELECT count(*)
+       FROM public.group_members gm
+       JOIN public.messages m ON m.group_id = gm.group_id
+      WHERE gm.user_id   = auth.uid()
+        AND m.sender_id <> auth.uid()
+        AND m.created_at > gm.last_read_at
+        AND m.deleted_at IS NULL
+        AND NOT public.is_blocked(auth.uid(), m.sender_id)),
+
+    (SELECT count(*)
+       FROM public.event_participants p
+       JOIN public.events e ON e.id = p.event_id
+      WHERE p.user_id = auth.uid()
+        AND p.approved_at IS NOT NULL
+        AND p.approval_seen = false
+        AND e.is_active),
+
+    (SELECT count(*)
+       FROM public.group_invites gi
+      WHERE gi.invitee_id = auth.uid()
+        AND gi.status = 'pending'
+        AND NOT public.is_blocked(auth.uid(), gi.inviter_id)),
+
+    -- Solo actividades activas: las canceladas ya no se listan en ningun
+    -- sitio, y un globo que no lleva a ninguna parte no se puede apagar.
+    (SELECT count(*)
+       FROM public.event_chat_state s
+       JOIN public.events e   ON e.id = s.event_id AND e.is_active
+       JOIN public.messages m ON m.event_id = s.event_id
+      WHERE s.user_id = auth.uid()
+        AND m.created_at > s.last_read_at
+        AND m.sender_id <> s.user_id
+        AND m.deleted_at IS NULL
+        AND public.event_chat_member(s.event_id, s.user_id)
+        AND NOT public.is_blocked(s.user_id, m.sender_id));
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.notification_counts() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.notification_counts() TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 9. Push del chat de actividad
+--
+-- Version sencilla, con lo que ya hay (push_send). 20260925000000 la
+-- sustituye por la cola de notificaciones. Reglas:
+--   * nunca a quien escribe ni a quien esta bloqueado con quien escribe;
+--   * nunca a quien tiene el chat abierto (active_until);
+--   * una mencion o un aviso del organizador siempre avisa, aunque el
+--     chat este silenciado;
+--   * los mensajes normales respetan el silencio y se agrupan: tras un
+--     aviso, no hay otro hasta pasados 3 minutos si no has leido nada.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.notify_event_chat_message(_msg public.messages)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_event  record;
+  v_sender text;
+  v_title  text;
+  v_body   text;
+  r        record;
+BEGIN
+  SELECT e.id, e.title, e.creator_id INTO v_event FROM public.events e WHERE e.id = _msg.event_id;
+  IF NOT FOUND THEN RETURN; END IF;
+
+  SELECT COALESCE(NULLIF(p.name, ''), 'Alguien') INTO v_sender
+  FROM public.profiles p WHERE p.id = _msg.sender_id;
+  v_sender := COALESCE(v_sender, 'Alguien');
+
+  v_title := left(v_event.title, 80);
+  v_body  := left(_msg.content, 120);
+  IF length(_msg.content) > 120 THEN v_body := v_body || U&'\2026'; END IF;
+
+  FOR r IN
+    SELECT s.user_id, s.muted, s.active_until, s.last_pushed_at, s.last_read_at,
+           (s.user_id = ANY (_msg.mentions)) AS mencionado
+    FROM public.event_chat_state s
+    WHERE s.event_id = _msg.event_id
+      AND s.user_id <> _msg.sender_id
+      AND public.event_chat_member(s.event_id, s.user_id)
+      AND NOT public.is_blocked(s.user_id, _msg.sender_id)
+  LOOP
+    CONTINUE WHEN r.active_until IS NOT NULL AND r.active_until > now();
+
+    IF _msg.is_announcement THEN
+      PERFORM public.push_send(r.user_id, U&'Aviso del organizador \00B7 ' || v_title, v_body,
+        jsonb_build_object('type', 'organizer_announcement', 'event_id', _msg.event_id));
+    ELSIF r.mencionado THEN
+      PERFORM public.push_send(r.user_id, v_sender || U&' te mencion\00F3', v_title || ': ' || v_body,
+        jsonb_build_object('type', 'chat_mention', 'event_id', _msg.event_id));
+    ELSE
+      CONTINUE WHEN r.muted;
+      CONTINUE WHEN r.last_pushed_at IS NOT NULL
+                AND r.last_pushed_at > now() - interval '3 minutes'
+                AND r.last_read_at < r.last_pushed_at;
+      PERFORM public.push_send(r.user_id, v_title, v_sender || ': ' || v_body,
+        jsonb_build_object('type', 'event_message', 'event_id', _msg.event_id));
+    END IF;
+
+    UPDATE public.event_chat_state SET last_pushed_at = now()
+    WHERE event_id = _msg.event_id AND user_id = r.user_id;
+  END LOOP;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.notify_event_chat_message(public.messages) FROM PUBLIC, anon, authenticated;
+
+-- on_message_push: mismo cuerpo que 20260827000000 para grupos y DM; la
+-- rama de actividad pasa a notify_event_chat_message.
+CREATE OR REPLACE FUNCTION public.on_message_push()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_group  text;
+  v_sender text;
+  v_title  text;
+  v_body   text;
+  r        RECORD;
+BEGIN
+  IF NEW.event_id IS NOT NULL THEN
+    PERFORM public.notify_event_chat_message(NEW);
+    RETURN NEW;
+  END IF;
+
+  IF NEW.group_id IS NULL THEN RETURN NEW; END IF;
+
+  SELECT g.name INTO v_group FROM public.groups g WHERE g.id = NEW.group_id;
+
+  SELECT COALESCE(NULLIF(p.name, ''), 'Alguien') INTO v_sender
+  FROM   public.profiles p WHERE p.id = NEW.sender_id;
+  v_sender := COALESCE(v_sender, 'Alguien');
+
+  v_body := left(NEW.content, 120);
+  IF length(NEW.content) > 120 THEN v_body := v_body || U&'\2026'; END IF;
+
+  IF left(COALESCE(v_group, ''), 5) = '__dm_' THEN
+    v_title := v_sender;
+  ELSE
+    v_title := COALESCE(v_group, 'Grupo');
+    v_body  := v_sender || ': ' || v_body;
+  END IF;
+
+  FOR r IN
+    SELECT gm.user_id
+    FROM   public.group_members gm
+    WHERE  gm.group_id  = NEW.group_id
+      AND  gm.user_id  <> NEW.sender_id
+      AND  NOT public.is_blocked(gm.user_id, NEW.sender_id)
+  LOOP
+    PERFORM public.push_send(
+      r.user_id, v_title, v_body,
+      jsonb_build_object('type', 'message', 'group_id', NEW.group_id)
+    );
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.on_message_push() FROM PUBLIC, anon, authenticated;
+
+COMMIT;
+
+-- >>> 20260924000000_contactos-e-invitaciones.sql <<<
+-- ============================================================
+-- Contactos: encontrar a quien ya usa la app, e invitar a quien no
+--
+-- Nada de la agenda llega en claro. El flujo es:
+--   1. En el telefono: se normaliza cada correo o telefono ELEGIDO y se
+--      manda solo su SHA-256 a la Edge Function contacts-match, con sesion.
+--   2. En la Edge Function: HMAC-SHA256 con CONTACTS_HMAC_KEY (secreto del
+--      servidor, NO esta en la base) sobre "tipo:sha256". Un SHA-256 solo se
+--      adivina probando telefonos; sin la clave, el HMAC no.
+--   3. En la base: solo se comparan HMAC. Aqui no llega nunca ni un correo
+--      ni un telefono, ni siquiera su SHA-256.
+--
+-- Reglas de coincidencia (contacts_match):
+--   * solo cuentas que eligieron ser encontrables (discoverable), con
+--     identificadores VERIFICADOS (los registra la Edge Function a partir
+--     de auth.users: correo confirmado, telefono confirmado);
+--   * solo del mismo campus: es la regla de visibilidad de toda la app
+--     (public_profiles, eventos, amistades). Alguien de otro campus no se
+--     ve en ningun sitio, tampoco aqui;
+--   * nunca bloqueados; nunca uno mismo; nunca por nombre.
+--   * con cuota: 500 por peticion, 2000 al dia y 20 peticiones al dia. Es
+--     lo que hace inviable enumerar cuentas probando numeros.
+--
+-- Lo que se guarda, y cuanto:
+--   * contact_identifiers: los HMAC de TUS identificadores, solo mientras
+--     seas encontrable. Dejar de serlo los borra.
+--   * contact_matches: a quien encontraste (para sugerencias). Se borra con
+--     "borrar mis datos de contactos".
+--   * contact_book_hashes: los HMAC de la agenda SOLO si pediste que te
+--     avisemos cuando un contacto se una. Caducan a los 180 dias.
+--   * contact_sync_usage: recuentos por dia, para la cuota.
+--
+-- Invitaciones: un codigo opaco por persona (sin telefono, correo ni nada
+-- que la identifique) y eventos minimos para medir: compartido, aceptado.
+-- La agenda no se toca.
+--
+-- ASCII puro. Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. Ajustes de contactos de cada persona
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.contact_settings (
+  user_id              uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  discoverable         boolean NOT NULL DEFAULT false,
+  notify_contacts_join boolean NOT NULL DEFAULT false,
+  last_synced_at       timestamptz,
+  created_at           timestamptz NOT NULL DEFAULT now(),
+  updated_at           timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.contact_settings ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.contact_settings FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.contact_settings TO authenticated;
+
+DROP POLICY IF EXISTS "Users read own contact settings" ON public.contact_settings;
+CREATE POLICY "Users read own contact settings"
+  ON public.contact_settings FOR SELECT TO authenticated
+  USING (user_id = auth.uid());
+
+
+-- ------------------------------------------------------------
+-- 2. Tablas que solo toca el servidor
+--
+-- RLS activada y SIN politicas, y sin GRANT a nadie de la app: ni leer ni
+-- escribir desde el cliente. Las usan las funciones de abajo, que corren
+-- como su dueno.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.contact_identifiers (
+  user_id    uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  kind       text NOT NULL CHECK (kind IN ('email', 'phone')),
+  digest     text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, kind, digest)
+);
+CREATE INDEX IF NOT EXISTS contact_identifiers_digest_idx ON public.contact_identifiers (digest);
+ALTER TABLE public.contact_identifiers ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.contact_identifiers FROM PUBLIC, anon, authenticated;
+
+CREATE TABLE IF NOT EXISTS public.contact_book_hashes (
+  owner_id   uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  digest     text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL DEFAULT now() + interval '180 days',
+  PRIMARY KEY (owner_id, digest)
+);
+CREATE INDEX IF NOT EXISTS contact_book_hashes_digest_idx ON public.contact_book_hashes (digest);
+ALTER TABLE public.contact_book_hashes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.contact_book_hashes FROM PUBLIC, anon, authenticated;
+
+CREATE TABLE IF NOT EXISTS public.contact_matches (
+  owner_id        uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  matched_user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (owner_id, matched_user_id),
+  CONSTRAINT contact_matches_no_self CHECK (owner_id <> matched_user_id)
+);
+CREATE INDEX IF NOT EXISTS contact_matches_matched_idx ON public.contact_matches (matched_user_id);
+ALTER TABLE public.contact_matches ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.contact_matches FROM PUBLIC, anon, authenticated;
+
+CREATE TABLE IF NOT EXISTS public.contact_sync_usage (
+  user_id  uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  day      date NOT NULL DEFAULT current_date,
+  requests integer NOT NULL DEFAULT 0 CHECK (requests >= 0),
+  digests  integer NOT NULL DEFAULT 0 CHECK (digests >= 0),
+  PRIMARY KEY (user_id, day)
+);
+ALTER TABLE public.contact_sync_usage ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.contact_sync_usage FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 3. Invitaciones
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.invite_codes (
+  code       text PRIMARY KEY CHECK (code ~ '^[A-Za-z0-9]{10}$'),
+  inviter_id uuid NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.invite_codes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.invite_codes FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.invite_codes TO authenticated;
+
+DROP POLICY IF EXISTS "Users read own invite code" ON public.invite_codes;
+CREATE POLICY "Users read own invite code"
+  ON public.invite_codes FOR SELECT TO authenticated
+  USING (inviter_id = auth.uid());
+
+-- Solo lo necesario para medir: quien invito, que paso y cuando. Ni a quien
+-- se envio ni por que numero: la app solo sabe cuantos contactos se eligieron.
+CREATE TABLE IF NOT EXISTS public.invite_events (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  inviter_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  invitee_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  kind       text NOT NULL CHECK (kind IN ('shared', 'accepted', 'signed_up')),
+  channel    text CHECK (channel IS NULL OR channel IN ('messages', 'whatsapp', 'mail', 'copy', 'other')),
+  recipients integer CHECK (recipients IS NULL OR recipients BETWEEN 0 AND 100),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS invite_events_inviter_idx ON public.invite_events (inviter_id, created_at DESC);
+-- Aceptar una invitacion cuenta una vez por pareja.
+CREATE UNIQUE INDEX IF NOT EXISTS invite_events_accept_once
+  ON public.invite_events (inviter_id, invitee_id, kind) WHERE kind IN ('accepted', 'signed_up');
+ALTER TABLE public.invite_events ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.invite_events FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 4. Lo que usa la app
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.my_contact_settings()
+RETURNS TABLE (
+  discoverable         boolean,
+  notify_contacts_join boolean,
+  last_synced_at       timestamptz,
+  identifiers          integer
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(s.discoverable, false),
+         COALESCE(s.notify_contacts_join, false),
+         s.last_synced_at,
+         (SELECT count(*)::int FROM public.contact_identifiers ci WHERE ci.user_id = auth.uid())
+  FROM (SELECT auth.uid() AS uid) me
+  LEFT JOIN public.contact_settings s ON s.user_id = me.uid
+  WHERE me.uid IS NOT NULL;
+$$;
+REVOKE EXECUTE ON FUNCTION public.my_contact_settings() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.my_contact_settings() TO authenticated;
+
+-- Cambiar los ajustes. Apagar algo borra en el acto lo que ese algo
+-- necesitaba guardar: no hay datos "dormidos".
+CREATE OR REPLACE FUNCTION public.set_contact_settings(_discoverable boolean, _notify_join boolean)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  INSERT INTO public.contact_settings (user_id, discoverable, notify_contacts_join)
+  VALUES (v_uid, COALESCE(_discoverable, false), COALESCE(_notify_join, false))
+  ON CONFLICT (user_id) DO UPDATE
+    SET discoverable         = COALESCE(_discoverable, false),
+        notify_contacts_join = COALESCE(_notify_join, false),
+        updated_at           = now();
+
+  IF NOT COALESCE(_discoverable, false) THEN
+    DELETE FROM public.contact_identifiers WHERE user_id = v_uid;
+  END IF;
+  IF NOT COALESCE(_notify_join, false) THEN
+    DELETE FROM public.contact_book_hashes WHERE owner_id = v_uid;
+  END IF;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.set_contact_settings(boolean, boolean) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.set_contact_settings(boolean, boolean) TO authenticated;
+
+-- "Borrar mis datos de contactos": todo lo que se derivo de la agenda.
+CREATE OR REPLACE FUNCTION public.clear_contact_data()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+  DELETE FROM public.contact_book_hashes WHERE owner_id = v_uid;
+  DELETE FROM public.contact_matches     WHERE owner_id = v_uid;
+  DELETE FROM public.contact_identifiers WHERE user_id  = v_uid;
+  INSERT INTO public.contact_settings (user_id) VALUES (v_uid)
+  ON CONFLICT (user_id) DO UPDATE
+    SET discoverable = false, notify_contacts_join = false, last_synced_at = NULL, updated_at = now();
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.clear_contact_data() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.clear_contact_data() TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 5. Lo que usa la Edge Function (solo service_role)
+-- ------------------------------------------------------------
+
+-- Cuota. Suma y comprueba en la misma sentencia, con la fila bloqueada: dos
+-- peticiones a la vez no se saltan el limite.
+CREATE OR REPLACE FUNCTION public.contacts_consume_quota(_user_id uuid, _count integer)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_row public.contact_sync_usage%ROWTYPE;
+BEGIN
+  IF _user_id IS NULL OR _count IS NULL OR _count < 0 THEN
+    RAISE EXCEPTION 'INVALID_REQUEST' USING ERRCODE = 'P0001';
+  END IF;
+  IF _count > 500 THEN
+    RAISE EXCEPTION 'CONTACTS_BATCH_TOO_LARGE' USING ERRCODE = 'P0001';
+  END IF;
+
+  INSERT INTO public.contact_sync_usage (user_id, day, requests, digests)
+  VALUES (_user_id, current_date, 1, _count)
+  ON CONFLICT (user_id, day) DO UPDATE
+    SET requests = public.contact_sync_usage.requests + 1,
+        digests  = public.contact_sync_usage.digests + _count
+  RETURNING * INTO v_row;
+
+  IF v_row.requests > 20 OR v_row.digests > 2000 THEN
+    RAISE EXCEPTION 'CONTACTS_RATE_LIMIT' USING ERRCODE = 'P0001';
+  END IF;
+
+  -- Lo viejo no sirve para nada.
+  DELETE FROM public.contact_sync_usage WHERE user_id = _user_id AND day < current_date - 7;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.contacts_consume_quota(uuid, integer) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.contacts_consume_quota(uuid, integer) TO service_role;
+
+
+-- Coincidencias. Devuelve solo lo publico minimo: nombre, foto, campus y la
+-- relacion con quien pregunta. Nunca un identificador.
+CREATE OR REPLACE FUNCTION public.contacts_match(_user_id uuid, _digests text[], _keep boolean DEFAULT false)
+RETURNS TABLE (
+  digest        text,
+  user_id       uuid,
+  name          text,
+  avatar_url    text,
+  campus_name   text,
+  relation      text,
+  friendship_id uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_keep boolean;
+BEGIN
+  IF _user_id IS NULL OR _digests IS NULL THEN
+    RETURN;
+  END IF;
+  IF cardinality(_digests) > 500 THEN
+    RAISE EXCEPTION 'CONTACTS_BATCH_TOO_LARGE' USING ERRCODE = 'P0001';
+  END IF;
+
+  -- Guardar la agenda solo si la persona lo pidio (aviso cuando se una
+  -- alguien) y solo HMAC validos.
+  SELECT COALESCE(s.notify_contacts_join, false) INTO v_keep
+  FROM public.contact_settings s WHERE s.user_id = _user_id;
+
+  INSERT INTO public.contact_settings (user_id, last_synced_at)
+  VALUES (_user_id, now())
+  ON CONFLICT (user_id) DO UPDATE SET last_synced_at = now(), updated_at = now();
+
+  IF COALESCE(v_keep, false) AND COALESCE(_keep, false) THEN
+    INSERT INTO public.contact_book_hashes (owner_id, digest)
+    SELECT DISTINCT _user_id, d FROM unnest(_digests) AS d WHERE d ~ '^[0-9a-f]{64}$'
+    ON CONFLICT (owner_id, digest) DO UPDATE SET expires_at = now() + interval '180 days';
+
+    -- Tope por persona: lo mas viejo sale primero.
+    DELETE FROM public.contact_book_hashes b
+    WHERE b.owner_id = _user_id
+      AND b.digest IN (
+        SELECT x.digest FROM public.contact_book_hashes x
+        WHERE x.owner_id = _user_id
+        ORDER BY x.created_at DESC
+        OFFSET 3000
+      );
+  END IF;
+
+  RETURN QUERY
+  WITH hits AS (
+    SELECT DISTINCT ON (ci.digest, ci.user_id) ci.digest, ci.user_id AS uid
+    FROM public.contact_identifiers ci
+    JOIN public.contact_settings cs ON cs.user_id = ci.user_id AND cs.discoverable
+    WHERE ci.digest = ANY (_digests)
+      AND ci.user_id <> _user_id
+  ), visibles AS (
+    SELECT h.digest, h.uid, p.name, p.avatar_url, i.campus_name,
+           EXISTS (SELECT 1 FROM public.blocks b WHERE b.blocker_id = _user_id AND b.blocked_id = h.uid) AS lo_bloquee
+    FROM hits h
+    JOIN public.profiles p ON p.id = h.uid
+    LEFT JOIN public.institutions i ON i.id = p.campus_id
+    WHERE p.onboarding_completed
+      AND nullif(btrim(p.name), '') IS NOT NULL
+      AND public.same_institution(_user_id, h.uid)
+      -- Si la otra persona me bloqueo, no existo para ella ni ella para mi.
+      AND NOT EXISTS (SELECT 1 FROM public.blocks b WHERE b.blocker_id = h.uid AND b.blocked_id = _user_id)
+  ), guardar AS (
+    INSERT INTO public.contact_matches (owner_id, matched_user_id)
+    SELECT DISTINCT _user_id, v.uid FROM visibles v WHERE NOT v.lo_bloquee
+    ON CONFLICT (owner_id, matched_user_id) DO NOTHING
+    RETURNING 1
+  )
+  SELECT v.digest, v.uid, v.name, v.avatar_url, v.campus_name,
+    CASE
+      WHEN v.lo_bloquee THEN 'blocked'
+      WHEN f.status = 'accepted' THEN 'friends'
+      WHEN f.status = 'pending' AND f.requester_id = _user_id THEN 'outgoing'
+      WHEN f.status = 'pending' THEN 'incoming'
+      ELSE 'none'
+    END::text,
+    -- Para poder aceptar o cancelar desde la lista sin otra consulta.
+    CASE WHEN f.status = 'pending' AND NOT v.lo_bloquee THEN f.id END
+  FROM visibles v
+  LEFT JOIN LATERAL (
+    SELECT fr.id, fr.status, fr.requester_id FROM public.friendships fr
+    WHERE (fr.requester_id = _user_id AND fr.addressee_id = v.uid)
+       OR (fr.requester_id = v.uid AND fr.addressee_id = _user_id)
+    ORDER BY (fr.status = 'accepted') DESC
+    LIMIT 1
+  ) f ON true;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.contacts_match(uuid, text[], boolean) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.contacts_match(uuid, text[], boolean) TO service_role;
+
+
+-- Aviso "alguien que conoces se unio". Version sencilla con push_send; la
+-- migracion de notificaciones la pasa a la cola con preferencias.
+CREATE OR REPLACE FUNCTION public.notify_contact_joined(_owner uuid, _joined uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_name text;
+BEGIN
+  SELECT COALESCE(NULLIF(p.name, ''), 'Alguien') INTO v_name FROM public.profiles p WHERE p.id = _joined;
+  PERFORM public.push_send(
+    _owner,
+    U&'Alguien que conoces est\00E1 aqu\00ED',
+    COALESCE(v_name, 'Alguien') || U&' se uni\00F3 a Always Connected',
+    jsonb_build_object('type', 'contact_joined', 'user_id', _joined)
+  );
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_contact_joined(uuid, uuid) FROM PUBLIC, anon, authenticated;
+
+
+-- Registrar los identificadores VERIFICADOS de una cuenta (los calcula la
+-- Edge Function a partir de auth.users). Solo si la persona es encontrable.
+-- Reemplaza los anteriores: un correo que ya no es suyo deja de coincidir.
+--
+-- Despues avisa a quien la tenia en la agenda y pidio el aviso, una vez por
+-- pareja y como mucho a 50 personas, con las mismas reglas de visibilidad.
+CREATE OR REPLACE FUNCTION public.contacts_register_identifiers(_user_id uuid, _items jsonb)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_discoverable boolean;
+  v_new          text[];
+  v_avisados     integer := 0;
+  r              record;
+BEGIN
+  IF _user_id IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  SELECT COALESCE(s.discoverable, false) INTO v_discoverable
+  FROM public.contact_settings s WHERE s.user_id = _user_id;
+
+  IF NOT COALESCE(v_discoverable, false) THEN
+    DELETE FROM public.contact_identifiers WHERE user_id = _user_id;
+    RETURN 0;
+  END IF;
+
+  -- Los que no tenia antes: solo esos pueden provocar un aviso.
+  SELECT array_agg(x.digest) INTO v_new
+  FROM (
+    SELECT DISTINCT e->>'digest' AS digest
+    FROM jsonb_array_elements(COALESCE(_items, '[]'::jsonb)) e
+    WHERE e->>'kind' IN ('email', 'phone') AND e->>'digest' ~ '^[0-9a-f]{64}$'
+  ) x
+  WHERE NOT EXISTS (SELECT 1 FROM public.contact_identifiers ci WHERE ci.user_id = _user_id AND ci.digest = x.digest);
+
+  DELETE FROM public.contact_identifiers WHERE user_id = _user_id;
+  INSERT INTO public.contact_identifiers (user_id, kind, digest)
+  SELECT DISTINCT _user_id, e->>'kind', e->>'digest'
+  FROM jsonb_array_elements(COALESCE(_items, '[]'::jsonb)) e
+  WHERE e->>'kind' IN ('email', 'phone') AND e->>'digest' ~ '^[0-9a-f]{64}$'
+  LIMIT 4
+  ON CONFLICT DO NOTHING;
+
+  IF v_new IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  FOR r IN
+    SELECT DISTINCT b.owner_id
+    FROM public.contact_book_hashes b
+    JOIN public.contact_settings s ON s.user_id = b.owner_id AND s.notify_contacts_join
+    WHERE b.digest = ANY (v_new)
+      AND b.expires_at > now()
+      AND b.owner_id <> _user_id
+      AND public.same_institution(b.owner_id, _user_id)
+      AND NOT public.is_blocked(b.owner_id, _user_id)
+      AND NOT public.are_friends(b.owner_id, _user_id)
+      AND NOT EXISTS (
+        SELECT 1 FROM public.contact_matches m
+        WHERE m.owner_id = b.owner_id AND m.matched_user_id = _user_id
+      )
+    LIMIT 50
+  LOOP
+    INSERT INTO public.contact_matches (owner_id, matched_user_id)
+    VALUES (r.owner_id, _user_id)
+    ON CONFLICT DO NOTHING;
+    PERFORM public.notify_contact_joined(r.owner_id, _user_id);
+    v_avisados := v_avisados + 1;
+  END LOOP;
+
+  RETURN v_avisados;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.contacts_register_identifiers(uuid, jsonb) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.contacts_register_identifiers(uuid, jsonb) TO service_role;
+
+-- Un correo que cambia deja de valer como identificador en el acto: hasta
+-- que la app vuelva a registrar el nuevo, no coincide con nada.
+CREATE OR REPLACE FUNCTION public.on_auth_identity_change_contacts()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.email IS DISTINCT FROM OLD.email OR NEW.email_confirmed_at IS DISTINCT FROM OLD.email_confirmed_at THEN
+    DELETE FROM public.contact_identifiers WHERE user_id = NEW.id AND kind = 'email';
+  END IF;
+  IF NEW.phone IS DISTINCT FROM OLD.phone OR NEW.phone_confirmed_at IS DISTINCT FROM OLD.phone_confirmed_at THEN
+    DELETE FROM public.contact_identifiers WHERE user_id = NEW.id AND kind = 'phone';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_auth_identity_change_contacts() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_auth_identity_change_contacts ON auth.users;
+CREATE TRIGGER trg_auth_identity_change_contacts
+  AFTER UPDATE OF email, email_confirmed_at, phone, phone_confirmed_at ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.on_auth_identity_change_contacts();
+
+
+-- ------------------------------------------------------------
+-- 6. Sugerencias: se suma "esta en tus contactos"
+--
+-- Mismo cuerpo que 20260916000000 (people_suggestions) mas los contactos
+-- como senal y como columna. Cambia la forma del resultado: hay que
+-- borrarla y crearla.
+-- ------------------------------------------------------------
+DROP FUNCTION IF EXISTS public.people_suggestions(integer);
+
+CREATE FUNCTION public.people_suggestions(_limit integer DEFAULT 10)
+RETURNS TABLE (
+  id             uuid,
+  name           text,
+  avatar_url     text,
+  major          text,
+  mutual_friends integer,
+  shared_groups  integer,
+  in_contacts    boolean
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_uid    uuid := auth.uid();
+  v_campus uuid;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED';
+  END IF;
+
+  SELECT p.campus_id INTO v_campus FROM public.profiles p WHERE p.id = v_uid;
+  IF v_campus IS NULL THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  WITH mis_amigos AS (
+    SELECT CASE WHEN f.requester_id = v_uid THEN f.addressee_id ELSE f.requester_id END AS fid
+    FROM public.friendships f
+    WHERE f.status = 'accepted' AND (f.requester_id = v_uid OR f.addressee_id = v_uid)
+  ),
+  comun AS (
+    SELECT CASE WHEN g.requester_id = m.fid THEN g.addressee_id ELSE g.requester_id END AS pid,
+           count(*)::int AS n
+    FROM mis_amigos m
+    JOIN public.friendships g
+      ON g.status = 'accepted' AND (g.requester_id = m.fid OR g.addressee_id = m.fid)
+    GROUP BY 1
+  ),
+  grupos AS (
+    SELECT otro.user_id AS pid, count(DISTINCT yo.group_id)::int AS n
+    FROM public.group_members yo
+    JOIN public.groups gr ON gr.id = yo.group_id AND gr.name NOT LIKE '\_\_dm\_%'
+    JOIN public.group_members otro ON otro.group_id = yo.group_id AND otro.user_id <> v_uid
+    WHERE yo.user_id = v_uid
+    GROUP BY 1
+  ),
+  contactos AS (
+    SELECT cm.matched_user_id AS pid FROM public.contact_matches cm WHERE cm.owner_id = v_uid
+  ),
+  recientes AS (
+    SELECT p.id AS pid
+    FROM public.profiles p
+    WHERE p.campus_id = v_campus AND p.id <> v_uid
+    ORDER BY p.created_at DESC
+    LIMIT 50
+  ),
+  cand AS (
+    SELECT pid FROM comun
+    UNION SELECT pid FROM grupos
+    UNION SELECT pid FROM contactos
+    UNION SELECT pid FROM recientes
+  )
+  SELECT p.id, p.name, p.avatar_url, p.major,
+         coalesce(c.n, 0), coalesce(g.n, 0), (k.pid IS NOT NULL)
+  FROM cand
+  JOIN public.profiles p ON p.id = cand.pid
+  LEFT JOIN comun     c ON c.pid = p.id
+  LEFT JOIN grupos    g ON g.pid = p.id
+  LEFT JOIN contactos k ON k.pid = p.id
+  WHERE p.id <> v_uid
+    AND p.campus_id = v_campus
+    AND nullif(btrim(p.name), '') IS NOT NULL
+    AND NOT public.is_blocked(v_uid, p.id)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.friendships f
+      WHERE least(f.requester_id, f.addressee_id)    = least(v_uid, p.id)
+        AND greatest(f.requester_id, f.addressee_id) = greatest(v_uid, p.id)
+    )
+  ORDER BY (k.pid IS NOT NULL) DESC, coalesce(c.n, 0) DESC, coalesce(g.n, 0) DESC, p.created_at DESC, p.id
+  LIMIT least(greatest(coalesce(_limit, 10), 1), 20);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.people_suggestions(integer) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.people_suggestions(integer) TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 7. Invitaciones
+-- ------------------------------------------------------------
+
+-- Tu codigo (uno por persona, se reutiliza). Opaco: 10 caracteres al azar.
+CREATE OR REPLACE FUNCTION public.my_invite_code()
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid  uuid := auth.uid();
+  v_code text;
+  v_abc  constant text := 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  i      integer;
+  b      bytea;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT c.code INTO v_code FROM public.invite_codes c WHERE c.inviter_id = v_uid;
+  IF v_code IS NOT NULL THEN
+    RETURN v_code;
+  END IF;
+
+  FOR attempt IN 1..5 LOOP
+    b := extensions.gen_random_bytes(10);
+    v_code := '';
+    FOR i IN 0..9 LOOP
+      v_code := v_code || substr(v_abc, 1 + (get_byte(b, i) % length(v_abc)), 1);
+    END LOOP;
+    BEGIN
+      INSERT INTO public.invite_codes (code, inviter_id) VALUES (v_code, v_uid);
+      RETURN v_code;
+    EXCEPTION WHEN unique_violation THEN
+      -- Otra peticion de la misma persona gano la carrera: se usa la suya.
+      SELECT c.code INTO v_code FROM public.invite_codes c WHERE c.inviter_id = v_uid;
+      IF v_code IS NOT NULL THEN
+        RETURN v_code;
+      END IF;
+    END;
+  END LOOP;
+  RAISE EXCEPTION 'INVITE_CODE_UNAVAILABLE' USING ERRCODE = 'P0001';
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.my_invite_code() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.my_invite_code() TO authenticated;
+
+-- Apuntar que se compartio (la app no sabe a quien, solo cuantos eligio).
+CREATE OR REPLACE FUNCTION public.log_invite_share(_channel text, _recipients integer)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+  -- Metrica, no funcionalidad: pasado el tope simplemente no se apunta.
+  IF (SELECT count(*) FROM public.invite_events e
+      WHERE e.inviter_id = v_uid AND e.kind = 'shared' AND e.created_at > now() - interval '1 day') >= 50 THEN
+    RETURN;
+  END IF;
+  INSERT INTO public.invite_events (inviter_id, kind, channel, recipients)
+  VALUES (
+    v_uid, 'shared',
+    CASE WHEN _channel IN ('messages', 'whatsapp', 'mail', 'copy', 'other') THEN _channel ELSE 'other' END,
+    least(greatest(COALESCE(_recipients, 0), 0), 100)
+  );
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.log_invite_share(text, integer) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.log_invite_share(text, integer) TO authenticated;
+
+-- Quien abrio la app desde una invitacion. Devuelve a quien invito SOLO si
+-- esa persona es visible (mismo campus, sin bloqueo): la app puede ofrecer
+-- "Agregar". El codigo no dice nada si no hay nada que ver.
+CREATE OR REPLACE FUNCTION public.redeem_invite(_code text)
+RETURNS TABLE (inviter_id uuid, name text, avatar_url text, relation text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+DECLARE
+  v_uid     uuid := auth.uid();
+  v_inviter uuid;
+  v_new     boolean;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT c.inviter_id INTO v_inviter FROM public.invite_codes c WHERE c.code = _code;
+  IF v_inviter IS NULL OR v_inviter = v_uid THEN
+    RETURN;
+  END IF;
+
+  SELECT u.created_at > now() - interval '7 days' INTO v_new FROM auth.users u WHERE u.id = v_uid;
+
+  INSERT INTO public.invite_events (inviter_id, invitee_id, kind)
+  VALUES (v_inviter, v_uid, 'accepted')
+  ON CONFLICT DO NOTHING;
+  IF COALESCE(v_new, false) THEN
+    INSERT INTO public.invite_events (inviter_id, invitee_id, kind)
+    VALUES (v_inviter, v_uid, 'signed_up')
+    ON CONFLICT DO NOTHING;
+  END IF;
+
+  IF public.is_blocked(v_uid, v_inviter) OR NOT public.same_institution(v_uid, v_inviter) THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT p.id, p.name, p.avatar_url,
+    CASE
+      WHEN f.status = 'accepted' THEN 'friends'
+      WHEN f.status = 'pending' AND f.requester_id = v_uid THEN 'outgoing'
+      WHEN f.status = 'pending' THEN 'incoming'
+      ELSE 'none'
+    END::text
+  FROM public.profiles p
+  LEFT JOIN LATERAL (
+    SELECT fr.status, fr.requester_id FROM public.friendships fr
+    WHERE (fr.requester_id = v_uid AND fr.addressee_id = p.id)
+       OR (fr.requester_id = p.id AND fr.addressee_id = v_uid)
+    LIMIT 1
+  ) f ON true
+  WHERE p.id = v_inviter;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.redeem_invite(text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.redeem_invite(text) TO authenticated;
+
+-- Cuantas personas llegaron por tu invitacion (solo recuentos).
+CREATE OR REPLACE FUNCTION public.my_invite_stats()
+RETURNS TABLE (shared bigint, accepted bigint)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT
+    count(*) FILTER (WHERE e.kind = 'shared'),
+    count(*) FILTER (WHERE e.kind = 'accepted')
+  FROM public.invite_events e
+  WHERE e.inviter_id = auth.uid();
+$$;
+REVOKE EXECUTE ON FUNCTION public.my_invite_stats() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.my_invite_stats() TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 8. Limpieza diaria de la agenda caducada (la programa 20260925010000
+--    junto a los trabajos de notificaciones).
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.purge_expired_contact_hashes()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v integer;
+BEGIN
+  DELETE FROM public.contact_book_hashes WHERE expires_at < now();
+  GET DIAGNOSTICS v = ROW_COUNT;
+  DELETE FROM public.contact_sync_usage WHERE day < current_date - 7;
+  RETURN v;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.purge_expired_contact_hashes() FROM PUBLIC, anon, authenticated;
+
+COMMIT;
+
+-- >>> 20260925000000_notificaciones.sql <<<
+-- ============================================================
+-- Notificaciones: bandeja, preferencias, cola de envio y avisos nuevos
+--
+-- Hasta aqui cada disparador llamaba a push_send() y la Edge Function
+-- send-push mandaba el aviso al instante: sin bandeja dentro de la app, sin
+-- preferencias, sin agrupar, sin saber si llego, con el texto fijo en
+-- espanol dentro del SQL. Esto lo cambia por una tuberia con tres piezas:
+--
+--   notify()                    TODO aviso pasa por aqui: comprueba tipo,
+--                               preferencias, silencio de la actividad,
+--                               bloqueos, "no a quien lo hizo", limite
+--                               diario social y caducidad; deduplica o
+--                               agrupa, y deja una fila en la bandeja.
+--   notification_deliveries     la cola (outbox) de push: cuando se manda
+--                               (horario silencioso, franja de dia,
+--                               agrupacion), intentos, estado, caducidad.
+--   notify-dispatch (Edge)      recoge lo que toca, resuelve el texto en el
+--                               idioma de cada persona, manda a APNs a todos
+--                               sus dispositivos, apunta el resultado y
+--                               borra los tokens muertos.
+--
+-- La base avisa a notify-dispatch con pg_net nada mas encolar algo que
+-- tiene que salir ya, y pg_cron repasa cada minuto lo programado y lo que
+-- se quedo a medias (20260925010000).
+--
+-- Lo que se guarda de cada aviso son IDs y banderas, nunca texto: el
+-- titulo del evento, el nombre de quien escribe o la vista previa del
+-- mensaje se resuelven al enviar (y en la app, al abrir), con los permisos
+-- de ese momento.
+--
+-- Los avisos que ya existian se conservan todos (solicitud, aprobacion,
+-- mensaje, amistad, invitacion a grupo, plan repetido, cambio y
+-- cancelacion, "ya empezo") y mantienen el mismo `type` en la carga, asi
+-- que la version publicada de la app los sigue abriendo igual.
+--
+-- ASCII puro (textos con U&'...'). Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. Tipos de aviso
+--
+-- Tabla y no CASE en el codigo: la categoria, la prioridad y las reglas de
+-- cada tipo estan en un solo sitio, y la app puede leerla.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.notification_types (
+  type         text PRIMARY KEY,
+  category     text NOT NULL CHECK (category IN (
+                 'activity_messages', 'mentions', 'event_updates', 'event_requests', 'reminders',
+                 'direct_messages', 'friend_requests', 'friend_activity', 'people_suggestions',
+                 'activity_recommendations', 'digests', 'account', 'security', 'promotional')),
+  priority     smallint NOT NULL CHECK (priority BETWEEN 0 AND 2),
+  -- Cuenta para el limite diario de avisos sociales (daily_social_limit).
+  social       boolean NOT NULL DEFAULT false,
+  -- Solo de 9:00 a 21:00 hora local de quien lo recibe.
+  daytime_only boolean NOT NULL DEFAULT false,
+  -- Llega aunque la actividad este silenciada.
+  bypass_mute  boolean NOT NULL DEFAULT true,
+  -- Pasado este tiempo, la push ya no merece salir (sigue en la bandeja).
+  push_ttl     interval NOT NULL DEFAULT interval '24 hours'
+);
+
+ALTER TABLE public.notification_types ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.notification_types FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.notification_types TO authenticated;
+DROP POLICY IF EXISTS "Anyone signed in reads notification types" ON public.notification_types;
+CREATE POLICY "Anyone signed in reads notification types"
+  ON public.notification_types FOR SELECT TO authenticated USING (true);
+
+INSERT INTO public.notification_types (type, category, priority, social, daytime_only, bypass_mute, push_ttl) VALUES
+  -- Chat
+  ('event_message',          'activity_messages',        1, false, false, false, interval '12 hours'),
+  ('chat_mention',           'mentions',                 2, false, false, true,  interval '24 hours'),
+  ('organizer_announcement', 'event_updates',            2, false, false, true,  interval '24 hours'),
+  ('message',                'direct_messages',          1, false, false, true,  interval '12 hours'),
+  -- Tus actividades
+  ('join_request',           'event_requests',           1, false, false, true,  interval '48 hours'),
+  ('approval',               'event_requests',           2, false, false, true,  interval '48 hours'),
+  ('join_rejected',          'event_requests',           1, false, false, true,  interval '48 hours'),
+  ('participant_joined',     'event_requests',           0, false, false, false, interval '12 hours'),
+  ('event_reminder',         'reminders',                1, false, false, true,  interval '24 hours'),
+  ('event_started',          'reminders',                1, false, false, true,  interval '2 hours'),
+  ('event_changed',          'event_updates',            2, false, false, true,  interval '48 hours'),
+  ('event_cancelled',        'event_updates',            2, false, false, true,  interval '48 hours'),
+  -- Amigos y descubrir
+  ('event_repeat',           'friend_activity',          1, false, false, true,  interval '72 hours'),
+  ('event_invite',           'friend_activity',          1, false, false, true,  interval '72 hours'),
+  ('friend_created_event',   'friend_activity',          1, true,  true,  true,  interval '72 hours'),
+  ('friend_joined_event',    'friend_activity',          0, true,  true,  true,  interval '24 hours'),
+  ('new_campus_event',       'activity_recommendations', 0, true,  true,  true,  interval '72 hours'),
+  ('spots_low',              'activity_recommendations', 1, true,  true,  true,  interval '24 hours'),
+  ('digest',                 'digests',                  0, false, true,  true,  interval '12 hours'),
+  ('friend_request',         'friend_requests',          1, false, false, true,  interval '7 days'),
+  ('friend_accepted',        'friend_requests',          1, false, false, true,  interval '7 days'),
+  ('group_invite',           'friend_requests',          1, false, false, true,  interval '7 days'),
+  ('contact_joined',         'friend_activity',          1, true,  true,  true,  interval '7 days'),
+  ('invite_accepted',        'friend_activity',          1, false, false, true,  interval '7 days'),
+  ('person_suggestion',      'people_suggestions',       0, true,  true,  true,  interval '7 days'),
+  -- Cuenta
+  ('profile_incomplete',     'account',                  0, false, true,  true,  interval '3 days'),
+  ('verification_pending',   'account',                  0, false, true,  true,  interval '3 days'),
+  ('verification_reminder',  'account',                  0, false, true,  true,  interval '3 days'),
+  ('verification_approved',  'account',                  1, false, false, true,  interval '7 days'),
+  ('verification_rejected',  'account',                  1, false, false, true,  interval '7 days'),
+  ('security_alert',         'security',                 2, false, false, true,  interval '7 days'),
+  ('promotional',            'promotional',              0, false, true,  true,  interval '3 days')
+ON CONFLICT (type) DO UPDATE SET
+  category = EXCLUDED.category, priority = EXCLUDED.priority, social = EXCLUDED.social,
+  daytime_only = EXCLUDED.daytime_only, bypass_mute = EXCLUDED.bypass_mute, push_ttl = EXCLUDED.push_ttl;
+
+
+-- ------------------------------------------------------------
+-- 2. Preferencias
+--
+-- Una fila por persona, que lee y escribe ella misma (RLS). Lo que no se
+-- puede tocar a mano lo pone el disparador: el consentimiento promocional
+-- lleva fecha, y la zona horaria tiene que existir.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.notification_preferences (
+  user_id                  uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  activity_messages        boolean NOT NULL DEFAULT true,
+  mentions                 boolean NOT NULL DEFAULT true,
+  event_updates            boolean NOT NULL DEFAULT true,
+  event_requests           boolean NOT NULL DEFAULT true,
+  reminders                boolean NOT NULL DEFAULT true,
+  reminder_minutes         integer NOT NULL DEFAULT 60,
+  direct_messages          boolean NOT NULL DEFAULT true,
+  friend_requests          boolean NOT NULL DEFAULT true,
+  friend_activity          boolean NOT NULL DEFAULT true,
+  people_suggestions       boolean NOT NULL DEFAULT true,
+  activity_recommendations boolean NOT NULL DEFAULT true,
+  digests                  boolean NOT NULL DEFAULT true,
+  account_tips             boolean NOT NULL DEFAULT true,
+  -- Apagado hasta que la persona lo active: eso ES el consentimiento.
+  promotional              boolean NOT NULL DEFAULT false,
+  promotional_consent_at   timestamptz,
+  show_previews            boolean NOT NULL DEFAULT true,
+  quiet_hours_enabled      boolean NOT NULL DEFAULT false,
+  quiet_start              time NOT NULL DEFAULT '23:00',
+  quiet_end                time NOT NULL DEFAULT '08:00',
+  timezone                 text NOT NULL DEFAULT 'America/Mexico_City',
+  locale                   text NOT NULL DEFAULT 'es',
+  daily_social_limit       integer NOT NULL DEFAULT 3,
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  updated_at               timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT notification_preferences_reminder CHECK (reminder_minutes IN (15, 30, 60, 120, 1440)),
+  CONSTRAINT notification_preferences_locale CHECK (locale IN ('es', 'en')),
+  CONSTRAINT notification_preferences_social_limit CHECK (daily_social_limit BETWEEN 0 AND 10),
+  CONSTRAINT notification_preferences_tz_len CHECK (length(timezone) BETWEEN 1 AND 64)
+);
+
+ALTER TABLE public.notification_preferences ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.notification_preferences FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.notification_preferences TO authenticated;
+
+DROP POLICY IF EXISTS "Users read own notification preferences" ON public.notification_preferences;
+CREATE POLICY "Users read own notification preferences"
+  ON public.notification_preferences FOR SELECT TO authenticated
+  USING (user_id = auth.uid());
+DROP POLICY IF EXISTS "Users create own notification preferences" ON public.notification_preferences;
+CREATE POLICY "Users create own notification preferences"
+  ON public.notification_preferences FOR INSERT TO authenticated
+  WITH CHECK (user_id = auth.uid());
+DROP POLICY IF EXISTS "Users update own notification preferences" ON public.notification_preferences;
+CREATE POLICY "Users update own notification preferences"
+  ON public.notification_preferences FOR UPDATE TO authenticated
+  USING (user_id = auth.uid())
+  WITH CHECK (user_id = auth.uid());
+
+CREATE OR REPLACE FUNCTION public.guard_notification_preferences()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+    RAISE EXCEPTION 'PREFERENCES_FIELD_LOCKED' USING ERRCODE = '42501';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = NEW.timezone) THEN
+    RAISE EXCEPTION 'INVALID_TIMEZONE' USING ERRCODE = 'P0001';
+  END IF;
+
+  -- La fecha del consentimiento la pone el servidor, y solo al activarlo.
+  IF NEW.promotional THEN
+    IF TG_OP = 'INSERT' OR NOT OLD.promotional THEN
+      NEW.promotional_consent_at := now();
+    ELSE
+      NEW.promotional_consent_at := OLD.promotional_consent_at;
+    END IF;
+  ELSE
+    NEW.promotional_consent_at := NULL;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    NEW.created_at := now();
+  ELSE
+    NEW.created_at := OLD.created_at;
+  END IF;
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.guard_notification_preferences() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_notification_preferences ON public.notification_preferences;
+CREATE TRIGGER trg_guard_notification_preferences
+  BEFORE INSERT OR UPDATE ON public.notification_preferences
+  FOR EACH ROW EXECUTE FUNCTION public.guard_notification_preferences();
+
+-- Cada cuenta, con sus valores por defecto.
+INSERT INTO public.notification_preferences (user_id)
+SELECT u.id FROM auth.users u
+ON CONFLICT (user_id) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION public.on_new_user_notification_prefs()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.notification_preferences (user_id) VALUES (NEW.id)
+  ON CONFLICT (user_id) DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_new_user_notification_prefs() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_new_user_notification_prefs ON auth.users;
+CREATE TRIGGER trg_new_user_notification_prefs
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.on_new_user_notification_prefs();
+
+-- Las de una persona, o las de por defecto si todavia no tiene fila.
+CREATE OR REPLACE FUNCTION public.notification_prefs(_user_id uuid)
+RETURNS public.notification_preferences
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  p public.notification_preferences%ROWTYPE;
+BEGIN
+  SELECT * INTO p FROM public.notification_preferences WHERE user_id = _user_id;
+  IF NOT FOUND THEN
+    p.user_id := _user_id;
+    p.activity_messages := true; p.mentions := true; p.event_updates := true; p.event_requests := true;
+    p.reminders := true; p.reminder_minutes := 60; p.direct_messages := true; p.friend_requests := true;
+    p.friend_activity := true; p.people_suggestions := true; p.activity_recommendations := true;
+    p.digests := true; p.account_tips := true; p.promotional := false; p.show_previews := true;
+    p.quiet_hours_enabled := false; p.quiet_start := '23:00'; p.quiet_end := '08:00';
+    p.timezone := 'America/Mexico_City'; p.locale := 'es'; p.daily_social_limit := 3;
+  END IF;
+  RETURN p;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notification_prefs(uuid) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.notification_category_enabled(p public.notification_preferences, _category text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public
+AS $$
+  SELECT CASE _category
+    WHEN 'activity_messages'        THEN p.activity_messages
+    WHEN 'mentions'                 THEN p.mentions
+    WHEN 'event_updates'            THEN p.event_updates
+    WHEN 'event_requests'           THEN p.event_requests
+    WHEN 'reminders'                THEN p.reminders
+    WHEN 'direct_messages'          THEN p.direct_messages
+    WHEN 'friend_requests'          THEN p.friend_requests
+    WHEN 'friend_activity'          THEN p.friend_activity
+    WHEN 'people_suggestions'       THEN p.people_suggestions
+    WHEN 'activity_recommendations' THEN p.activity_recommendations
+    WHEN 'digests'                  THEN p.digests
+    WHEN 'account'                  THEN p.account_tips
+    -- Los avisos de seguridad no se pueden apagar.
+    WHEN 'security'                 THEN true
+    WHEN 'promotional'              THEN p.promotional AND p.promotional_consent_at IS NOT NULL
+    ELSE false
+  END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notification_category_enabled(public.notification_preferences, text) FROM PUBLIC, anon, authenticated;
+
+-- Fin del horario silencioso (si _at cae dentro), en la zona de la persona.
+CREATE OR REPLACE FUNCTION public.after_quiet_hours(p public.notification_preferences, _at timestamptz)
+RETURNS timestamptz
+LANGUAGE plpgsql
+STABLE
+SET search_path = public
+AS $$
+DECLARE
+  v_local timestamp := _at AT TIME ZONE p.timezone;
+  v_t     time := v_local::time;
+  v_end   timestamp;
+BEGIN
+  IF NOT p.quiet_hours_enabled OR p.quiet_start = p.quiet_end THEN
+    RETURN _at;
+  END IF;
+  IF p.quiet_start < p.quiet_end THEN
+    IF v_t >= p.quiet_start AND v_t < p.quiet_end THEN
+      v_end := v_local::date + p.quiet_end;
+    ELSE
+      RETURN _at;
+    END IF;
+  ELSE
+    -- Cruza la medianoche (23:00 -> 08:00).
+    IF v_t >= p.quiet_start THEN
+      v_end := (v_local::date + 1) + p.quiet_end;
+    ELSIF v_t < p.quiet_end THEN
+      v_end := v_local::date + p.quiet_end;
+    ELSE
+      RETURN _at;
+    END IF;
+  END IF;
+  RETURN v_end AT TIME ZONE p.timezone;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.after_quiet_hours(public.notification_preferences, timestamptz) FROM PUBLIC, anon, authenticated;
+
+-- Recomendaciones y recordatorios de cuenta: solo de 9:00 a 21:00 local.
+CREATE OR REPLACE FUNCTION public.within_daytime(p public.notification_preferences, _at timestamptz)
+RETURNS timestamptz
+LANGUAGE plpgsql
+STABLE
+SET search_path = public
+AS $$
+DECLARE
+  v_local timestamp := _at AT TIME ZONE p.timezone;
+BEGIN
+  IF v_local::time < time '09:00' THEN
+    RETURN (v_local::date + time '09:00') AT TIME ZONE p.timezone;
+  ELSIF v_local::time >= time '21:00' THEN
+    RETURN ((v_local::date + 1) + time '09:00') AT TIME ZONE p.timezone;
+  END IF;
+  RETURN _at;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.within_daytime(public.notification_preferences, timestamptz) FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 3. La bandeja
+--
+-- Solo IDs y banderas en `data`: el texto se resuelve al leer. La app lee
+-- sus filas (RLS) y las marca por RPC; nadie las inserta desde el cliente.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.notifications (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  type         text NOT NULL REFERENCES public.notification_types(type),
+  category     text NOT NULL,
+  priority     smallint NOT NULL DEFAULT 1,
+  actor_id     uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  event_id     uuid REFERENCES public.events(id) ON DELETE CASCADE,
+  group_id     uuid REFERENCES public.groups(id) ON DELETE CASCADE,
+  message_id   uuid REFERENCES public.messages(id) ON DELETE SET NULL,
+  data         jsonb NOT NULL DEFAULT '{}'::jsonb,
+  dedupe_key   text,
+  group_key    text,
+  count        integer NOT NULL DEFAULT 1 CHECK (count >= 1),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  read_at      timestamptz,
+  opened_at    timestamptz,
+  converted_at timestamptz,
+  expires_at   timestamptz,
+  CONSTRAINT notifications_data_small CHECK (jsonb_typeof(data) = 'object' AND length(data::text) <= 1000),
+  CONSTRAINT notifications_keys_len CHECK (
+    (dedupe_key IS NULL OR length(dedupe_key) <= 200) AND (group_key IS NULL OR length(group_key) <= 200))
+);
+
+-- La misma notificacion no se crea dos veces.
+CREATE UNIQUE INDEX IF NOT EXISTS notifications_dedupe_idx
+  ON public.notifications (user_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
+-- Un solo aviso abierto (sin leer) por conversacion u otra agrupacion.
+CREATE UNIQUE INDEX IF NOT EXISTS notifications_open_group_idx
+  ON public.notifications (user_id, group_key) WHERE group_key IS NOT NULL AND read_at IS NULL;
+CREATE INDEX IF NOT EXISTS notifications_user_recent_idx
+  ON public.notifications (user_id, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS notifications_user_unread_idx
+  ON public.notifications (user_id) WHERE read_at IS NULL;
+CREATE INDEX IF NOT EXISTS notifications_event_idx
+  ON public.notifications (event_id) WHERE event_id IS NOT NULL;
+
+ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.notifications FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.notifications TO authenticated;
+
+DROP POLICY IF EXISTS "Users read own notifications" ON public.notifications;
+CREATE POLICY "Users read own notifications"
+  ON public.notifications FOR SELECT TO authenticated
+  USING (user_id = auth.uid());
+
+
+-- ------------------------------------------------------------
+-- 4. La cola de push (outbox)
+--
+-- Una entrega por intento de aviso. Como mucho una viva (pendiente o
+-- enviandose) por notificacion: los mensajes que llegan mientras tanto
+-- suben el recuento de la notificacion y salen en ESA entrega.
+-- Solo la toca el servidor.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.notification_deliveries (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  notification_id uuid NOT NULL REFERENCES public.notifications(id) ON DELETE CASCADE,
+  user_id         uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  priority        smallint NOT NULL DEFAULT 1,
+  status          text NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'skipped', 'expired', 'cancelled')),
+  scheduled_for   timestamptz NOT NULL DEFAULT now(),
+  expires_at      timestamptz NOT NULL,
+  attempts        smallint NOT NULL DEFAULT 0,
+  locked_until    timestamptz,
+  sent_at         timestamptz,
+  devices_sent    smallint,
+  devices_failed  smallint,
+  last_error      text CHECK (last_error IS NULL OR length(last_error) <= 300),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS notification_deliveries_one_live
+  ON public.notification_deliveries (notification_id) WHERE status IN ('pending', 'sending');
+CREATE INDEX IF NOT EXISTS notification_deliveries_due_idx
+  ON public.notification_deliveries (priority DESC, scheduled_for) WHERE status IN ('pending', 'sending');
+CREATE INDEX IF NOT EXISTS notification_deliveries_notification_idx
+  ON public.notification_deliveries (notification_id);
+
+ALTER TABLE public.notification_deliveries ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.notification_deliveries FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 5. Presencia en chats de grupo (para no mandar push a quien lo mira)
+-- ------------------------------------------------------------
+ALTER TABLE public.group_members
+  ADD COLUMN IF NOT EXISTS active_until timestamptz;
+
+CREATE OR REPLACE FUNCTION public.set_group_chat_presence(_group_id uuid, _active boolean)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE public.group_members
+  SET active_until = CASE WHEN _active THEN now() + interval '45 seconds' END,
+      last_read_at = now()
+  WHERE group_id = _group_id AND user_id = auth.uid();
+  IF FOUND THEN
+    UPDATE public.notifications SET read_at = now()
+    WHERE user_id = auth.uid() AND group_key = 'chat:group:' || _group_id AND read_at IS NULL;
+  END IF;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.set_group_chat_presence(uuid, boolean) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.set_group_chat_presence(uuid, boolean) TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 6. Despertar a notify-dispatch
+--
+-- Una llamada por transaccion como mucho: un evento con 50 personas que
+-- encola 50 avisos no hace 50 peticiones. pg_net las manda al confirmar,
+-- asi que la funcion nunca lee una fila que todavia no existe.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.kick_notification_dispatch()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = extensions, net, public
+AS $$
+DECLARE
+  v_key text;
+BEGIN
+  IF current_setting('app.notification_kicked', true) = 'on' THEN
+    RETURN;
+  END IF;
+  PERFORM set_config('app.notification_kicked', 'on', true);
+
+  SELECT decrypted_secret INTO v_key FROM vault.decrypted_secrets WHERE name = 'service_role_key';
+  IF v_key IS NULL THEN
+    RAISE WARNING 'kick_notification_dispatch: falta el secreto service_role_key en Vault';
+    RETURN;
+  END IF;
+
+  PERFORM http_post(
+    url     := 'https://myarlozvkbebygwszgkf.supabase.co/functions/v1/notify-dispatch',
+    headers := jsonb_build_object('Content-Type', 'application/json', 'Authorization', 'Bearer ' || v_key),
+    body    := '{"kick":true}'::jsonb
+  );
+EXCEPTION WHEN OTHERS THEN
+  -- Nunca tumba la escritura que provoco el aviso: el cron lo recoge.
+  RAISE WARNING 'kick_notification_dispatch fallo (%): %', SQLSTATE, SQLERRM;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.kick_notification_dispatch() FROM PUBLIC, anon, authenticated;
+
+-- Para el cron: solo despierta a la funcion si hay algo que hacer.
+CREATE OR REPLACE FUNCTION public.kick_notification_dispatch_if_due()
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.notification_deliveries d
+    WHERE (d.status = 'pending' AND d.scheduled_for <= now())
+       OR (d.status = 'sending' AND d.locked_until < now())
+  ) THEN
+    PERFORM public.kick_notification_dispatch();
+    RETURN true;
+  END IF;
+  RETURN false;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.kick_notification_dispatch_if_due() FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 7. notify(): la unica puerta
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.schedule_notification_delivery(
+  _notification_id uuid,
+  _user_id         uuid,
+  p                public.notification_preferences,
+  t                public.notification_types,
+  _window          interval,
+  _expires         timestamptz,
+  _urgent          boolean
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_at   timestamptz := now();
+  v_last timestamptz;
+  v_exp  timestamptz;
+BEGIN
+  -- Sin dispositivos no hay push: el aviso se queda en la bandeja.
+  IF NOT EXISTS (SELECT 1 FROM public.device_tokens WHERE user_id = _user_id) THEN
+    RETURN;
+  END IF;
+
+  -- Ya hay una entrega en camino: saldra con el recuento al dia.
+  IF EXISTS (
+    SELECT 1 FROM public.notification_deliveries
+    WHERE notification_id = _notification_id AND status IN ('pending', 'sending')
+  ) THEN
+    RETURN;
+  END IF;
+
+  -- Agrupar: tras una push de esta conversacion, la siguiente espera a que
+  -- pase la ventana y resume lo que llego mientras tanto.
+  IF _window IS NOT NULL THEN
+    SELECT max(sent_at) INTO v_last
+    FROM public.notification_deliveries
+    WHERE notification_id = _notification_id AND status = 'sent';
+    IF v_last IS NOT NULL AND v_last > now() - _window THEN
+      v_at := v_last + _window;
+    END IF;
+  END IF;
+
+  -- Lo urgente (un cambio o cancelacion de algo que empieza pronto) no
+  -- espera al horario silencioso. Nada usa niveles criticos de Apple.
+  IF NOT COALESCE(_urgent, false) THEN
+    v_at := public.after_quiet_hours(p, v_at);
+    IF t.daytime_only THEN
+      v_at := public.within_daytime(p, v_at);
+    END IF;
+  END IF;
+
+  v_exp := LEAST(COALESCE(_expires, 'infinity'::timestamptz), v_at + t.push_ttl);
+  IF v_at >= v_exp THEN
+    RETURN;
+  END IF;
+
+  INSERT INTO public.notification_deliveries (notification_id, user_id, priority, scheduled_for, expires_at)
+  VALUES (_notification_id, _user_id, t.priority, v_at, v_exp)
+  ON CONFLICT DO NOTHING;
+
+  IF v_at <= now() THEN
+    PERFORM public.kick_notification_dispatch();
+  END IF;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.schedule_notification_delivery(uuid, uuid, public.notification_preferences, public.notification_types, interval, timestamptz, boolean) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.notify(
+  _user_id   uuid,
+  _type      text,
+  _actor_id  uuid        DEFAULT NULL,
+  _event_id  uuid        DEFAULT NULL,
+  _group_id  uuid        DEFAULT NULL,
+  _message_id uuid       DEFAULT NULL,
+  _data      jsonb       DEFAULT '{}'::jsonb,
+  _dedupe    text        DEFAULT NULL,
+  _group_key text        DEFAULT NULL,
+  _expires   timestamptz DEFAULT NULL,
+  _window    interval    DEFAULT NULL,
+  _urgent    boolean     DEFAULT false
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  t     public.notification_types%ROWTYPE;
+  p     public.notification_preferences%ROWTYPE;
+  v_id  uuid;
+  v_day timestamptz;
+  v_n   integer;
+BEGIN
+  IF _user_id IS NULL OR _type IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT * INTO t FROM public.notification_types WHERE type = _type;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'UNKNOWN_NOTIFICATION_TYPE' USING ERRCODE = 'P0001', DETAIL = _type;
+  END IF;
+
+  -- Nunca a quien hizo la accion, ni entre bloqueados.
+  IF _actor_id IS NOT NULL AND _actor_id = _user_id THEN RETURN NULL; END IF;
+  IF _actor_id IS NOT NULL AND public.is_blocked(_user_id, _actor_id) THEN RETURN NULL; END IF;
+  -- Nada que ya no sirve (una recomendacion de algo que ya empezo).
+  IF _expires IS NOT NULL AND _expires <= now() THEN RETURN NULL; END IF;
+  IF NOT EXISTS (SELECT 1 FROM auth.users WHERE id = _user_id) THEN RETURN NULL; END IF;
+
+  p := public.notification_prefs(_user_id);
+  IF NOT public.notification_category_enabled(p, t.category) THEN
+    RETURN NULL;
+  END IF;
+
+  -- Actividad silenciada: solo pasa lo que no respeta el silencio
+  -- (menciones, avisos del organizador, cambios, recordatorios).
+  IF _event_id IS NOT NULL AND NOT t.bypass_mute AND EXISTS (
+    SELECT 1 FROM public.event_chat_state s
+    WHERE s.event_id = _event_id AND s.user_id = _user_id AND s.muted
+  ) THEN
+    RETURN NULL;
+  END IF;
+
+  -- Tope diario (en el dia de la persona) de avisos sociales.
+  IF t.social THEN
+    v_day := date_trunc('day', now() AT TIME ZONE p.timezone) AT TIME ZONE p.timezone;
+    SELECT count(*) INTO v_n
+    FROM public.notifications n
+    JOIN public.notification_types nt ON nt.type = n.type AND nt.social
+    WHERE n.user_id = _user_id AND n.created_at >= v_day;
+    IF v_n >= p.daily_social_limit THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  INSERT INTO public.notifications (
+    user_id, type, category, priority, actor_id, event_id, group_id, message_id, data,
+    dedupe_key, group_key, expires_at
+  )
+  VALUES (
+    _user_id, _type, t.category, t.priority, _actor_id, _event_id, _group_id, _message_id,
+    COALESCE(_data, '{}'::jsonb), _dedupe, _group_key, _expires
+  )
+  ON CONFLICT (user_id, group_key) WHERE group_key IS NOT NULL AND read_at IS NULL
+  DO UPDATE SET
+    count      = public.notifications.count + 1,
+    actor_id   = COALESCE(EXCLUDED.actor_id, public.notifications.actor_id),
+    message_id = COALESCE(EXCLUDED.message_id, public.notifications.message_id),
+    data       = public.notifications.data || EXCLUDED.data,
+    updated_at = now(),
+    expires_at = CASE WHEN public.notifications.expires_at IS NULL OR EXCLUDED.expires_at IS NULL THEN NULL
+                      ELSE greatest(public.notifications.expires_at, EXCLUDED.expires_at) END
+  RETURNING id INTO v_id;
+
+  PERFORM public.schedule_notification_delivery(v_id, _user_id, p, t, _window, _expires, _urgent);
+  RETURN v_id;
+EXCEPTION
+  -- La misma dedupe_key: ya se aviso, no se duplica ni se vuelve a mandar.
+  WHEN unique_violation THEN
+    RETURN NULL;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify(uuid, text, uuid, uuid, uuid, uuid, jsonb, text, text, timestamptz, interval, boolean) FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 8. Lo que usa notify-dispatch (solo service_role)
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.claim_notification_deliveries(_limit integer DEFAULT 50)
+RETURNS TABLE (
+  delivery_id     uuid,
+  notification_id uuid,
+  user_id         uuid,
+  type            text,
+  priority        smallint,
+  count           integer,
+  locale          text,
+  actor_id        uuid,
+  actor_name      text,
+  event_id        uuid,
+  event_title     text,
+  group_id        uuid,
+  group_name      text,
+  is_dm           boolean,
+  preview         text,
+  data            jsonb,
+  thread_id       text,
+  expires_at      timestamptz,
+  tokens          text[]
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+#variable_conflict use_column
+BEGIN
+  -- Lo que ya no merece salir se descarta antes de reclamar, con el motivo.
+  UPDATE public.notification_deliveries d
+  SET status = 'expired', updated_at = now(), locked_until = NULL
+  WHERE d.status IN ('pending', 'sending') AND d.expires_at <= now();
+
+  UPDATE public.notification_deliveries d
+  SET status = 'failed', last_error = 'max_attempts', updated_at = now(), locked_until = NULL
+  WHERE d.status = 'sending' AND d.locked_until < now() AND d.attempts >= 5;
+
+  UPDATE public.notification_deliveries d
+  SET status = 'skipped', last_error = 'read', updated_at = now()
+  FROM public.notifications n
+  WHERE d.status = 'pending' AND d.scheduled_for <= now() AND n.id = d.notification_id AND n.read_at IS NOT NULL;
+
+  UPDATE public.notification_deliveries d
+  SET status = 'skipped', last_error = 'no_devices', updated_at = now()
+  WHERE d.status = 'pending' AND d.scheduled_for <= now()
+    AND NOT EXISTS (SELECT 1 FROM public.device_tokens dt WHERE dt.user_id = d.user_id);
+
+  -- Ya no esta en el chat (salio, le expulsaron, bloqueo) o lo esta mirando.
+  UPDATE public.notification_deliveries d
+  SET status = 'skipped', last_error = 'no_access', updated_at = now()
+  FROM public.notifications n
+  WHERE d.status = 'pending' AND d.scheduled_for <= now() AND n.id = d.notification_id
+    AND n.type IN ('event_message', 'chat_mention', 'organizer_announcement')
+    AND NOT public.event_chat_member(n.event_id, n.user_id);
+
+  UPDATE public.notification_deliveries d
+  SET status = 'skipped', last_error = 'no_access', updated_at = now()
+  FROM public.notifications n
+  WHERE d.status = 'pending' AND d.scheduled_for <= now() AND n.id = d.notification_id
+    AND n.type = 'message' AND NOT public.is_group_member(n.group_id, n.user_id);
+
+  UPDATE public.notification_deliveries d
+  SET status = 'skipped', last_error = 'viewing', updated_at = now()
+  FROM public.notifications n, public.event_chat_state s
+  WHERE d.status = 'pending' AND d.scheduled_for <= now() AND n.id = d.notification_id
+    AND n.type = 'event_message' AND s.event_id = n.event_id AND s.user_id = n.user_id
+    AND s.active_until > now();
+
+  -- Recordatorios y recomendaciones de algo cancelado o ya empezado.
+  UPDATE public.notification_deliveries d
+  SET status = 'skipped', last_error = 'event_gone', updated_at = now()
+  FROM public.notifications n
+  JOIN public.events e ON e.id = n.event_id
+  WHERE d.status = 'pending' AND d.scheduled_for <= now() AND n.id = d.notification_id
+    AND n.type IN ('event_reminder', 'new_campus_event', 'friend_created_event', 'friend_joined_event',
+                   'spots_low', 'event_invite', 'event_repeat')
+    AND (NOT e.is_active OR e.starts_at <= now());
+
+  RETURN QUERY
+  WITH picked AS (
+    SELECT d.id
+    FROM public.notification_deliveries d
+    WHERE (d.status = 'pending' AND d.scheduled_for <= now())
+       OR (d.status = 'sending' AND d.locked_until < now())
+    ORDER BY d.priority DESC, d.scheduled_for
+    LIMIT least(greatest(COALESCE(_limit, 50), 1), 200)
+    FOR UPDATE SKIP LOCKED
+  ), claimed AS (
+    UPDATE public.notification_deliveries d
+    SET status = 'sending', attempts = d.attempts + 1,
+        locked_until = now() + interval '2 minutes', updated_at = now()
+    FROM picked
+    WHERE d.id = picked.id
+    RETURNING d.id, d.notification_id, d.expires_at
+  )
+  SELECT
+    c.id,
+    n.id,
+    n.user_id,
+    n.type,
+    n.priority,
+    n.count,
+    pr.locale,
+    n.actor_id,
+    CASE WHEN n.actor_id IS NOT NULL AND NOT public.is_blocked(n.user_id, n.actor_id) THEN ap.name END,
+    n.event_id,
+    left(e.title, 80),
+    n.group_id,
+    CASE WHEN g.name LIKE '\_\_dm\_%' THEN NULL ELSE left(g.name, 60) END,
+    COALESCE(g.name LIKE '\_\_dm\_%', false),
+    -- La vista previa solo si la persona la quiere y el mensaje sigue ahi.
+    CASE
+      WHEN pr.show_previews AND n.type IN ('event_message', 'chat_mention', 'organizer_announcement', 'message')
+           AND m.id IS NOT NULL AND m.deleted_at IS NULL
+      THEN left(m.content, 120) || CASE WHEN length(m.content) > 120 THEN U&'\2026' ELSE '' END
+    END,
+    n.data,
+    COALESCE(n.group_key, n.type || ':' || COALESCE(n.event_id::text, n.group_id::text, n.user_id::text)),
+    c.expires_at,
+    (SELECT array_agg(dt.token) FROM public.device_tokens dt WHERE dt.user_id = n.user_id)
+  FROM claimed c
+  JOIN public.notifications n ON n.id = c.notification_id
+  CROSS JOIN LATERAL public.notification_prefs(n.user_id) pr
+  LEFT JOIN public.profiles ap ON ap.id = n.actor_id
+  LEFT JOIN public.events   e  ON e.id = n.event_id
+  LEFT JOIN public.groups   g  ON g.id = n.group_id
+  LEFT JOIN public.messages m  ON m.id = n.message_id;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.claim_notification_deliveries(integer) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.claim_notification_deliveries(integer) TO service_role;
+
+-- Resultado de un envio. Idempotente: si ya no estaba "enviandose" (otro
+-- despachador la cerro), no toca nada.
+CREATE OR REPLACE FUNCTION public.complete_notification_delivery(
+  _delivery_id    uuid,
+  _ok             boolean,
+  _devices_sent   integer DEFAULT 0,
+  _devices_failed integer DEFAULT 0,
+  _error          text    DEFAULT NULL,
+  _retry          boolean DEFAULT false,
+  _dead_tokens    text[]  DEFAULT '{}'
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_user     uuid;
+  v_attempts smallint;
+BEGIN
+  SELECT d.user_id, d.attempts INTO v_user, v_attempts
+  FROM public.notification_deliveries d
+  WHERE d.id = _delivery_id AND d.status = 'sending'
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  IF _ok THEN
+    UPDATE public.notification_deliveries
+    SET status = 'sent', sent_at = now(), locked_until = NULL, updated_at = now(),
+        devices_sent = _devices_sent, devices_failed = _devices_failed, last_error = left(_error, 300)
+    WHERE id = _delivery_id;
+  ELSIF _retry AND v_attempts < 5 THEN
+    -- 2, 4, 8, 16 minutos.
+    UPDATE public.notification_deliveries
+    SET status = 'pending', locked_until = NULL, updated_at = now(),
+        scheduled_for = now() + make_interval(mins => (2 ^ v_attempts)::int),
+        devices_failed = _devices_failed, last_error = left(_error, 300)
+    WHERE id = _delivery_id;
+  ELSE
+    UPDATE public.notification_deliveries
+    SET status = 'failed', locked_until = NULL, updated_at = now(),
+        devices_sent = _devices_sent, devices_failed = _devices_failed, last_error = left(_error, 300)
+    WHERE id = _delivery_id;
+  END IF;
+
+  IF _dead_tokens IS NOT NULL AND cardinality(_dead_tokens) > 0 THEN
+    DELETE FROM public.device_tokens WHERE user_id = v_user AND token = ANY (_dead_tokens);
+  END IF;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.complete_notification_delivery(uuid, boolean, integer, integer, text, boolean, text[]) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.complete_notification_delivery(uuid, boolean, integer, integer, text, boolean, text[]) TO service_role;
+
+
+-- ------------------------------------------------------------
+-- 9. Lo que usa la app
+-- ------------------------------------------------------------
+
+-- La bandeja, con el contenido resuelto CON LOS PERMISOS DE QUIEN LEE:
+-- INVOKER, asi el titulo sale solo si todavia puede ver el evento, el
+-- nombre solo si la persona es visible, y el grupo solo si sigue dentro.
+CREATE OR REPLACE FUNCTION public.my_notifications(_before timestamptz DEFAULT NULL, _limit integer DEFAULT 30)
+RETURNS TABLE (
+  id              uuid,
+  type            text,
+  category        text,
+  count           integer,
+  created_at      timestamptz,
+  updated_at      timestamptz,
+  read_at         timestamptz,
+  data            jsonb,
+  actor_id        uuid,
+  actor_name      text,
+  actor_avatar    text,
+  event_id        uuid,
+  event_title     text,
+  event_starts_at timestamptz,
+  group_id        uuid,
+  group_name      text,
+  is_dm           boolean
+)
+LANGUAGE sql
+STABLE
+SET search_path = public
+AS $$
+  SELECT n.id, n.type, n.category, n.count, n.created_at, n.updated_at, n.read_at, n.data,
+         n.actor_id, pp.name, pp.avatar_url,
+         n.event_id, e.title, e.starts_at,
+         n.group_id,
+         CASE WHEN g.name LIKE '\_\_dm\_%' THEN NULL ELSE g.name END,
+         COALESCE(g.name LIKE '\_\_dm\_%', false)
+  FROM public.notifications n
+  LEFT JOIN public.public_profiles pp ON pp.id = n.actor_id
+  LEFT JOIN public.events e ON e.id = n.event_id
+  LEFT JOIN public.groups g ON g.id = n.group_id
+  WHERE n.user_id = auth.uid()
+    AND (n.actor_id IS NULL OR NOT public.is_blocked(auth.uid(), n.actor_id))
+    AND (_before IS NULL OR n.updated_at < _before)
+  ORDER BY n.updated_at DESC, n.id DESC
+  LIMIT least(greatest(COALESCE(_limit, 30), 1), 50);
+$$;
+REVOKE EXECUTE ON FUNCTION public.my_notifications(timestamptz, integer) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.my_notifications(timestamptz, integer) TO authenticated;
+
+-- Marcar leidas (todas si no se pasan ids). Leer cancela las push que
+-- quedaban por salir de esos avisos.
+CREATE OR REPLACE FUNCTION public.mark_notifications_read(_ids uuid[] DEFAULT NULL)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_n integer;
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+  WITH r AS (
+    UPDATE public.notifications
+    SET read_at = now()
+    WHERE user_id = auth.uid() AND read_at IS NULL AND (_ids IS NULL OR id = ANY (_ids))
+    RETURNING id
+  ), c AS (
+    UPDATE public.notification_deliveries d
+    SET status = 'cancelled', updated_at = now()
+    FROM r WHERE d.notification_id = r.id AND d.status = 'pending'
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_n FROM r;
+  RETURN v_n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.mark_notifications_read(uuid[]) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.mark_notifications_read(uuid[]) TO authenticated;
+
+-- Tocada (desde la push o desde la bandeja): para la metrica de apertura.
+CREATE OR REPLACE FUNCTION public.mark_notification_opened(_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE public.notifications
+  SET opened_at = COALESCE(opened_at, now()), read_at = COALESCE(read_at, now())
+  WHERE id = _id AND user_id = auth.uid();
+  UPDATE public.notification_deliveries
+  SET status = 'cancelled', updated_at = now()
+  WHERE notification_id = _id AND status = 'pending' AND user_id = auth.uid();
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.mark_notification_opened(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.mark_notification_opened(uuid) TO authenticated;
+
+-- Actividades silenciadas, para la pantalla de preferencias.
+CREATE OR REPLACE FUNCTION public.muted_event_chats()
+RETURNS TABLE (event_id uuid, title text, starts_at timestamptz)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT e.id, e.title, e.starts_at
+  FROM public.event_chat_state s
+  JOIN public.events e ON e.id = s.event_id
+  WHERE s.user_id = auth.uid() AND s.muted AND e.is_active
+  ORDER BY e.starts_at DESC
+  LIMIT 100;
+$$;
+REVOKE EXECUTE ON FUNCTION public.muted_event_chats() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.muted_event_chats() TO authenticated;
+
+-- Invitar amigos a una actividad. Quien invita tiene que estar dentro; cada
+-- invitado tiene que ser amigo, poder ver el evento y no estar ya dentro.
+-- Un aviso por actividad y persona, como mucho 20 por llamada y 50 al dia.
+CREATE OR REPLACE FUNCTION public.invite_friends_to_event(_event_id uuid, _friend_ids uuid[])
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_ev  record;
+  v_n   integer := 0;
+  v_hoy integer;
+  f     uuid;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+  IF _friend_ids IS NULL OR cardinality(_friend_ids) = 0 THEN
+    RETURN 0;
+  END IF;
+  IF cardinality(_friend_ids) > 20 THEN
+    RAISE EXCEPTION 'TOO_MANY_INVITES' USING ERRCODE = 'P0001';
+  END IF;
+
+  SELECT e.id, e.creator_id, e.privacy, e.starts_at, e.is_active INTO v_ev
+  FROM public.events e WHERE e.id = _event_id;
+  IF NOT FOUND OR NOT public.event_chat_member(_event_id, v_uid) THEN
+    RAISE EXCEPTION 'NOT_AN_ATTENDEE' USING ERRCODE = '42501';
+  END IF;
+  IF NOT v_ev.is_active OR v_ev.starts_at <= now() THEN
+    RAISE EXCEPTION 'EVENT_NOT_OPEN' USING ERRCODE = 'P0001';
+  END IF;
+
+  SELECT count(*) INTO v_hoy FROM public.notifications n
+  WHERE n.type = 'event_invite' AND n.actor_id = v_uid AND n.created_at > now() - interval '1 day';
+  IF v_hoy >= 50 THEN
+    RAISE EXCEPTION 'INVITE_RATE_LIMIT' USING ERRCODE = 'P0001';
+  END IF;
+
+  FOREACH f IN ARRAY _friend_ids LOOP
+    CONTINUE WHEN f IS NULL OR f = v_uid OR f = v_ev.creator_id;
+    CONTINUE WHEN NOT public.are_friends(v_uid, f);
+    CONTINUE WHEN public.is_blocked(f, v_ev.creator_id);
+    CONTINUE WHEN NOT public.same_institution(f, v_ev.creator_id);
+    CONTINUE WHEN v_ev.privacy = 'friends' AND NOT public.are_friends(v_ev.creator_id, f);
+    CONTINUE WHEN EXISTS (SELECT 1 FROM public.event_participants ep WHERE ep.event_id = _event_id AND ep.user_id = f);
+    IF public.notify(f, 'event_invite', v_uid, _event_id, NULL, NULL, '{}'::jsonb,
+                     'event_invite:' || _event_id, NULL, v_ev.starts_at) IS NOT NULL THEN
+      v_n := v_n + 1;
+    END IF;
+  END LOOP;
+  RETURN v_n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.invite_friends_to_event(uuid, uuid[]) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.invite_friends_to_event(uuid, uuid[]) TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 10. Leer el chat apaga sus avisos
+--
+-- Mismo cuerpo que 20260923000000 mas marcar leidas las notificaciones de
+-- ese chat (y sus menciones). Asi un aviso agrupado que aun no salio ya
+-- no sale.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.mark_event_chat_read(_event_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL OR NOT public.event_chat_member(_event_id, v_uid) THEN
+    RETURN;
+  END IF;
+  INSERT INTO public.event_chat_state (event_id, user_id, last_read_at)
+  VALUES (_event_id, v_uid, now())
+  ON CONFLICT (event_id, user_id) DO UPDATE
+    SET last_read_at = now(), updated_at = now();
+  UPDATE public.notifications SET read_at = now()
+  WHERE user_id = v_uid AND read_at IS NULL
+    AND group_key IN ('chat:event:' || _event_id, 'mention:event:' || _event_id);
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.mark_event_chat_read(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.mark_event_chat_read(uuid) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.set_event_chat_presence(_event_id uuid, _active boolean)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL OR NOT public.event_chat_member(_event_id, v_uid) THEN
+    RETURN;
+  END IF;
+  INSERT INTO public.event_chat_state (event_id, user_id, last_read_at, active_until)
+  VALUES (_event_id, v_uid, now(), CASE WHEN _active THEN now() + interval '45 seconds' END)
+  ON CONFLICT (event_id, user_id) DO UPDATE
+    SET active_until = CASE WHEN _active THEN now() + interval '45 seconds' END,
+        last_read_at = now(),
+        updated_at   = now();
+  UPDATE public.notifications SET read_at = now()
+  WHERE user_id = v_uid AND read_at IS NULL
+    AND group_key IN ('chat:event:' || _event_id, 'mention:event:' || _event_id);
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.set_event_chat_presence(uuid, boolean) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.set_event_chat_presence(uuid, boolean) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.mark_group_read(_group_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE public.group_members
+  SET    last_read_at = now()
+  WHERE  group_id = _group_id
+    AND  user_id  = auth.uid();
+  UPDATE public.notifications SET read_at = now()
+  WHERE user_id = auth.uid() AND read_at IS NULL AND group_key = 'chat:group:' || _group_id;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.mark_group_read(uuid) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.mark_group_read(uuid) TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 11. Los avisos de siempre, ahora por notify()
+--
+-- Mismas condiciones que antes; cambia a donde van. La carga conserva el
+-- `type` y los ids que ya leia la app publicada.
+-- ------------------------------------------------------------
+
+-- Chat de actividad (sustituye a la version de 20260923000000).
+CREATE OR REPLACE FUNCTION public.notify_event_chat_message(_msg public.messages)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_revived boolean;
+  r         record;
+BEGIN
+  -- "Vuelve a haber movimiento": nadie habia escrito en 12 horas.
+  v_revived := NOT EXISTS (
+    SELECT 1 FROM public.messages m
+    WHERE m.event_id = _msg.event_id AND m.id <> _msg.id AND m.deleted_at IS NULL
+      AND m.created_at > now() - interval '12 hours'
+  );
+
+  FOR r IN
+    SELECT s.user_id, s.active_until, (s.user_id = ANY (_msg.mentions)) AS mencionado
+    FROM public.event_chat_state s
+    WHERE s.event_id = _msg.event_id
+      AND s.user_id <> _msg.sender_id
+      AND public.event_chat_member(s.event_id, s.user_id)
+      AND NOT public.is_blocked(s.user_id, _msg.sender_id)
+  LOOP
+    -- Con el chat abierto el mensaje ya llega por tiempo real.
+    CONTINUE WHEN r.active_until IS NOT NULL AND r.active_until > now();
+
+    IF _msg.is_announcement THEN
+      PERFORM public.notify(r.user_id, 'organizer_announcement', _msg.sender_id, _msg.event_id, NULL, _msg.id,
+        '{}'::jsonb, 'announcement:' || _msg.id);
+    ELSIF r.mencionado THEN
+      PERFORM public.notify(r.user_id, 'chat_mention', _msg.sender_id, _msg.event_id, NULL, _msg.id,
+        '{}'::jsonb, NULL, 'mention:event:' || _msg.event_id, NULL, interval '1 minute');
+    ELSE
+      PERFORM public.notify(r.user_id, 'event_message', _msg.sender_id, _msg.event_id, NULL, _msg.id,
+        jsonb_build_object('revived', v_revived), NULL, 'chat:event:' || _msg.event_id, NULL, interval '5 minutes');
+    END IF;
+  END LOOP;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_event_chat_message(public.messages) FROM PUBLIC, anon, authenticated;
+
+-- Grupos y DM: agrupados, sin push a quien lo mira.
+CREATE OR REPLACE FUNCTION public.on_message_push()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r record;
+BEGIN
+  IF NEW.event_id IS NOT NULL THEN
+    PERFORM public.notify_event_chat_message(NEW);
+    RETURN NEW;
+  END IF;
+  IF NEW.group_id IS NULL THEN RETURN NEW; END IF;
+
+  FOR r IN
+    SELECT gm.user_id
+    FROM public.group_members gm
+    WHERE gm.group_id = NEW.group_id
+      AND gm.user_id <> NEW.sender_id
+      AND NOT public.is_blocked(gm.user_id, NEW.sender_id)
+      AND (gm.active_until IS NULL OR gm.active_until <= now())
+  LOOP
+    PERFORM public.notify(r.user_id, 'message', NEW.sender_id, NULL, NEW.group_id, NEW.id,
+      '{}'::jsonb, NULL, 'chat:group:' || NEW.group_id, NULL, interval '3 minutes');
+  END LOOP;
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_message_push() FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.on_join_request_push()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_ev record;
+BEGIN
+  SELECT e.creator_id, e.ends_at INTO v_ev FROM public.events e WHERE e.id = NEW.event_id;
+  IF NOT FOUND THEN RETURN NEW; END IF;
+  -- Pedir, cancelar y volver a pedir no avisa dos veces.
+  PERFORM public.notify(v_ev.creator_id, 'join_request', NEW.user_id, NEW.event_id, NULL, NULL,
+    '{}'::jsonb, 'join_request:' || NEW.event_id || ':' || NEW.user_id, NULL, v_ev.ends_at);
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_join_request_push() FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.on_approval_push()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_ev record;
+BEGIN
+  SELECT e.creator_id, e.ends_at INTO v_ev FROM public.events e WHERE e.id = NEW.event_id;
+  PERFORM public.notify(NEW.user_id, 'approval', v_ev.creator_id, NEW.event_id, NULL, NULL,
+    '{}'::jsonb, 'approval:' || NEW.event_id, NULL, v_ev.ends_at);
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_approval_push() FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.on_friend_request_push()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.addressee_id = NEW.requester_id THEN RETURN NEW; END IF;
+  -- Pedir, cancelar y volver a pedir no avisa otra vez.
+  PERFORM public.notify(NEW.addressee_id, 'friend_request', NEW.requester_id, NULL, NULL, NULL,
+    '{}'::jsonb, 'friend_request:' || NEW.requester_id);
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_friend_request_push() FROM PUBLIC, anon, authenticated;
+
+-- Nuevo: aceptaron tu solicitud.
+CREATE OR REPLACE FUNCTION public.on_friend_accepted_push()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  PERFORM public.notify(NEW.requester_id, 'friend_accepted', NEW.addressee_id, NULL, NULL, NULL,
+    '{}'::jsonb, 'friend_accepted:' || NEW.addressee_id);
+  -- Si venia de una sugerencia o de contactos, cuenta como conversion.
+  UPDATE public.notifications SET converted_at = now()
+  WHERE converted_at IS NULL AND type IN ('person_suggestion', 'contact_joined', 'invite_accepted')
+    AND ((user_id = NEW.requester_id AND actor_id = NEW.addressee_id)
+      OR (user_id = NEW.addressee_id AND actor_id = NEW.requester_id));
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_friend_accepted_push() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_friend_accepted_push ON public.friendships;
+CREATE TRIGGER trg_friend_accepted_push
+  AFTER UPDATE OF status ON public.friendships
+  FOR EACH ROW
+  WHEN (OLD.status = 'pending' AND NEW.status = 'accepted')
+  EXECUTE FUNCTION public.on_friend_accepted_push();
+
+-- Plan repetido (mismo cuerpo que 20260920000000 de la PR #17, con notify).
+CREATE OR REPLACE FUNCTION public.on_event_repeat_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r record;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.events e
+    WHERE e.repeated_from = NEW.repeated_from
+      AND e.creator_id = NEW.creator_id
+      AND e.id <> NEW.id
+      AND e.created_at > now() - interval '12 hours'
+  ) THEN
+    RETURN NEW;
+  END IF;
+
+  FOR r IN
+    SELECT DISTINCT g.uid
+    FROM (
+      SELECT o.creator_id AS uid FROM public.events o WHERE o.id = NEW.repeated_from
+      UNION
+      SELECT ep.user_id FROM public.event_participants ep
+      WHERE ep.event_id = NEW.repeated_from AND ep.status = 'joined'
+    ) g
+    WHERE g.uid <> NEW.creator_id
+      AND NOT public.is_blocked(g.uid, NEW.creator_id)
+      AND public.same_institution(g.uid, NEW.creator_id)
+      AND (
+        NEW.privacy IN ('open', 'private')
+        OR (NEW.privacy = 'friends' AND public.are_friends(NEW.creator_id, g.uid))
+      )
+    LIMIT 100
+  LOOP
+    PERFORM public.notify(r.uid, 'event_repeat', NEW.creator_id, NEW.id, NULL, NULL,
+      '{}'::jsonb, 'event_repeat:' || NEW.id, NULL, NEW.starts_at);
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_event_repeat_push() FROM PUBLIC, anon, authenticated;
+
+-- Cambio o cancelacion (sustituye a la de 20260921000000 de la PR #17,
+-- ya aplicada en produccion; aqui se crea si no existia). Suma el cambio
+-- de direccion y de hora de fin. Es URGENTE si empieza en menos de 24 h:
+-- entonces no espera al horario silencioso.
+CREATE OR REPLACE FUNCTION public.on_event_change_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_tipo   text;
+  v_cambio text;
+  v_dedupe text;
+  v_urgent boolean;
+  r        record;
+BEGIN
+  IF OLD.is_active AND NOT NEW.is_active THEN
+    v_tipo := 'event_cancelled'; v_cambio := 'cancelled';
+  ELSIF NEW.starts_at IS DISTINCT FROM OLD.starts_at OR NEW.ends_at IS DISTINCT FROM OLD.ends_at THEN
+    v_tipo := 'event_changed'; v_cambio := 'time';
+  ELSIF NEW.lat IS DISTINCT FROM OLD.lat OR NEW.lng IS DISTINCT FROM OLD.lng
+     OR NEW.address IS DISTINCT FROM OLD.address THEN
+    v_tipo := 'event_changed'; v_cambio := 'place';
+  ELSIF NEW.privacy = 'friends' AND OLD.privacy <> 'friends' THEN
+    v_tipo := 'event_changed'; v_cambio := 'privacy';
+  ELSE
+    RETURN NEW;
+  END IF;
+
+  -- El mismo estado final no avisa dos veces (guardar dos veces igual).
+  v_dedupe := CASE WHEN v_tipo = 'event_cancelled' THEN 'cancelled:' || NEW.id
+    ELSE 'changed:' || NEW.id || ':' || md5(concat_ws('|', NEW.starts_at, NEW.ends_at, NEW.lat, NEW.lng, NEW.address, NEW.privacy)) END;
+  v_urgent := NEW.starts_at < now() + interval '24 hours';
+
+  FOR r IN
+    SELECT ep.user_id
+    FROM public.event_participants ep
+    WHERE ep.event_id = NEW.id
+      AND ep.status = 'joined'
+      AND ep.user_id <> NEW.creator_id
+      AND NOT public.is_blocked(ep.user_id, NEW.creator_id)
+    LIMIT 500
+  LOOP
+    PERFORM public.notify(r.user_id, v_tipo, NEW.creator_id, NEW.id, NULL, NULL,
+      jsonb_build_object('change', v_cambio), v_dedupe, NULL, NULL, NULL, v_urgent);
+  END LOOP;
+
+  -- Cancelado: lo que quedaba por salir de esta actividad ya no sirve.
+  IF v_tipo = 'event_cancelled' THEN
+    UPDATE public.notification_deliveries d
+    SET status = 'cancelled', updated_at = now()
+    FROM public.notifications n
+    WHERE d.notification_id = n.id AND d.status = 'pending' AND n.event_id = NEW.id
+      AND n.type NOT IN ('event_cancelled');
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_event_change_push() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_event_change_push ON public.events;
+CREATE TRIGGER trg_event_change_push
+  AFTER UPDATE OF starts_at, ends_at, lat, lng, address, is_active, privacy ON public.events
+  FOR EACH ROW
+  WHEN (OLD.is_active  IS DISTINCT FROM NEW.is_active
+     OR OLD.starts_at  IS DISTINCT FROM NEW.starts_at
+     OR OLD.ends_at    IS DISTINCT FROM NEW.ends_at
+     OR OLD.lat        IS DISTINCT FROM NEW.lat
+     OR OLD.lng        IS DISTINCT FROM NEW.lng
+     OR OLD.address    IS DISTINCT FROM NEW.address
+     OR OLD.privacy    IS DISTINCT FROM NEW.privacy)
+  EXECUTE FUNCTION public.on_event_change_push();
+
+-- "Ya empezo" (mismo cuerpo que 20260921000000, con notify).
+CREATE OR REPLACE FUNCTION public.notify_started_events()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r   record;
+  v_n integer := 0;
+BEGIN
+  FOR r IN
+    WITH reclamados AS (
+      UPDATE public.events e
+      SET start_push_sent_at = now()
+      WHERE e.start_push_sent_at IS NULL
+        AND e.is_active
+        AND e.starts_at <= now()
+        AND e.starts_at > now() - interval '1 hour'
+        AND e.ends_at   > now()
+      RETURNING e.id, e.creator_id, e.ends_at
+    )
+    SELECT rc.id AS event_id, rc.ends_at, ep.user_id
+    FROM reclamados rc
+    JOIN public.event_participants ep ON ep.event_id = rc.id
+    WHERE ep.status = 'joined'
+      AND ep.user_id <> rc.creator_id
+      AND NOT ep.checked_in
+  LOOP
+    IF public.notify(r.user_id, 'event_started', NULL, r.event_id, NULL, NULL, '{}'::jsonb,
+                     'started:' || r.event_id, NULL, r.ends_at) IS NOT NULL THEN
+      v_n := v_n + 1;
+    END IF;
+  END LOOP;
+  RETURN v_n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_started_events() FROM PUBLIC, anon, authenticated;
+
+-- Rechazar una solicitud avisa (mismo cuerpo que 20260822000000).
+CREATE OR REPLACE FUNCTION public.respond_to_join_request(
+    _event_id uuid,
+    _user_id  uuid,
+    _approve  boolean
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid    uuid := auth.uid();
+  v_event  RECORD;
+  v_status text;
+  v_count  integer;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT id, creator_id, max_spots, ends_at INTO v_event
+  FROM public.events WHERE id = _event_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'EVENT_NOT_FOUND' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF v_event.creator_id <> v_uid THEN
+    RAISE EXCEPTION 'NOT_THE_ORGANIZER' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT status INTO v_status
+  FROM public.event_participants
+  WHERE event_id = _event_id AND user_id = _user_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'REQUEST_NOT_FOUND' USING ERRCODE = 'P0002';
+  END IF;
+
+  IF v_status <> 'pending' THEN
+    RAISE EXCEPTION 'REQUEST_ALREADY_HANDLED' USING ERRCODE = 'P0001';
+  END IF;
+
+  IF NOT _approve THEN
+    DELETE FROM public.event_participants
+    WHERE event_id = _event_id AND user_id = _user_id;
+    PERFORM public.notify(_user_id, 'join_rejected', v_uid, _event_id, NULL, NULL, '{}'::jsonb,
+      'join_rejected:' || _event_id, NULL, v_event.ends_at);
+    RETURN;
+  END IF;
+
+  PERFORM 1 FROM public.events WHERE id = _event_id FOR UPDATE;
+
+  SELECT COUNT(*) INTO v_count
+  FROM public.event_participants
+  WHERE event_id = _event_id AND status = 'joined';
+
+  IF v_count >= v_event.max_spots THEN
+    RAISE EXCEPTION 'EVENT_FULL' USING ERRCODE = 'P0001';
+  END IF;
+
+  UPDATE public.event_participants
+  SET    status        = 'joined',
+         approved_at   = now(),
+         approval_seen = false
+  WHERE  event_id = _event_id AND user_id = _user_id;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.respond_to_join_request(uuid, uuid, boolean) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.respond_to_join_request(uuid, uuid, boolean) TO authenticated;
+
+-- Invitaciones a grupo (mismo cuerpo que 20260919000000, con notify).
+CREATE OR REPLACE FUNCTION public.create_group_from_event(_event_id uuid, _name text DEFAULT NULL)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid   uuid := auth.uid();
+  v_ev    record;
+  v_group uuid;
+  v_name  text;
+  r       record;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'NOT_AUTHENTICATED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT e.id, e.title, e.creator_id, e.starts_at INTO v_ev
+  FROM public.events e WHERE e.id = _event_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'NOT_AN_ATTENDEE' USING ERRCODE = '42501';
+  END IF;
+  IF NOT (
+    v_ev.creator_id = v_uid
+    OR EXISTS (
+      SELECT 1 FROM public.event_participants ep
+      WHERE ep.event_id = _event_id AND ep.user_id = v_uid AND ep.status = 'joined'
+    )
+  ) THEN
+    RAISE EXCEPTION 'NOT_AN_ATTENDEE' USING ERRCODE = '42501';
+  END IF;
+
+  IF v_ev.starts_at > now() THEN
+    RAISE EXCEPTION 'EVENT_NOT_STARTED' USING ERRCODE = 'P0001';
+  END IF;
+
+  SELECT g.id INTO v_group
+  FROM public.groups g
+  WHERE g.source_event_id = _event_id AND g.created_by = v_uid
+  ORDER BY g.created_at
+  LIMIT 1;
+  IF v_group IS NOT NULL THEN
+    RETURN v_group;
+  END IF;
+
+  v_name := left(btrim(COALESCE(_name, '')), 60);
+  IF v_name = '' THEN
+    v_name := left(v_ev.title, 60);
+  END IF;
+  IF v_name LIKE '\_\_dm\_%' THEN
+    RAISE EXCEPTION 'INVALID_NAME' USING ERRCODE = 'P0001';
+  END IF;
+
+  INSERT INTO public.groups (name, created_by, source_event_id)
+  VALUES (v_name, v_uid, _event_id)
+  RETURNING id INTO v_group;
+
+  FOR r IN
+    SELECT DISTINCT g.uid
+    FROM (
+      SELECT v_ev.creator_id AS uid
+      UNION
+      SELECT ep.user_id FROM public.event_participants ep
+      WHERE ep.event_id = _event_id AND ep.status = 'joined'
+    ) g
+    WHERE g.uid <> v_uid
+      AND NOT public.is_blocked(v_uid, g.uid)
+    LIMIT 100
+  LOOP
+    INSERT INTO public.group_invites (group_id, inviter_id, invitee_id, source_event_id)
+    VALUES (v_group, v_uid, r.uid, _event_id)
+    ON CONFLICT (group_id, invitee_id) DO NOTHING;
+
+    PERFORM public.notify(r.uid, 'group_invite', v_uid, NULL, v_group, NULL, '{}'::jsonb,
+      'group_invite:' || v_group);
+  END LOOP;
+
+  RETURN v_group;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.create_group_from_event(uuid, text) FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.create_group_from_event(uuid, text) TO authenticated;
+
+-- Contacto que se une (sustituye a la version de 20260924000000).
+CREATE OR REPLACE FUNCTION public.notify_contact_joined(_owner uuid, _joined uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  PERFORM public.notify(_owner, 'contact_joined', _joined, NULL, NULL, NULL, '{}'::jsonb,
+    'contact_joined:' || _joined);
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_contact_joined(uuid, uuid) FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 12. Avisos nuevos por disparador
+-- ------------------------------------------------------------
+
+-- Alguien se une: aviso agrupado a quien organiza, a sus amigos (si la
+-- actividad es publica y relevante) y conversion de las recomendaciones.
+CREATE OR REPLACE FUNCTION public.on_participant_joined_notify()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_ev record;
+  r    record;
+BEGIN
+  SELECT e.id, e.creator_id, e.privacy, e.starts_at, e.ends_at, e.is_active INTO v_ev
+  FROM public.events e WHERE e.id = NEW.event_id;
+  IF NOT FOUND OR NEW.user_id = v_ev.creator_id THEN RETURN NEW; END IF;
+
+  UPDATE public.notifications SET converted_at = now()
+  WHERE user_id = NEW.user_id AND event_id = NEW.event_id AND converted_at IS NULL
+    AND type IN ('new_campus_event', 'friend_created_event', 'friend_joined_event', 'spots_low',
+                 'event_invite', 'event_repeat');
+
+  -- Solo quien entra directo. Si lo aprobo el organizador, ya lo sabe.
+  IF TG_OP = 'INSERT' THEN
+    PERFORM public.notify(v_ev.creator_id, 'participant_joined', NEW.user_id, NEW.event_id, NULL, NULL,
+      '{}'::jsonb, NULL, 'joins:' || NEW.event_id, v_ev.ends_at, interval '30 minutes');
+  END IF;
+
+  -- Amigos de quien se une, si la actividad es publica, futura y la pueden ver.
+  IF v_ev.is_active AND v_ev.privacy IN ('open', 'private') AND v_ev.starts_at > now() + interval '30 minutes' THEN
+    FOR r IN
+      SELECT CASE WHEN f.requester_id = NEW.user_id THEN f.addressee_id ELSE f.requester_id END AS uid
+      FROM public.friendships f
+      WHERE f.status = 'accepted' AND (f.requester_id = NEW.user_id OR f.addressee_id = NEW.user_id)
+      LIMIT 50
+    LOOP
+      CONTINUE WHEN r.uid = v_ev.creator_id;
+      CONTINUE WHEN NOT public.same_institution(r.uid, v_ev.creator_id);
+      CONTINUE WHEN public.is_blocked(r.uid, v_ev.creator_id);
+      CONTINUE WHEN EXISTS (SELECT 1 FROM public.event_participants ep WHERE ep.event_id = NEW.event_id AND ep.user_id = r.uid);
+      PERFORM public.notify(r.uid, 'friend_joined_event', NEW.user_id, NEW.event_id, NULL, NULL,
+        '{}'::jsonb, NULL, 'friendjoins:' || NEW.event_id, v_ev.starts_at, interval '60 minutes');
+    END LOOP;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_participant_joined_notify() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_participant_joined_notify ON public.event_participants;
+CREATE TRIGGER trg_participant_joined_notify
+  AFTER INSERT ON public.event_participants
+  FOR EACH ROW
+  WHEN (NEW.status = 'joined')
+  EXECUTE FUNCTION public.on_participant_joined_notify();
+
+DROP TRIGGER IF EXISTS trg_participant_approved_notify ON public.event_participants;
+CREATE TRIGGER trg_participant_approved_notify
+  AFTER UPDATE OF status ON public.event_participants
+  FOR EACH ROW
+  WHEN (OLD.status = 'pending' AND NEW.status = 'joined')
+  EXECUTE FUNCTION public.on_participant_joined_notify();
+
+-- Quedan pocos lugares: SOLO a quien ya recibio una recomendacion o
+-- invitacion de esta actividad y no se ha unido. Una vez por actividad.
+CREATE OR REPLACE FUNCTION public.on_spots_low_notify()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT DISTINCT n.user_id
+    FROM public.notifications n
+    WHERE n.event_id = NEW.id
+      AND n.type IN ('new_campus_event', 'friend_created_event', 'friend_joined_event', 'event_invite')
+      AND NOT EXISTS (SELECT 1 FROM public.event_participants ep WHERE ep.event_id = NEW.id AND ep.user_id = n.user_id)
+    LIMIT 200
+  LOOP
+    PERFORM public.notify(r.user_id, 'spots_low', NULL, NEW.id, NULL, NULL,
+      jsonb_build_object('left', NEW.max_spots - NEW.current_spots), 'spots_low:' || NEW.id, NULL, NEW.starts_at);
+  END LOOP;
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_spots_low_notify() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_spots_low_notify ON public.events;
+CREATE TRIGGER trg_spots_low_notify
+  AFTER UPDATE OF current_spots ON public.events
+  FOR EACH ROW
+  WHEN (NEW.is_active AND NEW.max_spots >= 6
+        AND NEW.current_spots < NEW.max_spots
+        AND NEW.current_spots >= NEW.max_spots - 2
+        AND OLD.current_spots < NEW.max_spots - 2)
+  EXECUTE FUNCTION public.on_spots_low_notify();
+
+-- Verificacion universitaria resuelta por el sistema o a mano (no cuando
+-- la propia persona confirma su codigo: eso ya lo ve en la pantalla).
+CREATE OR REPLACE FUNCTION public.on_affiliation_status_notify()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF auth.uid() IS NOT DISTINCT FROM NEW.user_id THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.status = 'verified' AND OLD.status <> 'verified' THEN
+    PERFORM public.notify(NEW.user_id, 'verification_approved', NULL, NULL, NULL, NULL, '{}'::jsonb,
+      'verified:' || COALESCE(NEW.verified_at::text, now()::text));
+  ELSIF (OLD.status IN ('pending_email', 'manual_review') AND NEW.status IN ('unverified', 'revoked', 'expired'))
+     OR (OLD.status = 'verified' AND NEW.status IN ('revoked', 'expired')) THEN
+    PERFORM public.notify(NEW.user_id, 'verification_rejected', NULL, NULL, NULL, NULL,
+      jsonb_build_object('status', NEW.status), 'verification_rejected:' || now()::date || ':' || NEW.status);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_affiliation_status_notify() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_affiliation_status_notify ON public.profile_affiliations;
+CREATE TRIGGER trg_affiliation_status_notify
+  AFTER UPDATE OF status ON public.profile_affiliations
+  FOR EACH ROW
+  WHEN (OLD.status IS DISTINCT FROM NEW.status)
+  EXECUTE FUNCTION public.on_affiliation_status_notify();
+
+-- Seguridad: cambio de correo o de contrasena. No se pueden desactivar.
+CREATE OR REPLACE FUNCTION public.on_auth_security_notify()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF OLD.email IS NOT NULL AND NEW.email IS DISTINCT FROM OLD.email THEN
+    PERFORM public.notify(NEW.id, 'security_alert', NULL, NULL, NULL, NULL,
+      jsonb_build_object('kind', 'email_changed'), 'security:email:' || (extract(epoch FROM now())::bigint / 60),
+      NULL, NULL, NULL, true);
+  END IF;
+  IF OLD.encrypted_password IS NOT NULL AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password THEN
+    PERFORM public.notify(NEW.id, 'security_alert', NULL, NULL, NULL, NULL,
+      jsonb_build_object('kind', 'password_changed'), 'security:password:' || (extract(epoch FROM now())::bigint / 60),
+      NULL, NULL, NULL, true);
+  END IF;
+  RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  -- Un aviso no puede impedir cambiar el correo o la contrasena.
+  RAISE WARNING 'on_auth_security_notify (%): %', SQLSTATE, SQLERRM;
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_auth_security_notify() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_auth_security_notify ON auth.users;
+CREATE TRIGGER trg_auth_security_notify
+  AFTER UPDATE OF email, encrypted_password ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.on_auth_security_notify();
+
+-- Alguien se unio con tu invitacion.
+CREATE OR REPLACE FUNCTION public.on_invite_accepted_notify()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.inviter_id IS NOT NULL AND NEW.invitee_id IS NOT NULL
+     AND public.same_institution(NEW.inviter_id, NEW.invitee_id) THEN
+    PERFORM public.notify(NEW.inviter_id, 'invite_accepted', NEW.invitee_id, NULL, NULL, NULL, '{}'::jsonb,
+      'invite_accepted:' || NEW.invitee_id);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.on_invite_accepted_notify() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_invite_accepted_notify ON public.invite_events;
+CREATE TRIGGER trg_invite_accepted_notify
+  AFTER INSERT ON public.invite_events
+  FOR EACH ROW
+  WHEN (NEW.kind = 'accepted')
+  EXECUTE FUNCTION public.on_invite_accepted_notify();
+
+
+-- ------------------------------------------------------------
+-- 13. Avisos programados (los lanza pg_cron, ver 20260925010000)
+-- ------------------------------------------------------------
+
+-- Recomendar actividades solo una vez por actividad. Las que ya existen se
+-- dan por recomendadas: la migracion no puede mandar un aviso por cada
+-- actividad vieja (misma leccion que 20260921000000).
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS recommended_at timestamptz;
+UPDATE public.events SET recommended_at = now() WHERE recommended_at IS NULL;
+
+-- Intereses del perfil que hacen relevante cada categoria.
+CREATE OR REPLACE FUNCTION public.category_interests(_category text)
+RETURNS text[]
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public
+AS $$
+  SELECT CASE _category
+    WHEN 'study'        THEN ARRAY['StudyGroups', 'Languages', 'Science', 'Debate', 'Reading', 'History', 'Coding', 'AI']
+    WHEN 'sports'       THEN ARRAY['Sports', 'Soccer', 'Basketball', 'Fitness', 'Running', 'Swimming', 'Tennis',
+                               'Volleyball', 'Yoga', 'Climbing', 'Cycling', 'MartialArts', 'Hiking', 'Skating']
+    WHEN 'social'       THEN ARRAY['Parties', 'BoardGames', 'Karaoke', 'Coffee', 'Food', 'Movies', 'Music', 'Dance',
+                               'Gaming', 'Series', 'Anime']
+    WHEN 'shopping'     THEN ARRAY['Food', 'Coffee', 'Travel', 'Design']
+    WHEN 'volunteering' THEN ARRAY['Volunteering', 'Sustainability', 'Pets']
+    ELSE ARRAY[]::text[]
+  END;
+$$;
+
+-- Actividades nuevas: a los amigos de quien la crea y a quien del campus le
+-- pega (intereses o haber ido a algo de la misma categoria). Mismo
+-- dedupe_key para las dos: nadie recibe dos avisos de la misma actividad.
+CREATE OR REPLACE FUNCTION public.notify_new_events()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  ev  record;
+  r   record;
+  v_n integer := 0;
+BEGIN
+  FOR ev IN
+    UPDATE public.events e
+    SET recommended_at = now()
+    WHERE e.recommended_at IS NULL
+      -- Un par de minutos de gracia por si la persona corrige algo al crearla.
+      AND e.created_at <= now() - interval '2 minutes'
+    RETURNING e.id, e.creator_id, e.privacy, e.category, e.starts_at, e.is_active, e.institution_id
+  LOOP
+    CONTINUE WHEN NOT ev.is_active OR ev.starts_at < now() + interval '1 hour';
+
+    FOR r IN
+      SELECT CASE WHEN f.requester_id = ev.creator_id THEN f.addressee_id ELSE f.requester_id END AS uid
+      FROM public.friendships f
+      WHERE f.status = 'accepted' AND (f.requester_id = ev.creator_id OR f.addressee_id = ev.creator_id)
+      LIMIT 200
+    LOOP
+      CONTINUE WHEN NOT public.same_institution(r.uid, ev.creator_id);
+      IF public.notify(r.uid, 'friend_created_event', ev.creator_id, ev.id, NULL, NULL, '{}'::jsonb,
+                       'event_new:' || ev.id, NULL, ev.starts_at) IS NOT NULL THEN
+        v_n := v_n + 1;
+      END IF;
+    END LOOP;
+
+    CONTINUE WHEN ev.privacy NOT IN ('open', 'private');
+
+    FOR r IN
+      SELECT p.id AS uid
+      FROM public.profiles p
+      WHERE p.campus_id = ev.institution_id
+        AND p.id <> ev.creator_id
+        AND p.onboarding_completed
+        AND (
+          p.interests && public.category_interests(ev.category)
+          OR EXISTS (
+            SELECT 1 FROM public.event_participants ep
+            JOIN public.events e2 ON e2.id = ep.event_id
+            WHERE ep.user_id = p.id AND ep.status = 'joined' AND e2.category = ev.category
+              AND e2.starts_at > now() - interval '90 days'
+          )
+        )
+      LIMIT 300
+    LOOP
+      IF public.notify(r.uid, 'new_campus_event', ev.creator_id, ev.id, NULL, NULL, '{}'::jsonb,
+                       'event_new:' || ev.id, NULL, ev.starts_at) IS NOT NULL THEN
+        v_n := v_n + 1;
+      END IF;
+    END LOOP;
+  END LOOP;
+  RETURN v_n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_new_events() FROM PUBLIC, anon, authenticated;
+
+-- Recordatorio antes de empezar, con los minutos que eligio cada persona.
+-- A quien organiza y a quien se unio antes de ese momento.
+CREATE OR REPLACE FUNCTION public.notify_upcoming_events()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r   record;
+  v_n integer := 0;
+BEGIN
+  FOR r IN
+    SELECT e.id, e.starts_at, x.uid, COALESCE(np.reminder_minutes, 60) AS mins
+    FROM public.events e
+    CROSS JOIN LATERAL (
+      SELECT e.creator_id AS uid, e.created_at AS since
+      UNION ALL
+      SELECT ep.user_id, COALESCE(ep.approved_at, ep.joined_at)
+      FROM public.event_participants ep
+      WHERE ep.event_id = e.id AND ep.status = 'joined'
+    ) x
+    LEFT JOIN public.notification_preferences np ON np.user_id = x.uid
+    WHERE e.is_active
+      AND e.starts_at > now() + interval '5 minutes'
+      AND e.starts_at <= now() + interval '1 day 1 minute'
+      AND e.starts_at <= now() + make_interval(mins => COALESCE(np.reminder_minutes, 60))
+      AND x.since < e.starts_at - make_interval(mins => COALESCE(np.reminder_minutes, 60))
+  LOOP
+    IF public.notify(r.uid, 'event_reminder', NULL, r.id, NULL, NULL, jsonb_build_object('minutes', r.mins),
+                     'reminder:' || r.id, NULL, r.starts_at) IS NOT NULL THEN
+      v_n := v_n + 1;
+    END IF;
+  END LOOP;
+  RETURN v_n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_upcoming_events() FROM PUBLIC, anon, authenticated;
+
+-- Resumen de planes a las 10:00 locales, como mucho cada 3 dias y solo si
+-- hay al menos 3 planes proximos que la persona podria ver y no tiene.
+CREATE OR REPLACE FUNCTION public.notify_daily_digests()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r   record;
+  v_n integer := 0;
+BEGIN
+  FOR r IN
+    SELECT p.id AS uid, p.campus_id, np.timezone,
+           (now() AT TIME ZONE np.timezone)::date AS hoy
+    FROM public.profiles p
+    JOIN public.notification_preferences np ON np.user_id = p.id AND np.digests
+    WHERE p.onboarding_completed AND p.campus_id IS NOT NULL
+      AND extract(hour FROM now() AT TIME ZONE np.timezone) = 10
+      AND NOT EXISTS (
+        SELECT 1 FROM public.notifications n
+        WHERE n.user_id = p.id AND n.type = 'digest' AND n.created_at > now() - interval '3 days'
+      )
+    LIMIT 2000
+  LOOP
+    DECLARE
+      v_count integer;
+    BEGIN
+      SELECT count(*) INTO v_count
+      FROM public.events e
+      WHERE e.institution_id = r.campus_id
+        AND e.is_active AND e.privacy IN ('open', 'private')
+        AND e.starts_at > now() + interval '1 hour' AND e.starts_at < now() + interval '3 days'
+        AND e.creator_id <> r.uid
+        AND NOT public.is_blocked(r.uid, e.creator_id)
+        AND NOT EXISTS (SELECT 1 FROM public.event_participants ep WHERE ep.event_id = e.id AND ep.user_id = r.uid);
+      IF v_count >= 3 THEN
+        IF public.notify(r.uid, 'digest', NULL, NULL, NULL, NULL, jsonb_build_object('count', v_count),
+                         'digest:' || r.hoy) IS NOT NULL THEN
+          v_n := v_n + 1;
+        END IF;
+      END IF;
+    END;
+  END LOOP;
+  RETURN v_n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_daily_digests() FROM PUBLIC, anon, authenticated;
+
+-- Una persona que quiza conozcas, a las 18:00 locales y como mucho una por
+-- semana: primero de tus contactos, si no alguien con 2+ amigos en comun.
+CREATE OR REPLACE FUNCTION public.notify_people_suggestions()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r      record;
+  v_cand uuid;
+  v_n    integer := 0;
+BEGIN
+  FOR r IN
+    SELECT p.id AS uid
+    FROM public.profiles p
+    JOIN public.notification_preferences np ON np.user_id = p.id AND np.people_suggestions
+    WHERE p.onboarding_completed
+      AND extract(hour FROM now() AT TIME ZONE np.timezone) = 18
+      AND NOT EXISTS (
+        SELECT 1 FROM public.notifications n
+        WHERE n.user_id = p.id AND n.type = 'person_suggestion' AND n.created_at > now() - interval '7 days'
+      )
+    LIMIT 2000
+  LOOP
+    v_cand := NULL;
+
+    SELECT cm.matched_user_id INTO v_cand
+    FROM public.contact_matches cm
+    WHERE cm.owner_id = r.uid
+      AND public.same_institution(r.uid, cm.matched_user_id)
+      AND NOT public.is_blocked(r.uid, cm.matched_user_id)
+      AND NOT EXISTS (
+        SELECT 1 FROM public.friendships f
+        WHERE (f.requester_id = r.uid AND f.addressee_id = cm.matched_user_id)
+           OR (f.requester_id = cm.matched_user_id AND f.addressee_id = r.uid))
+      AND NOT EXISTS (
+        SELECT 1 FROM public.notifications n
+        WHERE n.user_id = r.uid AND n.dedupe_key = 'suggestion:' || cm.matched_user_id)
+    ORDER BY cm.created_at DESC
+    LIMIT 1;
+
+    IF v_cand IS NULL THEN
+      SELECT c.pid INTO v_cand
+      FROM (
+        SELECT CASE WHEN g.requester_id = m.fid THEN g.addressee_id ELSE g.requester_id END AS pid, count(*) AS n
+        FROM (
+          SELECT CASE WHEN f.requester_id = r.uid THEN f.addressee_id ELSE f.requester_id END AS fid
+          FROM public.friendships f
+          WHERE f.status = 'accepted' AND (f.requester_id = r.uid OR f.addressee_id = r.uid)
+        ) m
+        JOIN public.friendships g ON g.status = 'accepted' AND (g.requester_id = m.fid OR g.addressee_id = m.fid)
+        GROUP BY 1
+      ) c
+      WHERE c.pid <> r.uid AND c.n >= 2
+        AND public.same_institution(r.uid, c.pid)
+        AND NOT public.is_blocked(r.uid, c.pid)
+        AND NOT EXISTS (
+          SELECT 1 FROM public.friendships f
+          WHERE (f.requester_id = r.uid AND f.addressee_id = c.pid)
+             OR (f.requester_id = c.pid AND f.addressee_id = r.uid))
+        AND NOT EXISTS (
+          SELECT 1 FROM public.notifications n
+          WHERE n.user_id = r.uid AND n.dedupe_key = 'suggestion:' || c.pid)
+      ORDER BY c.n DESC
+      LIMIT 1;
+    END IF;
+
+    IF v_cand IS NOT NULL AND public.notify(r.uid, 'person_suggestion', v_cand, NULL, NULL, NULL, '{}'::jsonb,
+                                            'suggestion:' || v_cand) IS NOT NULL THEN
+      v_n := v_n + 1;
+    END IF;
+  END LOOP;
+  RETURN v_n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_people_suggestions() FROM PUBLIC, anon, authenticated;
+
+-- Perfil y verificacion, a las 12:00 locales, sin bloquear nada de la app,
+-- y como mucho un recordatorio de cuenta cada 3 dias.
+CREATE OR REPLACE FUNCTION public.notify_account_nudges()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r   record;
+  v_n integer := 0;
+BEGIN
+  FOR r IN
+    SELECT p.id AS uid, p.avatar_url, p.interests, p.created_at, a.status AS verif, a.updated_at AS verif_at
+    FROM public.profiles p
+    JOIN public.notification_preferences np ON np.user_id = p.id AND np.account_tips
+    LEFT JOIN public.profile_affiliations a ON a.user_id = p.id
+    WHERE p.onboarding_completed
+      AND extract(hour FROM now() AT TIME ZONE np.timezone) = 12
+      AND NOT EXISTS (
+        SELECT 1 FROM public.notifications n
+        WHERE n.user_id = p.id AND n.category = 'account' AND n.created_at > now() - interval '3 days'
+      )
+    LIMIT 2000
+  LOOP
+    IF r.verif = 'pending_email' AND r.verif_at < now() - interval '1 day' THEN
+      IF public.notify(r.uid, 'verification_pending', NULL, NULL, NULL, NULL, '{}'::jsonb,
+                       'verification_pending:' || r.verif_at::date) IS NOT NULL THEN
+        v_n := v_n + 1; CONTINUE;
+      END IF;
+    END IF;
+    IF r.created_at < now() - interval '2 days' AND (r.avatar_url IS NULL OR COALESCE(cardinality(r.interests), 0) = 0) THEN
+      IF public.notify(r.uid, 'profile_incomplete', NULL, NULL, NULL, NULL, '{}'::jsonb,
+                       'profile_incomplete') IS NOT NULL THEN
+        v_n := v_n + 1; CONTINUE;
+      END IF;
+    END IF;
+    IF COALESCE(r.verif, 'unverified') = 'unverified' AND r.created_at < now() - interval '7 days' THEN
+      IF public.notify(r.uid, 'verification_reminder', NULL, NULL, NULL, NULL, '{}'::jsonb,
+                       'verify_reminder') IS NOT NULL THEN
+        v_n := v_n + 1;
+      END IF;
+    END IF;
+  END LOOP;
+  RETURN v_n;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_account_nudges() FROM PUBLIC, anon, authenticated;
+
+-- Retencion: la bandeja no crece sin limite y las entregas son metrica.
+CREATE OR REPLACE FUNCTION public.purge_old_notifications()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v integer;
+BEGIN
+  DELETE FROM public.notification_deliveries WHERE created_at < now() - interval '30 days';
+  DELETE FROM public.notifications
+  WHERE (read_at IS NOT NULL AND updated_at < now() - interval '60 days')
+     OR updated_at < now() - interval '120 days';
+  GET DIAGNOSTICS v = ROW_COUNT;
+  PERFORM public.purge_expired_contact_hashes();
+  RETURN v;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.purge_old_notifications() FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 14. Metricas (solo para el panel: sin GRANT a la app)
+--
+-- Recuentos por dia y tipo. Ni texto ni destinatarios.
+-- ------------------------------------------------------------
+CREATE OR REPLACE VIEW public.notification_metrics_daily AS
+SELECT
+  date_trunc('day', n.created_at)::date AS day,
+  n.type,
+  count(*)                                                        AS created,
+  count(*) FILTER (WHERE EXISTS (
+    SELECT 1 FROM public.notification_deliveries d WHERE d.notification_id = n.id AND d.status = 'sent')) AS pushed,
+  count(n.read_at)                                                AS read,
+  count(n.opened_at)                                              AS opened,
+  count(n.converted_at)                                           AS converted
+FROM public.notifications n
+GROUP BY 1, 2;
+
+REVOKE ALL ON public.notification_metrics_daily FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 15. notification_counts gana notifications_unread
+-- ------------------------------------------------------------
+DROP FUNCTION IF EXISTS public.notification_counts();
+
+CREATE FUNCTION public.notification_counts()
+RETURNS TABLE (
+  join_requests        bigint,
+  friend_requests      bigint,
+  unread_messages      bigint,
+  approvals            bigint,
+  group_invites        bigint,
+  event_chat_unread    bigint,
+  notifications_unread bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT
+    (SELECT count(*)
+       FROM public.event_participants p
+       JOIN public.events e ON e.id = p.event_id
+      WHERE e.creator_id = auth.uid()
+        AND e.is_active
+        AND p.status = 'pending'),
+
+    (SELECT count(*)
+       FROM public.friendships f
+      WHERE f.addressee_id = auth.uid()
+        AND f.status = 'pending'
+        AND NOT public.is_blocked(auth.uid(), f.requester_id)),
+
+    (SELECT count(*)
+       FROM public.group_members gm
+       JOIN public.messages m ON m.group_id = gm.group_id
+      WHERE gm.user_id   = auth.uid()
+        AND m.sender_id <> auth.uid()
+        AND m.created_at > gm.last_read_at
+        AND m.deleted_at IS NULL
+        AND NOT public.is_blocked(auth.uid(), m.sender_id)),
+
+    (SELECT count(*)
+       FROM public.event_participants p
+       JOIN public.events e ON e.id = p.event_id
+      WHERE p.user_id = auth.uid()
+        AND p.approved_at IS NOT NULL
+        AND p.approval_seen = false
+        AND e.is_active),
+
+    (SELECT count(*)
+       FROM public.group_invites gi
+      WHERE gi.invitee_id = auth.uid()
+        AND gi.status = 'pending'
+        AND NOT public.is_blocked(auth.uid(), gi.inviter_id)),
+
+    (SELECT count(*)
+       FROM public.event_chat_state s
+       JOIN public.events e   ON e.id = s.event_id AND e.is_active
+       JOIN public.messages m ON m.event_id = s.event_id
+      WHERE s.user_id = auth.uid()
+        AND m.created_at > s.last_read_at
+        AND m.sender_id <> s.user_id
+        AND m.deleted_at IS NULL
+        AND public.event_chat_member(s.event_id, s.user_id)
+        AND NOT public.is_blocked(s.user_id, m.sender_id)),
+
+    (SELECT count(*)
+       FROM public.notifications n
+      WHERE n.user_id = auth.uid()
+        AND n.read_at IS NULL
+        AND (n.actor_id IS NULL OR NOT public.is_blocked(auth.uid(), n.actor_id)));
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.notification_counts() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.notification_counts() TO authenticated;
+
+
+-- ------------------------------------------------------------
+-- 16. Tiempo real de la bandeja (la RLS decide que llega a quien)
+-- ------------------------------------------------------------
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'notifications'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.notifications;
+  END IF;
+END $$;
+
+COMMIT;
+
+-- >>> 20260925010000_programar-notificaciones.sql <<<
+-- ============================================================
+-- Programar los trabajos de notificaciones (pg_cron)
+--
+-- Va en su propio archivo por lo mismo que 20260825010000 y
+-- 20260921010000: si pg_cron no estuviera disponible, que falle esto y no
+-- se lleve por delante la tuberia de 20260925000000.
+--
+--   despachar-notificaciones   cada minuto   solo despierta a notify-dispatch
+--                                            si hay algo pendiente o atascado
+--   recordar-eventos           cada 5 min    recordatorios antes de empezar
+--   recomendar-eventos         cada 10 min   actividades nuevas (amigos, campus)
+--   resumen-diario             cada hora     10:00 locales de cada persona
+--   sugerir-personas           cada hora     18:00 locales, 1 por semana
+--   avisos-de-cuenta           cada hora     12:00 locales, 1 cada 3 dias
+--   limpiar-notificaciones     04:37         retencion y huellas caducadas
+--
+-- "avisar-inicio-evento" (20260921010000) se queda como estaba: la funcion
+-- que llama ahora encola por notify() en vez de mandar directo.
+--
+-- ASCII puro. Idempotente: vuelve a programar con el mismo nombre.
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+DO $$
+DECLARE
+  j text;
+BEGIN
+  FOREACH j IN ARRAY ARRAY['despachar-notificaciones', 'recordar-eventos', 'recomendar-eventos',
+                           'resumen-diario', 'sugerir-personas', 'avisos-de-cuenta', 'limpiar-notificaciones'] LOOP
+    BEGIN
+      PERFORM cron.unschedule(j);
+    EXCEPTION WHEN OTHERS THEN
+      NULL;
+    END;
+  END LOOP;
+END $$;
+
+SELECT cron.schedule('despachar-notificaciones', '* * * * *',   $$SELECT public.kick_notification_dispatch_if_due()$$);
+SELECT cron.schedule('recordar-eventos',         '*/5 * * * *', $$SELECT public.notify_upcoming_events()$$);
+SELECT cron.schedule('recomendar-eventos',       '*/10 * * * *', $$SELECT public.notify_new_events()$$);
+SELECT cron.schedule('resumen-diario',           '3 * * * *',   $$SELECT public.notify_daily_digests()$$);
+SELECT cron.schedule('sugerir-personas',         '13 * * * *',  $$SELECT public.notify_people_suggestions()$$);
+SELECT cron.schedule('avisos-de-cuenta',         '23 * * * *',  $$SELECT public.notify_account_nudges()$$);
+SELECT cron.schedule('limpiar-notificaciones',   '37 4 * * *',  $$SELECT public.purge_old_notifications()$$);

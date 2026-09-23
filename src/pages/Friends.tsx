@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { Search, UserPlus, Users, MessageCircle, Check, X as XIcon, Plus, Trophy, Medal } from 'lucide-react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { UserPlus, Users, MessageCircle, Check, X as XIcon, Plus, Trophy, Medal } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useStaggerReveal } from '@/hooks/useStaggerReveal';
 import {
   Dialog,
   DialogContent,
@@ -25,7 +26,9 @@ import { UserProfileSheet } from '@/components/profile/UserProfileSheet';
 import type { Database } from '@/integrations/supabase/types';
 import { pageTitle } from '@/lib/brand';
 import { formatChatTime } from '@/lib/chat';
+import { FindPeople } from '@/components/friends/FindPeople';
 import { GroupInvites } from '@/components/chat/GroupInvites';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
 
 type FriendData = Pick<
   Database['public']['Views']['public_profiles']['Row'],
@@ -78,10 +81,8 @@ export default function Friends() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab);
   const unreadMessages = useNotificationStore((n) => n.unreadMessages);
   const groupInvites = useNotificationStore((n) => n.groupInvites);
-  const [searchQuery, setSearchQuery] = useState('');
   const [friends, setFriends] = useState<Friend[]>([]);
   const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
-  const [searchResults, setSearchResults] = useState<FriendData[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Groups state
@@ -97,6 +98,15 @@ export default function Friends() {
   const [leaderboard, setLeaderboard] = useState<LeaderEntry[]>([]);
   /** Persona cuya ficha se está mirando. */
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
+  // Desde un aviso ("X aceptó tu solicitud", "quizá conozcas a…"): abrir su ficha.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const person = searchParams.get('person');
+    if (person && /^[0-9a-f-]{36}$/i.test(person)) {
+      setViewingUserId(person);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
   const [leaderLoading, setLeaderLoading] = useState(false);
   const [leaderOffset, setLeaderOffset] = useState(0);
   const [leaderHasMore, setLeaderHasMore] = useState(true);
@@ -382,41 +392,6 @@ export default function Friends() {
     toast({ title: t('friends.requestDeclined') });
   };
 
-  // Busca según se escribe, sin esperar a que se pulse nada.
-  //
-  // El número de secuencia es porque el debounce no basta solo: dos consultas
-  // pueden quedar en vuelo a la vez si la red va lenta, y sin esto la más
-  // vieja podía responder la última y pisar los resultados de lo que se
-  // acababa de escribir.
-  const searchSeqRef = useRef(0);
-  useEffect(() => {
-    if (!user) return;
-    const query = searchQuery.trim();
-    if (!query) {
-      setSearchResults([]);
-      return;
-    }
-    const seq = ++searchSeqRef.current;
-    const timer = setTimeout(async () => {
-      const safeQuery = query.replace(/[%_\\]/g, '\\$&');
-      const { data, error } = await supabase
-        .from('public_profiles')
-        .select('id, name, avatar_url, major')
-        .ilike('name', `%${safeQuery}%`)
-        .neq('id', user.id)
-        .limit(10);
-      if (seq !== searchSeqRef.current) return;
-      // El más engañoso de todos: una búsqueda fallida se veía igual que una
-      // sin resultados, o sea "esa persona no está en Always Connected".
-      if (error) {
-        toast({ title: i18n.t('errors.searchFailed'), variant: 'destructive' });
-        return;
-      }
-      if (data) setSearchResults(data);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery, user, toast]);
-
   const sendFriendRequest = async (friendId: string | null) => {
     if (!user || !friendId) return;
     const { error } = await supabase.from('friendships').insert({
@@ -428,7 +403,7 @@ export default function Friends() {
       if (error.code === '23505') {
         toast({ title: t('friends.alreadySent') });
       } else {
-        toast({ title: t('common.error'), description: error.message, variant: 'destructive' });
+        toast({ title: t('common.error'), description: rpcMessage(error.message, t), variant: 'destructive' });
       }
     } else {
       toast({ title: t('friends.requestSent') });
@@ -479,8 +454,13 @@ export default function Friends() {
     );
   };
 
+  // Entrada en cascada de las filas de las tres pestañas. El scope es la
+  // página entera y solo se mueve lo marcado con data-reveal, así no hace
+  // falta envolver cada pestaña en un contenedor extra.
+  const listScope = useStaggerReveal<HTMLDivElement>([activeTab, loading]);
+
   return (
-    <div className="min-h-screen pb-nav px-4 pt-safe">
+    <div ref={listScope} className="min-h-screen pb-nav px-4 pt-safe">
       <Helmet>
         <title>{pageTitle(t('friends.title'))}</title>
         <meta name="description" content={t('friends.metaDesc')} />
@@ -489,13 +469,28 @@ export default function Friends() {
         <meta property="og:description" content={t('friends.metaDesc')} />
         <meta property="og:url" content="/friends" />
       </Helmet>
-      <h1 className="text-2xl font-extrabold text-foreground mb-4">{t('friends.title')}</h1>
+      <div className="flex items-center justify-between gap-2 mb-4">
+        <h1 className="text-2xl font-extrabold text-foreground">{t('friends.title')}</h1>
+        {/* Contactos e invitaciones: nunca se pide el permiso sin pasar antes
+            por la pantalla que explica para qué. */}
+        <span className="flex items-center gap-1">
+        <NotificationBell />
+        <button
+          onClick={() => navigate('/friends/find')}
+          className="inline-flex items-center gap-1.5 min-h-[44px] px-3 rounded-full bg-primary/10 text-primary text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <UserPlus className="w-4 h-4" aria-hidden="true" />
+          {t('findFriends.entry')}
+        </button>
+        </span>
+      </div>
 
       {/* Tabs */}
       <div className="flex gap-2 mb-5">
         {(['friends', 'groups', 'leaderboard'] as const).map((tab) => (
           <button
             key={tab}
+            aria-pressed={activeTab === tab}
             onClick={() => setActiveTab(tab)}
             className={cn(
               'relative inline-flex items-center justify-center min-h-[44px] px-5 rounded-full text-sm font-semibold transition-all',
@@ -516,58 +511,11 @@ export default function Friends() {
 
       {/* Friends tab */}
       {activeTab === 'friends' && (
+        <FindPeople
+          onFriendsChanged={() => { setFriendsPage(0); loadFriends(0); }}
+          onMessage={handleMessageFriend}
+        >
         <div className="space-y-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder={t('friends.searchPh')}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-11 rounded-xl"
-            />
-          </div>
-
-          {searchResults.length > 0 && (
-            <div className="space-y-2">
-              <h2 className="text-sm font-semibold text-muted-foreground">{t('friends.results')}</h2>
-              {searchResults.map((s) => (
-                <div key={s.id ?? ''} className="flex items-center justify-between bg-card rounded-xl p-3 shadow-soft">
-                  <button
-                    onClick={() => setViewingUserId(s.id ?? null)}
-                    aria-label={t('friends.viewProfile', { name: s.name ?? '' })}
-                    className="flex items-center gap-3 flex-1 min-w-0 text-left"
-                  >
-                    <UserAvatar
-                      url={s.avatar_url}
-                      name={s.name}
-                      className="w-10 h-10 bg-muted"
-                      textClassName="text-sm text-muted-foreground"
-                    />
-                    <div className="min-w-0">
-                      <p className="font-semibold text-sm text-foreground truncate">{s.name}</p>
-                      <p className="text-xs text-muted-foreground truncate">{s.major}</p>
-                    </div>
-                  </button>
-                  <div className="flex items-center">
-                    <button
-                      onClick={() => sendFriendRequest(s.id ?? '')}
-                      aria-label={`${t('friends.tabFriends')}: ${s.name}`}
-                      className="w-11 h-11 shrink-0 inline-flex items-center justify-center -m-1 text-primary"
-                    >
-                      <UserPlus className="w-5 h-5" />
-                    </button>
-                    <ModerationMenu
-                      target={{ kind: 'user', id: s.id ?? '' }}
-                      label={s.name}
-                      blockUserId={s.id}
-                      onBlocked={() => setSearchResults((prev) => prev.filter((r) => r.id !== s.id))}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
           <GroupInvites />
 
           {pendingRequests.length > 0 && (
@@ -639,7 +587,7 @@ export default function Friends() {
             ) : null}
             {!loading &&
               friends.map((f) => (
-                <div key={f.id ?? ''} className="flex items-center justify-between bg-card rounded-xl p-3 shadow-soft">
+                <div key={f.id ?? ''} data-reveal className="flex items-center justify-between bg-card rounded-xl p-3 shadow-soft">
                   <button
                     onClick={() => setViewingUserId(f.id ?? null)}
                     aria-label={t('friends.viewProfile', { name: f.name ?? '' })}
@@ -698,6 +646,7 @@ export default function Friends() {
             )}
           </div>
         </div>
+        </FindPeople>
       )}
 
       {/* Groups tab */}
@@ -729,6 +678,7 @@ export default function Friends() {
               groups.map((g) => (
                 <button
                   key={g.id}
+                  data-reveal
                   onClick={() => navigate(`/groups/${g.id}`, { state: { from: 'groups' } })}
                   className={cn('w-full flex items-center gap-3 bg-card p-3 shadow-soft text-left', TAPPABLE, 'rounded-xl')}
                 >
@@ -785,6 +735,7 @@ export default function Friends() {
             leaderboard.map((entry, i) => (
               <button
                 key={entry.id ?? i}
+                data-reveal
                 onClick={() => setViewingUserId(entry.id)}
                 disabled={!entry.id}
                 aria-label={t('friends.viewProfile', { name: entry.name ?? '' })}

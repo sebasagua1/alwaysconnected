@@ -30,6 +30,11 @@ export default defineConfig({
           ...comun,
           name: "unit",
           environment: "jsdom",
+          // Corren a la vez que las de SQL, que se comen la CPU mientras
+          // arranca cada PGlite. Con 5 s por prueba, las de pantalla fallaban
+          // por tiempo en la suite completa y pasaban solas. Un fallo de
+          // verdad sigue fallando; solo tarda mas en rendirse.
+          testTimeout: 15_000,
           include: ["src/**/*.{test,spec}.{ts,tsx}"],
           exclude: [...defaultExclude, SQL],
         },

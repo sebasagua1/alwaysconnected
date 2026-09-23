@@ -7,6 +7,7 @@ import { CATEGORY_ICONS } from '@/lib/categoryIcons';
 import { cn } from '@/lib/utils';
 import type { MapEvent } from '@/stores/eventStore';
 import { filterEvents, dayGroupKey, startsSoon, fromDateKey, type EventFilter } from '@/lib/eventFilter';
+import { useStaggerReveal } from '@/hooks/useStaggerReveal';
 
 interface Props {
   events: MapEvent[];
@@ -25,6 +26,11 @@ export function EventListView({ events, filter, now = new Date(), onSelect, onCr
   // Mismo criterio que los marcadores del mapa, y a propósito el mismo código:
   // por duplicado, mapa y lista acababan enseñando cosas distintas.
   const visible = filterEvents(events, filter, now);
+
+  // Antes del return temprano de la lista vacía que hay más abajo: un hook
+  // declarado después de él no se ejecutaría siempre. Depende del número de
+  // eventos visibles para rehacer la cascada al cambiar de filtro.
+  const listScope = useStaggerReveal<HTMLDivElement>([visible.length]);
 
   // Una cabecera por día ("Hoy", "Mañana", "jue 17 sep"): con la lista de
   // aquí a fin de mes seguida, encontrar qué hay el jueves era contar tarjetas.
@@ -84,7 +90,7 @@ export function EventListView({ events, filter, now = new Date(), onSelect, onCr
   }
 
   return (
-    <div className="pb-6">
+    <div ref={listScope} className="pb-6">
       {groups.map((group) => (
         <section key={group.key} aria-labelledby={`day-${group.key}`} className="mb-5">
           <h2 id={`day-${group.key}`} className="text-sm font-bold text-foreground mb-2 px-1">
@@ -100,6 +106,7 @@ export function EventListView({ events, filter, now = new Date(), onSelect, onCr
               return (
                 <button
                   key={event.id}
+                  data-reveal
                   onClick={() => onSelect(event)}
                   className="w-full bg-card rounded-2xl shadow-soft overflow-hidden text-left active:scale-[0.98] transition-transform"
                 >

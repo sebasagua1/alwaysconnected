@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { CalendarDays, ChevronRight, Clock, Users } from 'lucide-react';
+import { CalendarDays, ChevronRight, Clock, MessagesSquare, Users } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
 import { useToast } from '@/hooks/use-toast';
@@ -12,9 +12,11 @@ import { EventBottomSheet } from '@/components/map/EventBottomSheet';
 import type { MapEvent } from '@/stores/eventStore';
 import { useNotificationStore } from '@/stores/notificationStore';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useStaggerReveal } from '@/hooks/useStaggerReveal';
 import { format, isPast, formatDistanceToNow } from 'date-fns';
 import { es as esLocale, enUS } from 'date-fns/locale';
 import { pageTitle } from '@/lib/brand';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
 
 // Extiende MapEvent porque la tarjeta abre el mismo EventBottomSheet que el
 // mapa, y ese componente necesita el evento completo (creator_id, privacy...),
@@ -36,6 +38,7 @@ export default function MyEvents() {
   const [visibleCount, setVisibleCount] = useState(10);
   const [selected, setSelected] = useState<EventWithParticipation | null>(null);
   const [pendingByEvent, setPendingByEvent] = useState<Record<string, number>>({});
+  const [chatUnreadByEvent, setChatUnreadByEvent] = useState<Record<string, number>>({});
   const PAGE_SIZE = 10;
 
   const fetchMyEvents = useCallback(async () => {
@@ -116,6 +119,13 @@ export default function MyEvents() {
           Object.fromEntries((pending ?? []).map((r) => [r.event_id, Number(r.pending)]))
         );
 
+        // Mensajes sin leer del chat de cada actividad. Si la base todavía
+        // no tiene el chat, la llamada falla y la tarjeta queda como antes.
+        const { data: chatUnread } = await supabase.rpc('event_chat_unread');
+        setChatUnreadByEvent(
+          Object.fromEntries((chatUnread ?? []).map((r) => [r.event_id, Number(r.unread)]))
+        );
+
         // Se marcan vistos aquí, ya con la lista pintada: el aviso se enseña
         // esta vez y no vuelve a salir. Después hay que pedir el recuento a
         // mano, porque este UPDATE no dispara realtime para el globo.
@@ -149,6 +159,11 @@ export default function MyEvents() {
     .filter((e) => isPast(new Date(e.ends_at)) && Date.now() - new Date(e.ends_at).getTime() < 48 * 3600 * 1000)
     .sort((a, b) => new Date(b.ends_at).getTime() - new Date(a.ends_at).getTime());
 
+  // Entrada en cascada de las tarjetas. Se rehace al cambiar de pestaña y
+  // cuando termina la carga; `visibleCount` entra en la lista para que las
+  // tarjetas que trae "ver más" también se revelen en vez de aparecer secas.
+  const listScope = useStaggerReveal<HTMLDivElement>([activeTab, loading, visibleCount]);
+
   return (
     <div className="min-h-screen pb-nav px-4 pt-safe">
       <Helmet>
@@ -159,13 +174,17 @@ export default function MyEvents() {
         <meta property="og:description" content={t('myEvents.metaDesc')} />
         <meta property="og:url" content="/events" />
       </Helmet>
-      <h1 className="text-2xl font-extrabold text-foreground mb-4">{t('myEvents.title')}</h1>
+      <div className="flex items-center justify-between gap-2 mb-4">
+        <h1 className="text-2xl font-extrabold text-foreground">{t('myEvents.title')}</h1>
+        <NotificationBell />
+      </div>
 
       {/* Tabs */}
       <div className="flex gap-2 mb-5">
         {(['upcoming', 'past'] as const).map(tab => (
           <button
             key={tab}
+            aria-pressed={activeTab === tab}
             onClick={() => { setActiveTab(tab); setVisibleCount(PAGE_SIZE); }}
             className={cn(
               'inline-flex items-center justify-center min-h-[44px] px-5 rounded-full text-sm font-semibold transition-all',
@@ -178,7 +197,7 @@ export default function MyEvents() {
       </div>
 
       {/* Event cards */}
-      <div className="space-y-3">
+      <div ref={listScope} className="space-y-3">
         {loading ? (
           [1, 2, 3].map(i => (
             <div key={i} className="bg-card rounded-2xl p-4 shadow-soft space-y-2">
@@ -196,6 +215,7 @@ export default function MyEvents() {
         {!loading && activeTab === 'upcoming' && justEnded.map(event => (
           <button
             key={`ended-${event.id}`}
+            data-reveal
             onClick={() => setSelected(event)}
             className="w-full flex items-center gap-3 text-left rounded-2xl p-4 bg-primary/10 border border-primary/30 active:scale-[0.98] transition-transform"
           >
@@ -214,6 +234,7 @@ export default function MyEvents() {
           return (
             <button
               key={event.id}
+              data-reveal
               onClick={() => setSelected(event)}
               className="w-full text-left bg-card rounded-2xl p-4 shadow-soft active:scale-[0.98] transition-transform"
             >
@@ -257,6 +278,12 @@ export default function MyEvents() {
                   {pendingByEvent[event.id] > 0 && (
                     <span className="px-2 py-0.5 rounded-full bg-destructive text-destructive-foreground text-xs font-bold">
                       {t('myEvents.requests', { count: pendingByEvent[event.id] })}
+                    </span>
+                  )}
+                  {chatUnreadByEvent[event.id] > 0 && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-bold">
+                      <MessagesSquare className="w-3 h-3" aria-hidden="true" />
+                      {t('eventChat.unreadChip', { count: chatUnreadByEvent[event.id] })}
                     </span>
                   )}
                   {event.justApproved && (

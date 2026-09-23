@@ -75,13 +75,19 @@ describe('routeFromPushData', () => {
   it('lleva cada tipo de notificación a su pantalla', () => {
     expect(routeFromPushData({ type: 'message', group_id: UUID })).toBe(`/groups/${UUID}`);
     expect(routeFromPushData({ type: 'friend_request', requester_id: UUID })).toBe('/friends');
-    expect(routeFromPushData({ type: 'join_request', event_id: UUID })).toBe('/events');
-    expect(routeFromPushData({ type: 'approval', event_id: UUID })).toBe('/events');
+    // Desde 20260925 van a la ficha exacta del evento, no a la lista.
+    expect(routeFromPushData({ type: 'join_request', event_id: UUID })).toBe(`/event/${UUID}`);
+    expect(routeFromPushData({ type: 'approval', event_id: UUID })).toBe(`/event/${UUID}`);
     expect(routeFromPushData({ type: 'group_invite', group_id: UUID })).toBe('/friends');
-    expect(routeFromPushData({ type: 'event_repeat', event_id: UUID })).toBe('/');
-    // El aviso de que el evento empieza lleva a "Mis eventos", que es desde
-    // donde se abre la hoja con el botón de registrar asistencia.
-    expect(routeFromPushData({ type: 'event_started', event_id: UUID })).toBe('/events');
+    expect(routeFromPushData({ type: 'event_repeat', event_id: UUID })).toBe(`/event/${UUID}`);
+    // El aviso de que el evento empieza abre su ficha, que es donde está el
+    // botón de registrar asistencia. Sin id, a "Mis eventos" como antes.
+    expect(routeFromPushData({ type: 'event_started', event_id: UUID })).toBe(`/event/${UUID}`);
+    expect(routeFromPushData({ type: 'event_started' })).toBe('/events');
+    // Cambio: a la ficha ya actualizada. Cancelado: a Mis eventos, porque un
+    // evento cancelado ya no se ve (idea de la auditoria, PR #17).
+    expect(routeFromPushData({ type: 'event_changed', event_id: UUID })).toBe(`/event/${UUID}`);
+    expect(routeFromPushData({ type: 'event_cancelled', event_id: UUID })).toBe('/events');
   });
 
   it('aguanta payloads incompletos o desconocidos', () => {

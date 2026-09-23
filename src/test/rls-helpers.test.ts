@@ -169,12 +169,20 @@ beforeAll(async () => {
     if (friendsEvErr) throw friendsEvErr;
     ctx.friendsEventId = friendsEv.id;
 
-    // Make A and B accepted friends (A is requester — INSERT policy allows this;
-    // directly using status='accepted' bypasses the pending step for test setup)
-    const { error: fErr } = await ctx.a
+    // Make A and B accepted friends the only way the app allows since
+    // 20260916000000: A asks, B accepts. (Inserting status='accepted' directly
+    // used to work, and was the hole that migration closes.)
+    const { data: fr, error: fErr } = await ctx.a
       .from("friendships")
-      .insert({ requester_id: ctx.aId, addressee_id: ctx.bId, status: "accepted" });
+      .insert({ requester_id: ctx.aId, addressee_id: ctx.bId, status: "pending" })
+      .select("id")
+      .single();
     if (fErr) throw fErr;
+    const { error: accErr } = await ctx.b
+      .from("friendships")
+      .update({ status: "accepted" })
+      .eq("id", fr.id);
+    if (accErr) throw accErr;
 
     // A creates a fresh open event for point-award tests (no prior participants)
     const { data: ptEv, error: ptEvErr } = await ctx.a

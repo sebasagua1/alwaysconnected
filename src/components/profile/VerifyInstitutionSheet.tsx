@@ -8,6 +8,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
 import { useToast } from '@/hooks/use-toast';
 import { formatAffiliation, type VerificationState } from '@/lib/institutions';
+import { rpcMessage } from '@/lib/rpcErrors';
 
 interface Props {
   onClose: () => void;
@@ -64,6 +65,8 @@ export function VerifyInstitutionSheet({ onClose, onChanged }: Props) {
   const [maskedTarget, setMaskedTarget] = useState<string | null>(null);
   const [resendAfter, setResendAfter] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [campusChange, setCampusChange] = useState(false);
+  const [campusNotes, setCampusNotes] = useState('');
 
   const load = useCallback(async () => {
     setStep('loading');
@@ -147,6 +150,35 @@ export function VerifyInstitutionSheet({ onClose, onChanged }: Props) {
       if (row.status === 'MANUAL_REVIEW') onChanged?.();
       setStep(row.status === 'MANUAL_REVIEW' ? 'unavailable' : 'email');
     }
+  };
+
+  /**
+   * "Me equivoqué de campus" / "me cambié de campus".
+   *
+   * Reutiliza la misma cola que la revisión manual: no cambia nada solo, deja
+   * constancia de qué campus quiere la persona y por qué. Para una cuenta ya
+   * verificada, el ON CONFLICT de request_institution no toca su estado (la
+   * cláusula WHERE excluye 'verified'), así que pedirlo no le quita la
+   * insignia mientras se revisa.
+   */
+  const requestCampusChange = async () => {
+    if (!state || campusNotes.trim().length < 3) return;
+    setBusy(true);
+    const { error } = await supabase.rpc('request_institution', {
+      _kind: 'manual_verification',
+      _notes: `[cambio de campus] ${campusNotes.trim()}`,
+      _university_id: state.university_id,
+      _campus_id: state.campus_id,
+    });
+    setBusy(false);
+    if (error) {
+      toast({ title: t('common.error'), description: rpcMessage(error.message, t), variant: 'destructive' });
+      return;
+    }
+    toast({ title: t('verification.campusChangeSent'), description: t('verification.campusChangeSentDesc') });
+    setCampusChange(false);
+    setCampusNotes('');
+    onChanged?.();
   };
 
   const requestReview = async () => {
@@ -320,6 +352,68 @@ export function VerifyInstitutionSheet({ onClose, onChanged }: Props) {
               </button>
             </div>
           </form>
+        )}
+
+        {/* Salida para el campus.
+            set_profile_campus lo bloquea para siempre en cuanto se elige, y la
+            razón es buena: si no, alguien se movería de comunidad conservando
+            la insignia de verificado. Pero hasta ahora no había NINGUNA salida
+            en la app —EditProfileSheet ni menciona el campus—, así que quien se
+            equivocaba tocando en una lista de nueve campus se quedaba atrapado
+            en la comunidad incorrecta, sin nada que tocar y sin entender por
+            qué. Los intercambios entre campus del Tec son habituales.
+            La solicitud ya existía (request_institution 'manual_verification');
+            lo único que faltaba era llegar hasta ella. */}
+        {state && step !== 'loading' && step !== 'error' && (
+          <div className="pt-5 border-t border-border">
+            {!campusChange ? (
+              <button
+                type="button"
+                className="min-h-[44px] text-sm font-semibold text-primary"
+                onClick={() => setCampusChange(true)}
+              >
+                {t('verification.campusChange')}
+              </button>
+            ) : (
+              <form
+                className="space-y-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  requestCampusChange();
+                }}
+              >
+                <p className="text-sm text-muted-foreground">{t('verification.campusChangeDesc')}</p>
+                <div className="space-y-1.5">
+                  <Label htmlFor="campus-change-notes">{t('verification.campusChangeLabel')}</Label>
+                  <Input
+                    id="campus-change-notes"
+                    maxLength={300}
+                    value={campusNotes}
+                    onChange={(e) => setCampusNotes(e.target.value)}
+                    placeholder={t('verification.campusChangePh')}
+                    className="h-12 rounded-xl text-base"
+                  />
+                </div>
+                <div className="flex gap-3">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-11 rounded-xl px-5"
+                    onClick={() => setCampusChange(false)}
+                  >
+                    {t('common.cancel')}
+                  </Button>
+                  <Button
+                    type="submit"
+                    className="flex-1 h-11 rounded-xl"
+                    disabled={busy || campusNotes.trim().length < 3}
+                  >
+                    {t('verification.campusChangeSend')}
+                  </Button>
+                </div>
+              </form>
+            )}
+          </div>
         )}
       </div>
     </div>

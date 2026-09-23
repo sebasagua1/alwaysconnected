@@ -22,6 +22,14 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   CAMPUS_LOCKED: 'rpcErrors.campusLocked',
   CAMPUS_NOT_AVAILABLE: 'rpcErrors.campusNotAvailable',
   CAMPUS_NOT_ALLOWED: 'rpcErrors.campusNotAllowed',
+  // Los lanza guard_friendship_write al pedir o aceptar amistad.
+  FRIEND_SELF: 'rpcErrors.friendSelf',
+  FRIEND_NOT_AVAILABLE: 'rpcErrors.friendNotAvailable',
+  FRIEND_REQUEST_EXISTS: 'friends.alreadySent',
+  FRIEND_REQUEST_INCOMING: 'rpcErrors.friendRequestIncoming',
+  ALREADY_FRIENDS: 'rpcErrors.alreadyFriends',
+  FRIEND_RATE_LIMIT: 'rpcErrors.friendRateLimit',
+  FRIENDSHIP_FIELD_LOCKED: 'rpcErrors.friendshipLocked',
   // request_institution.
   REQUEST_RATE_LIMIT: 'rpcErrors.requestRateLimit',
   INVALID_REQUEST: 'rpcErrors.invalidRequest',
@@ -31,6 +39,22 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   EVENT_NOT_STARTED: 'rpcErrors.eventNotStarted',
   INVITE_NOT_FOUND: 'rpcErrors.inviteNotFound',
   INVITE_ALREADY_ANSWERED: 'rpcErrors.inviteAlreadyAnswered',
+  // Chat de actividad (20260923).
+  MESSAGE_RATE_LIMIT: 'rpcErrors.messageRateLimit',
+  ANNOUNCEMENT_NOT_ALLOWED: 'rpcErrors.announcementNotAllowed',
+  ANNOUNCEMENT_RATE_LIMIT: 'rpcErrors.announcementRateLimit',
+  NOT_A_CHAT_MEMBER: 'rpcErrors.notAChatMember',
+  NOT_THE_ORGANIZER: 'rpcErrors.notTheOrganizer',
+  REMOVED_FROM_EVENT: 'rpcErrors.removedFromEvent',
+  NOT_A_PARTICIPANT: 'rpcErrors.notAParticipant',
+  // Invitar amigos a una actividad (20260925).
+  TOO_MANY_INVITES: 'rpcErrors.tooManyInvites',
+  INVITE_RATE_LIMIT: 'rpcErrors.inviteRateLimit',
+  EVENT_NOT_OPEN: 'rpcErrors.eventNotOpen',
+  // Los lanzan los guardianes de 20260920000000. No los produce ninguna ruta
+  // de la app: si alguien los ve, es que algo está llamando a la API a mano.
+  PARTICIPATION_FIELD_LOCKED: 'rpcErrors.participationLocked',
+  EVENT_FIELD_LOCKED: 'rpcErrors.eventLocked',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {

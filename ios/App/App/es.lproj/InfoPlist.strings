@@ -1,0 +1,7 @@
+/* Textos de los permisos en español. Van con el nombre de la app escrito:
+   en los .strings no se expanden variables como $(APP_BRAND_NAME). */
+"NSContactsUsageDescription" = "Always Connected usa los contactos que elijas para encontrar a amigos que ya están en la app e invitar a quien no. No se sube tu agenda: solo huellas cifradas de los teléfonos y correos.";
+"NSLocationWhenInUseUsageDescription" = "Always Connected usa tu ubicación para mostrarte eventos cercanos en el campus y validar tu asistencia (check-in).";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Always Connected usa tu ubicación para mostrarte eventos cercanos en el campus y validar tu asistencia (check-in).";
+"NSCameraUsageDescription" = "Always Connected usa la cámara para que puedas tomarte una foto de perfil.";
+"NSPhotoLibraryUsageDescription" = "Always Connected accede a tus fotos para que puedas elegir tu foto de perfil.";

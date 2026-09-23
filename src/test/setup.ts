@@ -1,4 +1,9 @@
 import "@testing-library/jest-dom";
+import { configure } from "@testing-library/react";
+
+// findBy/waitFor esperan 1 s por defecto: poco cuando la suite completa
+// comparte CPU con las pruebas de SQL (ver vitest.config.ts).
+configure({ asyncUtilTimeout: 4000 });
 
 // jsdom no implementa scrollTo en los elementos, solo en window, y lanza
 // "is not a function" en cuanto un componente hace scroll de verdad. No es un
