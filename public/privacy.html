@@ -109,7 +109,7 @@
     </header>
 
     <main>
-      <span class="tag">Última actualización: 15 de septiembre de 2026</span>
+      <span class="tag">Última actualización: 23 de septiembre de 2026</span>
 
       <p>Esta Política de Privacidad describe cómo <strong>Always Connected</strong> (en adelante,
       «la App», «el Servicio», «nosotros» u «el Operador») recopila, usa, comparte y protege tus datos
@@ -121,8 +121,9 @@
         crear y unirte a actividades del campus. No vendemos tus datos personales. Tu ubicación
         se trata como dato sensible y solo se usa con tu permiso explícito. Si verificas tu
         institución con tu correo institucional, ese correo nunca se muestra a otros usuarios ni
-        se guarda en claro. Puedes acceder a tus datos, corregirlos o eliminar tu cuenta cuando
-        quieras.
+        se guarda en claro. Si usas «Encontrar amigos», tu agenda nunca se sube: solo viajan
+        huellas cifradas de los contactos que elijas. Puedes acceder a tus datos, corregirlos o
+        eliminar tu cuenta cuando quieras.
       </div>
 
       <nav class="toc">
@@ -134,6 +135,8 @@
           <li><a href="#ubicacion">4. Datos de ubicación (dato sensible)</a></li>
           <li><a href="#push">5. Notificaciones push</a></li>
           <li><a href="#verificacion">5 bis. Verificación de tu institución</a></li>
+          <li><a href="#contactos">5 ter. Encontrar amigos e invitaciones</a></li>
+          <li><a href="#chat-actividad">5 quater. Chat de cada actividad</a></li>
           <li><a href="#terceros">6. Autenticación y servicios de terceros</a></li>
           <li><a href="#comparte">7. Con quién se comparten tus datos</a></li>
           <li><a href="#transferencias">8. Transferencias internacionales</a></li>
@@ -201,7 +204,8 @@
       <h3>c) Contenido y actividad dentro de la App</h3>
       <ul>
         <li>Eventos que creas o a los que te unes, y tu asistencia (check-in).</li>
-        <li>Mensajes que envías en chats de eventos o grupos (pueden ser efímeros y expirar).</li>
+        <li>Mensajes que envías en chats de eventos o grupos (pueden ser efímeros y expirar), y
+        las personas que mencionas con @ en ellos. Ver <a href="#chat-actividad">sección 5 quater</a>.</li>
         <li>Amistades, grupos, insignias (badges) y tus puntos/reputación.</li>
         <li>Reportes que envíes sobre otros usuarios o eventos, y reportes que otros envíen sobre
         ti (para poder actuar sobre ellos; ver <a href="#comparte">sección 7</a>).</li>
@@ -217,6 +221,17 @@
         <li>Ver el detalle en la <a href="#verificacion">sección 5 bis</a>.</li>
       </ul>
 
+      <h3>c ter) Contactos (solo si usas «Encontrar amigos»)</h3>
+      <ul>
+        <li>Huellas cifradas de los correos y teléfonos de los contactos que elijas, nunca sus
+        nombres ni tu agenda completa. Solo se guardan si activas el aviso de «cuando un contacto se
+        una». Ver <a href="#contactos">sección 5 ter</a>.</li>
+        <li>Si eliges que tus contactos puedan encontrarte: huellas de tu correo y, si lo tienes
+        verificado, de tu teléfono.</li>
+        <li>Invitaciones: un código de invitación propio, cuántas veces compartes el enlace y
+        cuántas invitaciones se aceptan.</li>
+      </ul>
+
       <h3>d) Datos de ubicación</h3>
       <ul>
         <li>Tu ubicación geográfica precisa, <strong>solo mientras usas la App</strong> y con tu
@@ -227,6 +242,8 @@
       <ul>
         <li>Token del dispositivo para notificaciones push (Apple Push Notification service), si
         aceptas recibirlas. Ver <a href="#push">sección 5</a>.</li>
+        <li>Tus preferencias de notificaciones, tu zona horaria y tu idioma, y un registro de
+        cuándo se entregó y se abrió cada aviso, sin su contenido. Ver <a href="#push">sección 5</a>.</li>
         <li>Información técnica mínima necesaria para el funcionamiento y la seguridad (por ejemplo,
         tokens de sesión). No usamos cookies de rastreo publicitario.</li>
         <li><strong>No rastreamos tu actividad entre apps ni entre sitios web</strong>, y no hay
@@ -248,7 +265,9 @@
           <tr><td>Después de un evento: invitarte a un grupo con quienes fueron y avisarte si alguien repite el plan</td><td>Participación en el evento, nombre, token de notificaciones</td></tr>
           <tr><td>Verificar tu pertenencia a una institución</td><td>Correo institucional (huella y versión oculta), código temporal, institución y campus</td></tr>
           <tr><td>Sistema de puntos, reputación e insignias</td><td>Actividad dentro de la App</td></tr>
-          <tr><td>Avisarte de solicitudes, mensajes y aprobaciones</td><td>Token de notificaciones push</td></tr>
+          <tr><td>Avisarte de lo que pasa en tus actividades, tus chats y con tus amigos, según tus preferencias</td><td>Token de notificaciones push, preferencias, zona horaria, idioma, registro de entrega y apertura</td></tr>
+          <tr><td>Encontrar a amigos que ya usan la App (opcional)</td><td>Huellas cifradas de los contactos que elijas; huellas de tu correo y teléfono verificados si eliges ser encontrable</td></tr>
+          <tr><td>Invitar a otras personas</td><td>Código de invitación, número de invitaciones compartidas y aceptadas</td></tr>
           <tr><td>Seguridad, prevención de abuso y soporte</td><td>Datos de cuenta, reportes, datos técnicos</td></tr>
         </tbody>
       </table>
@@ -273,12 +292,25 @@
         dispositivo; algunas funciones (mapa, check-in) dejarán de funcionar si lo haces.</li>
       </ul>
 
-      <h2 id="push">5. Notificaciones push</h2>
+      <h2 id="push">5. Notificaciones</h2>
       <p>Si lo aceptas, enviamos notificaciones push a tu dispositivo (por ejemplo, cuando alguien
-      te escribe, te pide amistad o aprueba tu solicitud de unirte a un evento) a través del
-      servicio Apple Push Notification service (APNs). Para eso guardamos un token de dispositivo,
-      no tu ubicación. Puedes desactivar las notificaciones desde los ajustes de tu dispositivo en
-      cualquier momento.</p>
+      te escribe o te menciona, te pide amistad, aprueba tu solicitud, cambia o cancela una
+      actividad a la que vas, o cuando una actividad está por empezar) a través del servicio Apple
+      Push Notification service (APNs). Para eso guardamos un token de dispositivo, no tu
+      ubicación. Los mismos avisos aparecen en la bandeja de notificaciones de la App.</p>
+      <ul>
+        <li>Desde <em>Perfil → Preferencias de notificaciones</em> eliges qué tipos de aviso recibes, silencias el
+        chat de una actividad, fijas un horario silencioso y decides si quieres ver el texto de los
+        mensajes en la notificación. Los avisos de seguridad de tu cuenta no se pueden apagar.</li>
+        <li>Los avisos promocionales están <strong>apagados</strong> hasta que los actives tú.</li>
+        <li>Para respetar tus horarios y no enviarte de más usamos tu zona horaria y tu idioma, y
+        guardamos cuándo se entregó y se abrió cada aviso (sin su contenido), también para medir si
+        los avisos sirven.</li>
+        <li>Las notificaciones solo llevan identificadores; el texto se arma al enviarlas y no
+        incluye datos de personas que hayas bloqueado.</li>
+        <li>Puedes desactivar todas las notificaciones push desde los ajustes de tu dispositivo en
+        cualquier momento.</li>
+      </ul>
 
       <h2 id="verificacion">5 bis. Verificación de tu institución</h2>
       <p>Verificar tu institución es opcional. Sirve para mostrar a otros usuarios que perteneces a
@@ -306,6 +338,47 @@
         <li>Otros usuarios ven <strong>tu institución, tu campus y si estás verificado</strong>;
         nunca tu correo institucional ni tu matrícula.</li>
         <li>Nunca te pediremos la contraseña de tu institución.</li>
+      </ul>
+
+      <h2 id="contactos">5 ter. Encontrar amigos e invitaciones</h2>
+      <p>«Encontrar amigos» es <strong>opcional</strong>: la App funciona igual si no lo usas, y
+      antes de pedir el permiso te explicamos para qué es. Puedes darle acceso a tus contactos,
+      darle acceso solo a algunos (acceso limitado de iOS) o elegirlos a mano sin darle permiso a tu
+      agenda. Puedes cambiar el permiso cuando quieras desde los ajustes de tu dispositivo.</p>
+      <ul>
+        <li><strong>Tu agenda no se sube.</strong> En tu teléfono se normalizan los correos y
+        teléfonos de los contactos que elijas y se convierten en una huella irreversible; solo viajan
+        esas huellas, nunca los nombres. En el servidor se firman con una clave secreta (HMAC) y se
+        comparan con las de quienes eligieron ser encontrables.</li>
+        <li>Solo coinciden cuentas que <strong>eligieron ser encontrables</strong>, de tu mismo
+        campus, con correo o teléfono <strong>verificados</strong> y sin bloqueos entre ustedes.
+        Nunca se busca por nombre.</li>
+        <li>De quien coincide ves solo su nombre, su foto, su campus y si ya son amigos. No te
+        decimos nada de los contactos que no están en la App ni de quienes no quisieron ser
+        encontrables.</li>
+        <li><strong>Ser encontrable</strong> empieza desactivado. Si lo activas, guardamos huellas
+        de tu correo y de tu teléfono verificados para que tus contactos puedan encontrarte.</li>
+        <li>Si activas «Avisarme cuando un contacto se una», guardamos las huellas de esos contactos
+        hasta <strong>180 días</strong> para poder avisarte; si no, se comparan y se descartan.</li>
+        <li>Para evitar abusos limitamos cuántos contactos se pueden comparar por día.</li>
+        <li>Puedes borrarlo todo desde <em>Perfil → Contactos y encontrar amigos</em>, con «Borrar
+        mis datos de contactos»; desactivar esas opciones también lo borra.</li>
+      </ul>
+      <p><strong>Invitaciones.</strong> Cuando invitas a alguien, la App abre la hoja de compartir
+      de tu teléfono y tú eliges a quién y por dónde enviarla; nunca enviamos nada en tu nombre. El
+      enlace lleva un código opaco, sin tu correo ni tu teléfono ni los de la persona invitada.
+      Contamos cuántas veces compartes el enlace y cuántas invitaciones se aceptan; si quien acepta
+      es de tu campus, se te sugiere como amistad.</p>
+
+      <h2 id="chat-actividad">5 quater. Chat de cada actividad</h2>
+      <p>Cada actividad tiene un chat de grupo. Lo ven y escriben en él solo quien la organiza y
+      las personas que se unieron; si sales, te expulsan o hay un bloqueo con quien organiza,
+      pierdes el acceso al momento, y los mensajes anteriores se conservan para los demás.</p>
+      <ul>
+        <li>Quien organiza puede borrar mensajes y expulsar participantes; esas acciones quedan
+        registradas.</li>
+        <li>Los mensajes caducan según la regla general de los chats (ver
+        <a href="#conservacion">sección 9</a>).</li>
       </ul>
 
       <h2 id="terceros">6. Autenticación y servicios de terceros</h2>
@@ -342,6 +415,9 @@
         que te bloquearon o que bloqueaste no te ven.</li>
         <li>Si alguien que fue a un evento contigo crea un grupo desde ese evento, puede enviarte
         una invitación; solo entras si la aceptas.</li>
+        <li>Quienes están en una actividad contigo ven tus mensajes en su chat.</li>
+        <li>Si eliges ser encontrable, las personas de tu campus que tengan tu correo o tu teléfono
+        en su agenda pueden encontrarte en «Encontrar amigos».</li>
       </ul>
       <p>También podríamos divulgar datos si la ley lo exige, ante requerimiento de autoridad
       competente, o para proteger derechos, seguridad o integridad de los usuarios y del Servicio.</p>
@@ -361,13 +437,21 @@
       tus datos de verificación institucional y tus solicitudes de instituciones. Los mensajes
       efímeros se eliminan automáticamente según su fecha de expiración. Los códigos de
       verificación dejan de servir a los 10 minutos o tras 5 intentos fallidos.</p>
+      <ul>
+        <li>Notificaciones de la bandeja: se borran 60 días después de leerlas, y a los 120 días
+        como máximo. El registro de entrega de cada aviso se borra a los 30 días.</li>
+        <li>Huellas de los contactos de tu agenda: como máximo 180 días, y solo si activaste el
+        aviso de «cuando un contacto se una». Las huellas de tu propio correo y teléfono, mientras
+        sigas siendo encontrable.</li>
+      </ul>
 
       <h2 id="seguridad">10. Seguridad</h2>
       <ul>
         <li>Toda la comunicación viaja cifrada mediante <strong>HTTPS/TLS</strong>.</li>
         <li>Las contraseñas se almacenan de forma cifrada; nunca en texto plano.</li>
         <li>El correo institucional y los códigos de verificación se guardan como huellas
-        criptográficas con una clave secreta del servidor, no en claro.</li>
+        criptográficas con una clave secreta del servidor, no en claro. Lo mismo con los correos y
+        teléfonos de «Encontrar amigos».</li>
         <li>El acceso a los datos está protegido con reglas de seguridad a nivel de fila
         («Row Level Security»): cada usuario solo puede ver la información que le corresponde.</li>
         <li>Ninguna transmisión por Internet es 100% segura; no podemos garantizar seguridad absoluta,

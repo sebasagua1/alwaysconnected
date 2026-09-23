@@ -139,11 +139,10 @@
       </array>
     </dict>
 
-    <!-- "Encontrar amigos" (20260924): huellas de los correos y telefonos de
-         los contactos que la persona elige. Se comparan con HMAC y solo se
-         guardan (180 dias) si pide que le avisen cuando alguien se una.
-         PENDIENTE: privacy.html aun no tiene su seccion; hay que anadirla
-         para que los dos documentos digan lo mismo. -->
+    <!-- privacy.html 2.c ter y 5 ter — "Encontrar amigos": huellas de los
+         correos y telefonos de los contactos que la persona elige. Se
+         comparan con HMAC y solo se guardan (180 dias) si pide que le avisen
+         cuando alguien se una. -->
     <dict>
       <key>NSPrivacyCollectedDataType</key>
       <string>NSPrivacyCollectedDataTypeContacts</string>
@@ -157,9 +156,8 @@
       </array>
     </dict>
 
-    <!-- Notificaciones (20260925): cuando se entrega y se abre cada aviso,
-         para no mandar de mas y medir si sirven. Sin su contenido.
-         PENDIENTE en privacy.html, igual que el de arriba. -->
+    <!-- privacy.html 2.e y 5 — cuando se entrega y se abre cada aviso, para
+         no mandar de mas y medir si sirven. Sin su contenido. -->
     <dict>
       <key>NSPrivacyCollectedDataType</key>
       <string>NSPrivacyCollectedDataTypeProductInteraction</string>
