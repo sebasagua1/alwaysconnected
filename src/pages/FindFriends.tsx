@@ -22,6 +22,7 @@ import {
 } from '@/lib/contacts';
 import { pageTitle } from '@/lib/brand';
 import { cn } from '@/lib/utils';
+import { useStaggerReveal } from '@/hooks/useStaggerReveal';
 
 /** Si se dijo "Ahora no" a la pantalla previa: no volver a enseñarla sola. */
 const INTRO_DISMISSED_KEY = 'ac_contacts_intro_dismissed';
@@ -286,7 +287,7 @@ export default function FindFriends() {
   const personList = (rows: Row[]) => (
     <ul className="space-y-2">
       {rows.map((r) => (
-        <li key={r.id} className="flex items-center gap-2 bg-card rounded-xl p-3 shadow-soft">
+        <li key={r.id} data-reveal className="flex items-center gap-2 bg-card rounded-xl p-3 shadow-soft">
           <button
             type="button"
             onClick={() => setViewing(r.id)}
@@ -311,8 +312,13 @@ export default function FindFriends() {
     subtitle: p.mutual_friends > 0 ? t('friends.mutualFriends', { count: p.mutual_friends }) : (p.major ?? t('friends.sameCampus')),
   }));
 
+  // Cascada de las filas de personas, igual que en el resto de listas. Esta
+  // pantalla pinta sugerencias, coincidencias de contactos y resultados de
+  // búsqueda con el mismo personList, así que las tres se revelan.
+  const listScope = useStaggerReveal<HTMLDivElement>([search.term, search.status, suggestions?.length]);
+
   return (
-    <div className="min-h-screen pb-nav px-4 pt-safe">
+    <div ref={listScope} className="min-h-screen pb-nav px-4 pt-safe">
       <Helmet><title>{pageTitle(t('findFriends.title'))}</title></Helmet>
 
       <div className="flex items-center gap-2 mb-4">
