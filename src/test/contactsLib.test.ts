@@ -1,9 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   channelFromActivity, hashContacts, inviteUrl, savePendingInvite, takePendingInvite,
 } from '@/lib/contacts';
 import { inviteCodeFromPath, routeFromPath } from '@/lib/deepLinks';
+
+// Sin .env (en el CI) el cliente real revienta al importarse.
+vi.mock('@/integrations/supabase/client', () => ({ supabase: {} }));
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 

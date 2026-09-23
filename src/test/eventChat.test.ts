@@ -1,9 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   activeMentionQuery, dropMessage, firstUnreadIndex, insertMention, mentionCandidates, mentionIdsInText,
   mentionLabel, mergeMessages, newMessageId, setSendState, splitMentions, toChatMessage, type EventChatMessage,
 } from '@/lib/eventChat';
 import { routeFromPath, routeFromPushData } from '@/lib/deepLinks';
+
+// Sin .env (en el CI) el cliente real revienta al importarse.
+vi.mock('@/integrations/supabase/client', () => ({ supabase: {} }));
 
 const msg = (id: string, at: string, extra: Partial<EventChatMessage> = {}): EventChatMessage => ({
   id, content: id, created_at: at, sender_id: 'ana', edited_at: null, deleted_at: null, deleted_by: null,

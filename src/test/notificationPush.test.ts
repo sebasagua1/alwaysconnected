@@ -4,12 +4,15 @@
  * cuela el contenido, la carga solo lleva ids, y la app publicada sigue
  * entendiendo los tipos de siempre.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { renderNotification } from '../../supabase/functions/_shared/notificationCopy';
 import { buildApnsRequest, summarize, type ClaimedDelivery } from '../../supabase/functions/_shared/notificationPush';
 import { routeFromPushData } from '@/lib/deepLinks';
+
+// Sin .env (en el CI) el cliente real revienta al importarse.
+vi.mock('@/integrations/supabase/client', () => ({ supabase: {} }));
 
 const MIGRACION = readFileSync(join(__dirname, '..', '..', 'supabase', 'migrations', '20260925000000_notificaciones.sql'), 'utf8');
 /** Los tipos que siembra la migración, leídos del propio SQL. */
