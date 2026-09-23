@@ -601,8 +601,9 @@ export function EventBottomSheet({ event, onClose }: Props) {
           </button>
         )}
 
-        {/* Invitar amigos: quien ya está dentro y mientras no haya empezado. */}
-        {!checking && inChat && chatUnread !== null && new Date(event.starts_at).getTime() > Date.now() && (
+        {/* Invitar amigos: quien ya está dentro, mientras no haya empezado y
+            quede sitio (lleno, unirse da EVENT_FULL: el aviso no serviría). */}
+        {!checking && inChat && chatUnread !== null && spotsLeft > 0 && new Date(event.starts_at).getTime() > Date.now() && (
           <button
             onClick={() => setInviteOpen(true)}
             className="w-full mb-4 flex items-center justify-center gap-2 min-h-[44px] rounded-xl border border-border text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

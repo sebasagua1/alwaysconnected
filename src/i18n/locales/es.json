@@ -1045,6 +1045,9 @@
     "send_other": "Invitar a {{count}} amigos",
     "sent_one": "Invitación enviada a {{count}} amigo",
     "sent_other": "Invitación enviada a {{count}} amigos",
-    "nobodyNew": "Ya les habías invitado o no pueden ver esta actividad"
+    "nobodyNew": "Ya tenían invitación, tienen estos avisos apagados o no pueden ver esta actividad",
+    "skipped_one": "A {{count}} no le llegó: ya tenía invitación o no puede recibirla",
+    "skipped_other": "A {{count}} no les llegó: ya tenían invitación o no pueden recibirla",
+    "limit": "Máximo {{max}} por vez"
   }
 }
