@@ -1045,6 +1045,9 @@
     "send_other": "Invite {{count}} friends",
     "sent_one": "Invitation sent to {{count}} friend",
     "sent_other": "Invitation sent to {{count}} friends",
-    "nobodyNew": "You'd already invited them or they can't see this activity"
+    "nobodyNew": "They already had an invite, have these alerts off, or can't see this activity",
+    "skipped_one": "{{count}} didn't get it: already invited or can't receive it",
+    "skipped_other": "{{count}} didn't get it: already invited or can't receive it",
+    "limit": "Up to {{max}} at a time"
   }
 }
