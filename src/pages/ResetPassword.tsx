@@ -3,7 +3,7 @@ import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
 import { KeyRound, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/ui/password-input';
 import { Label } from '@/components/ui/label';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
@@ -64,9 +64,8 @@ export default function ResetPassword() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="reset-password">{t('reset.newPassword')}</Label>
-            <Input
+            <PasswordInput
               id="reset-password"
-              type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
@@ -81,9 +80,8 @@ export default function ResetPassword() {
 
           <div className="space-y-2">
             <Label htmlFor="reset-confirm">{t('reset.confirm')}</Label>
-            <Input
+            <PasswordInput
               id="reset-confirm"
-              type="password"
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
               required

@@ -71,6 +71,11 @@ export default function GroupChat() {
   const draftBeforeEditRef = useRef('');
   const inputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Si la vista está pegada al final. Empieza en true porque el chat abre
+  // abajo. Se actualiza al hacer scroll y lo consulta el efecto que decide si
+  // bajar cuando entra un mensaje nuevo. Es un ref y no un estado a propósito:
+  // cambia en cada frame de scroll y no debe repintar nada.
+  const atBottomRef = useRef(true);
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   /**
@@ -210,13 +215,23 @@ export default function GroupChat() {
   // Bajar del todo solo cuando la lista crece por ABAJO. Al cargar mensajes
   // anteriores crece por arriba, y saltar al final ahí tiraría de la pantalla
   // justo a quien está leyendo hacia atrás.
+  //
+  // Y tampoco basta con eso: si estás leyendo hacia arriba y alguien escribe,
+  // la lista crece por abajo igual, y saltar al final te arrancaba de donde
+  // estabas leyendo. Así que solo se baja si ya estabas abajo —o si el mensaje
+  // es tuyo, que entonces sí quieres verlo salir.
   useEffect(() => {
-    const ultimo = messages[messages.length - 1]?.id ?? null;
-    if (ultimo === lastIdRef.current) return;
+    const ultimo = messages[messages.length - 1];
+    const ultimoId = ultimo?.id ?? null;
+    if (ultimoId === lastIdRef.current) return;
     const esLaPrimera = lastIdRef.current === null;
-    lastIdRef.current = ultimo;
+    lastIdRef.current = ultimoId;
+
+    const esMio = ultimo?.sender_id === user?.id;
+    if (!esLaPrimera && !esMio && !atBottomRef.current) return;
+
     bottomRef.current?.scrollIntoView({ behavior: esLaPrimera ? 'auto' : 'smooth' });
-  }, [messages]);
+  }, [messages, user?.id]);
 
   // Estar en el chat cuenta como haberlo leído, también si llega algo mientras
   // lo tienes abierto. Marcar leído es un UPDATE sobre group_members, que no
@@ -596,7 +611,24 @@ export default function GroupChat() {
       </Sheet>
 
       {/* Messages */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
+      <div
+        // role="log" + aria-live: un lector de pantalla lee los mensajes que
+        // van entrando sin que haya que salir del campo de escribir. "polite"
+        // para que espere a que la persona termine de teclear, y "additions"
+        // para que no relea el historial entero cada vez.
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions"
+        aria-label={t('groups.messages')}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          // 64px de margen: pegado al final del todo es raro que se dé al
+          // píxel, y con inercia en iOS menos todavía.
+          atBottomRef.current =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 64;
+        }}
+        className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3"
+      >
         {hasOlder && (
           <button
             onClick={loadOlder}
@@ -697,6 +729,9 @@ export default function GroupChat() {
               if (e.key === 'Escape' && editing) { e.preventDefault(); cancelEditing(); }
             }}
             placeholder={t('groups.messagePh')}
+            // En iOS la tecla de retorno decía "intro"; con esto dice
+            // "enviar", que es lo que hace realmente al pulsarla.
+            enterKeyHint="send"
             className="h-11 rounded-xl"
           />
           <Button
