@@ -138,6 +138,41 @@
         <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
       </array>
     </dict>
+
+    <!-- "Encontrar amigos" (20260924): huellas de los correos y telefonos de
+         los contactos que la persona elige. Se comparan con HMAC y solo se
+         guardan (180 dias) si pide que le avisen cuando alguien se una.
+         PENDIENTE: privacy.html aun no tiene su seccion; hay que anadirla
+         para que los dos documentos digan lo mismo. -->
+    <dict>
+      <key>NSPrivacyCollectedDataType</key>
+      <string>NSPrivacyCollectedDataTypeContacts</string>
+      <key>NSPrivacyCollectedDataTypeLinked</key>
+      <true/>
+      <key>NSPrivacyCollectedDataTypeTracking</key>
+      <false/>
+      <key>NSPrivacyCollectedDataTypePurposes</key>
+      <array>
+        <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+      </array>
+    </dict>
+
+    <!-- Notificaciones (20260925): cuando se entrega y se abre cada aviso,
+         para no mandar de mas y medir si sirven. Sin su contenido.
+         PENDIENTE en privacy.html, igual que el de arriba. -->
+    <dict>
+      <key>NSPrivacyCollectedDataType</key>
+      <string>NSPrivacyCollectedDataTypeProductInteraction</string>
+      <key>NSPrivacyCollectedDataTypeLinked</key>
+      <true/>
+      <key>NSPrivacyCollectedDataTypeTracking</key>
+      <false/>
+      <key>NSPrivacyCollectedDataTypePurposes</key>
+      <array>
+        <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+        <string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+      </array>
+    </dict>
   </array>
 
   <key>NSPrivacyAccessedAPITypes</key>
