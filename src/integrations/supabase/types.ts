@@ -258,9 +258,11 @@ export type Database = {
           lng: number | null
           max_spots: number
           privacy: string
+          recommended_at: string | null
           recurrence_rule: string | null
           repeated_from: string | null
           starts_at: string
+          start_push_sent_at: string | null
           title: string
         }
         Insert: {
@@ -279,9 +281,11 @@ export type Database = {
           lng?: number | null
           max_spots?: number
           privacy?: string
+          recommended_at?: string | null
           recurrence_rule?: string | null
           repeated_from?: string | null
           starts_at: string
+          start_push_sent_at?: string | null
           title: string
         }
         Update: {
@@ -300,9 +304,11 @@ export type Database = {
           lng?: number | null
           max_spots?: number
           privacy?: string
+          recommended_at?: string | null
           recurrence_rule?: string | null
           repeated_from?: string | null
           starts_at?: string
+          start_push_sent_at?: string | null
           title?: string
         }
         Relationships: []
