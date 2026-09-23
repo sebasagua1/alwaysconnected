@@ -236,6 +236,26 @@ export default function GroupChat() {
     return () => { cancelled = true; };
   }, [groupId, newestId]);
 
+  // "Lo estoy viendo": con el chat abierto no se manda push de este grupo
+  // (el mensaje ya llega por tiempo real). Se renueva cada 30 s y se apaga
+  // al salir o al pasar la app a segundo plano.
+  useEffect(() => {
+    if (!groupId) return;
+    const set = (active: boolean) => {
+      void supabase.rpc('set_group_chat_presence', { _group_id: groupId, _active: active });
+    };
+    const beat = () => { if (document.visibilityState === 'visible') set(true); };
+    beat();
+    const id = setInterval(beat, 30_000);
+    const onVisibility = () => (document.visibilityState === 'visible' ? beat() : set(false));
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
+      set(false);
+    };
+  }, [groupId]);
+
   useEffect(() => {
     if (!groupId) return;
     const channel = supabase

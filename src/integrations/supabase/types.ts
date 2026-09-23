@@ -468,6 +468,186 @@ export type Database = {
         }
         Relationships: []
       }
+      notification_preferences: {
+        Row: {
+          account_tips: boolean
+          activity_messages: boolean
+          activity_recommendations: boolean
+          created_at: string
+          daily_social_limit: number
+          digests: boolean
+          direct_messages: boolean
+          event_requests: boolean
+          event_updates: boolean
+          friend_activity: boolean
+          friend_requests: boolean
+          locale: string
+          mentions: boolean
+          people_suggestions: boolean
+          promotional: boolean
+          promotional_consent_at: string | null
+          quiet_end: string
+          quiet_hours_enabled: boolean
+          quiet_start: string
+          reminder_minutes: number
+          reminders: boolean
+          show_previews: boolean
+          timezone: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          account_tips?: boolean
+          activity_messages?: boolean
+          activity_recommendations?: boolean
+          created_at?: string
+          daily_social_limit?: number
+          digests?: boolean
+          direct_messages?: boolean
+          event_requests?: boolean
+          event_updates?: boolean
+          friend_activity?: boolean
+          friend_requests?: boolean
+          locale?: string
+          mentions?: boolean
+          people_suggestions?: boolean
+          promotional?: boolean
+          promotional_consent_at?: string | null
+          quiet_end?: string
+          quiet_hours_enabled?: boolean
+          quiet_start?: string
+          reminder_minutes?: number
+          reminders?: boolean
+          show_previews?: boolean
+          timezone?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          account_tips?: boolean
+          activity_messages?: boolean
+          activity_recommendations?: boolean
+          created_at?: string
+          daily_social_limit?: number
+          digests?: boolean
+          direct_messages?: boolean
+          event_requests?: boolean
+          event_updates?: boolean
+          friend_activity?: boolean
+          friend_requests?: boolean
+          locale?: string
+          mentions?: boolean
+          people_suggestions?: boolean
+          promotional?: boolean
+          promotional_consent_at?: string | null
+          quiet_end?: string
+          quiet_hours_enabled?: boolean
+          quiet_start?: string
+          reminder_minutes?: number
+          reminders?: boolean
+          show_previews?: boolean
+          timezone?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      notifications: {
+        Row: {
+          actor_id: string | null
+          category: string
+          converted_at: string | null
+          count: number
+          created_at: string
+          data: Json
+          dedupe_key: string | null
+          event_id: string | null
+          expires_at: string | null
+          group_id: string | null
+          group_key: string | null
+          id: string
+          message_id: string | null
+          opened_at: string | null
+          priority: number
+          read_at: string | null
+          type: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          actor_id?: string | null
+          category: string
+          converted_at?: string | null
+          count?: number
+          created_at?: string
+          data?: Json
+          dedupe_key?: string | null
+          event_id?: string | null
+          expires_at?: string | null
+          group_id?: string | null
+          group_key?: string | null
+          id?: string
+          message_id?: string | null
+          opened_at?: string | null
+          priority?: number
+          read_at?: string | null
+          type: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          actor_id?: string | null
+          category?: string
+          converted_at?: string | null
+          count?: number
+          created_at?: string
+          data?: Json
+          dedupe_key?: string | null
+          event_id?: string | null
+          expires_at?: string | null
+          group_id?: string | null
+          group_key?: string | null
+          id?: string
+          message_id?: string | null
+          opened_at?: string | null
+          priority?: number
+          read_at?: string | null
+          type?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      notification_types: {
+        Row: {
+          bypass_mute: boolean
+          category: string
+          daytime_only: boolean
+          priority: number
+          push_ttl: unknown
+          social: boolean
+          type: string
+        }
+        Insert: {
+          bypass_mute?: boolean
+          category: string
+          daytime_only?: boolean
+          priority: number
+          push_ttl?: unknown
+          social?: boolean
+          type: string
+        }
+        Update: {
+          bypass_mute?: boolean
+          category?: string
+          daytime_only?: boolean
+          priority?: number
+          push_ttl?: unknown
+          social?: boolean
+          type?: string
+        }
+        Relationships: []
+      }
       point_events: {
         Row: {
           created_at: string
@@ -760,6 +940,7 @@ export type Database = {
           approvals: number
           group_invites: number
           event_chat_unread: number
+          notifications_unread: number
         }[]
       }
       create_group_from_event: {
@@ -909,6 +1090,48 @@ export type Database = {
       my_invite_stats: {
         Args: Record<PropertyKey, never>
         Returns: { shared: number; accepted: number }[]
+      }
+      my_notifications: {
+        Args: { _before?: string; _limit?: number }
+        Returns: {
+          id: string
+          type: string
+          category: string
+          count: number
+          created_at: string
+          updated_at: string
+          read_at: string | null
+          data: Json
+          actor_id: string | null
+          actor_name: string | null
+          actor_avatar: string | null
+          event_id: string | null
+          event_title: string | null
+          event_starts_at: string | null
+          group_id: string | null
+          group_name: string | null
+          is_dm: boolean
+        }[]
+      }
+      mark_notifications_read: {
+        Args: { _ids?: string[] }
+        Returns: number
+      }
+      mark_notification_opened: {
+        Args: { _id: string }
+        Returns: undefined
+      }
+      muted_event_chats: {
+        Args: Record<PropertyKey, never>
+        Returns: { event_id: string; title: string; starts_at: string }[]
+      }
+      invite_friends_to_event: {
+        Args: { _event_id: string; _friend_ids: string[] }
+        Returns: number
+      }
+      set_group_chat_presence: {
+        Args: { _group_id: string; _active: boolean }
+        Returns: undefined
       }
       search_people: {
         Args: { _query: string; _limit?: number; _offset?: number }

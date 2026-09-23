@@ -47,6 +47,10 @@ const RPC_ERROR_KEYS: Record<string, string> = {
   NOT_THE_ORGANIZER: 'rpcErrors.notTheOrganizer',
   REMOVED_FROM_EVENT: 'rpcErrors.removedFromEvent',
   NOT_A_PARTICIPANT: 'rpcErrors.notAParticipant',
+  // Invitar amigos a una actividad (20260925).
+  TOO_MANY_INVITES: 'rpcErrors.tooManyInvites',
+  INVITE_RATE_LIMIT: 'rpcErrors.inviteRateLimit',
+  EVENT_NOT_OPEN: 'rpcErrors.eventNotOpen',
 };
 
 export function rpcMessage(raw: string | undefined, t: TFunction): string {

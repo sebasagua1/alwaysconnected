@@ -32,6 +32,7 @@ export function useNotificationSync() {
       groupInvites: Number((row as { group_invites?: number }).group_invites ?? 0),
       // Igual: hasta aplicar 20260923 la base no la devuelve.
       eventChatUnread: Number((row as { event_chat_unread?: number }).event_chat_unread ?? 0),
+      notificationsUnread: Number((row as { notifications_unread?: number }).notifications_unread ?? 0),
     });
   }, [user, setCounts]);
 
@@ -75,6 +76,12 @@ export function useNotificationSync() {
       .on('postgres_changes', {
         event: 'INSERT', schema: 'public', table: 'messages',
         filter: `sender_id=neq.${user.id}`,
+      }, scheduleRefresh)
+      // La campana: avisos nuevos o agrupados (UPDATE) y los marcados como
+      // leídos desde otro dispositivo.
+      .on('postgres_changes', {
+        event: '*', schema: 'public', table: 'notifications',
+        filter: `user_id=eq.${user.id}`,
       }, scheduleRefresh)
       .subscribe();
 

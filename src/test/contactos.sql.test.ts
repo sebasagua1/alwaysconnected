@@ -170,12 +170,14 @@ describe('la agenda solo se guarda si pides el aviso', () => {
     await ajustes(U.nuevo, true, false);
     const [{ n }] = await registrar(U.nuevo, D.nuevo);
     expect(n).toBe(1);
-    const avisos = (await peticiones(db)).filter((p) => (p.body.data as { type?: string })?.type === 'contact_joined');
-    expect(avisos.map((p) => p.body.user_id)).toEqual([U.yo]);
+    // Desde 20260925 el aviso va a la bandeja y a la cola (notify), no a send-push.
+    const avisos = async () => (await db.query<{ user_id: string; actor_id: string }>(
+      `SELECT user_id, actor_id FROM public.notifications WHERE type = 'contact_joined'`)).rows;
+    expect(await avisos()).toEqual([{ user_id: U.yo, actor_id: U.nuevo }]);
 
     // Registrar otra vez (cada arranque de la app) no vuelve a avisar.
     await registrar(U.nuevo, D.nuevo);
-    expect((await peticiones(db)).filter((p) => (p.body.data as { type?: string })?.type === 'contact_joined')).toEqual([]);
+    expect((await avisos()).length).toBe(1);
   });
 
   it('apagar el aviso borra la agenda guardada', async () => {

@@ -3,6 +3,7 @@ import { BottomNav } from './BottomNav';
 import { PageTransition } from './PageTransition';
 import { useNotificationSync } from '@/hooks/useNotificationSync';
 import { PendingInvite } from '@/components/friends/PendingInvite';
+import { useNotificationPrefsSync } from '@/hooks/useNotificationPrefsSync';
 
 /** Rueda que ocupa solo el hueco del contenido, sin comerse la barra. */
 function ContentSpinner() {
@@ -17,6 +18,8 @@ export function AppShell() {
   // Una sola suscripción para toda la app: los contadores los comparte el
   // store, así que no hace falta que cada pantalla monte la suya.
   useNotificationSync();
+  // Zona horaria e idioma para el horario silencioso y el texto de las push.
+  useNotificationPrefsSync();
 
   return (
     <div className="mx-auto sm:max-w-[430px] min-h-screen relative bg-background">

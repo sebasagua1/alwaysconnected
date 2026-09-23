@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS auth.users (
   id                 uuid PRIMARY KEY,
   email              text,
   email_confirmed_at timestamptz,
+  encrypted_password text,
   phone              text,
   phone_confirmed_at timestamptz,
   raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb,

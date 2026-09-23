@@ -10,6 +10,8 @@ export interface NotificationCounts {
   groupInvites: number;
   /** Mensajes sin leer en los chats de las actividades en las que estoy. */
   eventChatUnread: number;
+  /** Avisos sin leer del centro de notificaciones (la campana). */
+  notificationsUnread: number;
 }
 
 interface NotificationState extends NotificationCounts {
@@ -25,7 +27,7 @@ interface NotificationState extends NotificationCounts {
   setRefresh: (fn: () => void | Promise<void>) => void;
 }
 
-const EMPTY: NotificationCounts = { joinRequests: 0, friendRequests: 0, unreadMessages: 0, approvals: 0, groupInvites: 0, eventChatUnread: 0 };
+const EMPTY: NotificationCounts = { joinRequests: 0, friendRequests: 0, unreadMessages: 0, approvals: 0, groupInvites: 0, eventChatUnread: 0, notificationsUnread: 0 };
 
 export const useNotificationStore = create<NotificationState>((set) => ({
   ...EMPTY,

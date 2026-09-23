@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { UserPlus, Users, MessageCircle, Check, X as XIcon, Plus, Trophy, Medal } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -27,6 +27,7 @@ import { pageTitle } from '@/lib/brand';
 import { formatChatTime } from '@/lib/chat';
 import { FindPeople } from '@/components/friends/FindPeople';
 import { GroupInvites } from '@/components/chat/GroupInvites';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
 
 type FriendData = Pick<
   Database['public']['Views']['public_profiles']['Row'],
@@ -96,6 +97,15 @@ export default function Friends() {
   const [leaderboard, setLeaderboard] = useState<LeaderEntry[]>([]);
   /** Persona cuya ficha se está mirando. */
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
+  // Desde un aviso ("X aceptó tu solicitud", "quizá conozcas a…"): abrir su ficha.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const person = searchParams.get('person');
+    if (person && /^[0-9a-f-]{36}$/i.test(person)) {
+      setViewingUserId(person);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
   const [leaderLoading, setLeaderLoading] = useState(false);
   const [leaderOffset, setLeaderOffset] = useState(0);
   const [leaderHasMore, setLeaderHasMore] = useState(true);
@@ -457,6 +467,8 @@ export default function Friends() {
         <h1 className="text-2xl font-extrabold text-foreground">{t('friends.title')}</h1>
         {/* Contactos e invitaciones: nunca se pide el permiso sin pasar antes
             por la pantalla que explica para qué. */}
+        <span className="flex items-center gap-1">
+        <NotificationBell />
         <button
           onClick={() => navigate('/friends/find')}
           className="inline-flex items-center gap-1.5 min-h-[44px] px-3 rounded-full bg-primary/10 text-primary text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -464,6 +476,7 @@ export default function Friends() {
           <UserPlus className="w-4 h-4" aria-hidden="true" />
           {t('findFriends.entry')}
         </button>
+        </span>
       </div>
 
       {/* Tabs */}

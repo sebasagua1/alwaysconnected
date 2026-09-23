@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { MapEvent, useEventStore } from '@/stores/eventStore';
@@ -15,7 +15,8 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import { Clock, MapPin, Users, X, Loader2, Pencil, Star, MessagesSquare, ChevronRight } from 'lucide-react';
+import { Clock, MapPin, Users, X, Loader2, Pencil, Star, MessagesSquare, ChevronRight, UserPlus } from 'lucide-react';
+import { InviteFriendsSheet } from '@/components/map/InviteFriendsSheet';
 import { CATEGORY_ICONS } from '@/lib/categoryIcons';
 import { EditEventSheet } from '@/components/map/EditEventSheet';
 import { useAuthStore } from '@/stores/authStore';
@@ -78,6 +79,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
   const navigate = useNavigate();
   /** Mensajes sin leer en el chat del grupo; null mientras no se sabe. */
   const [chatUnread, setChatUnread] = useState<number | null>(null);
+  const [inviteOpen, setInviteOpen] = useState(false);
 
   // La ventana de check-in la decide isWithinCheckInWindow, que abre 15 min
   // ANTES de starts_at igual que check_in_to_event() en la base de datos.
@@ -388,6 +390,8 @@ export function EventBottomSheet({ event, onClose }: Props) {
   };
 
   const eventEnded = Date.now() > new Date(event.ends_at).getTime();
+  // Estable entre renders: la hoja de invitar vuelve a pedir amigos si cambia.
+  const attendeeIds = useMemo(() => attendees.map((a) => a.user_id), [attendees]);
 
   return (
     <>
@@ -594,6 +598,17 @@ export function EventBottomSheet({ event, onClose }: Props) {
           </button>
         )}
 
+        {/* Invitar amigos: quien ya está dentro y mientras no haya empezado. */}
+        {!checking && inChat && chatUnread !== null && new Date(event.starts_at).getTime() > Date.now() && (
+          <button
+            onClick={() => setInviteOpen(true)}
+            className="w-full mb-4 flex items-center justify-center gap-2 min-h-[44px] rounded-xl border border-border text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <UserPlus className="w-4 h-4" aria-hidden="true" />
+            {t('inviteFriends.open')}
+          </button>
+        )}
+
         {/* Terminó: qué hacer ahora, para quien organizó o fue. */}
         {!checking && eventEnded && user && (isCreator || hasJoined) && (
           <PostEventActions event={event} attendees={attendees} myId={user.id} onClose={onClose} />
@@ -754,6 +769,10 @@ export function EventBottomSheet({ event, onClose }: Props) {
         onClose={() => setEditOpen(false)}
         onSaved={onClose}
       />
+    )}
+
+    {inviteOpen && (
+      <InviteFriendsSheet eventId={event.id} open={inviteOpen} onOpenChange={setInviteOpen} exclude={attendeeIds} />
     )}
 
     {/* Tocar a alguien de "Quién va" abre su ficha, encima de la hoja. */}

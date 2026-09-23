@@ -15,6 +15,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { format, isPast, formatDistanceToNow } from 'date-fns';
 import { es as esLocale, enUS } from 'date-fns/locale';
 import { pageTitle } from '@/lib/brand';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
 
 // Extiende MapEvent porque la tarjeta abre el mismo EventBottomSheet que el
 // mapa, y ese componente necesita el evento completo (creator_id, privacy...),
@@ -167,7 +168,10 @@ export default function MyEvents() {
         <meta property="og:description" content={t('myEvents.metaDesc')} />
         <meta property="og:url" content="/events" />
       </Helmet>
-      <h1 className="text-2xl font-extrabold text-foreground mb-4">{t('myEvents.title')}</h1>
+      <div className="flex items-center justify-between gap-2 mb-4">
+        <h1 className="text-2xl font-extrabold text-foreground">{t('myEvents.title')}</h1>
+        <NotificationBell />
+      </div>
 
       {/* Tabs */}
       <div className="flex gap-2 mb-5">

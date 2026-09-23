@@ -4,6 +4,7 @@ import { PushNotifications } from '@capacitor/push-notifications';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
 import { savePendingInvite } from '@/lib/contacts';
+import { routeForNotification } from '@/lib/notifications';
 
 /**
  * Enlaces profundos y salto desde una notificación.
@@ -32,7 +33,9 @@ export const AUTH_CALLBACK_URL = `${APP_URL_SCHEME}://auth-callback`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Rutas sin parámetros que la app sabe abrir. Ver las <Route> de App.tsx. */
-const STATIC_ROUTES = new Set(['/', '/events', '/friends', '/profile', '/friends/find']);
+const STATIC_ROUTES = new Set([
+  '/', '/events', '/friends', '/profile', '/friends/find', '/notifications', '/settings/notifications',
+]);
 
 /** Código de invitación: 10 caracteres opacos (ver my_invite_code). */
 const INVITE = /^\/i\/([A-Za-z0-9]{10})$/;
@@ -59,6 +62,10 @@ export function routeFromPath(path: string): string | null {
   // El chat de una actividad.
   const eventChat = clean.match(/^\/events\/([^/]+)\/chat$/);
   if (eventChat && UUID.test(eventChat[1])) return clean;
+
+  // La ficha de una actividad (desde un aviso).
+  const event = clean.match(/^\/event\/([^/]+)$/);
+  if (event && UUID.test(event[1])) return clean;
 
   return null;
 }
@@ -90,37 +97,31 @@ export function routeFromUrl(url: string): string | null {
 export function routeFromPushData(data: unknown): string | null {
   if (!data || typeof data !== 'object') return null;
   const d = data as Record<string, unknown>;
+  if (typeof d.type !== 'string' || !d.type) return null;
 
-  switch (d.type) {
-    case 'message':
-      return typeof d.group_id === 'string' ? routeFromPath(`/groups/${d.group_id}`) : null;
-    // Chat de actividad: mensajes agrupados, menciones y avisos del
-    // organizador abren el chat de esa actividad (20260923000000).
-    case 'event_message':
-    case 'chat_mention':
-    case 'organizer_announcement':
-      return typeof d.event_id === 'string' ? routeFromPath(`/events/${d.event_id}/chat`) : null;
-    // Las invitaciones a grupos se responden arriba de la pestaña Amigos.
-    case 'friend_request':
-    case 'group_invite':
-      return '/friends';
-    // El plan repetido aparece en el mapa, como cualquier evento nuevo.
-    case 'event_repeat':
-      return '/';
-    // Ambas se atienden desde "Mis eventos": ahí están los que organizas, con
-    // sus solicitudes, y los que te han aprobado.
-    //
-    // 'event_started' va al mismo sitio y no al mapa: el aviso es para
-    // registrar asistencia, y el botón vive dentro de la hoja del evento.
-    // En "Mis eventos" el que acaba de empezar está arriba en "Próximos";
-    // en el mapa habría que buscar el pin.
-    case 'join_request':
-    case 'approval':
-    case 'event_started':
-      return '/events';
-    default:
-      return null;
-  }
+  // Solo ids con forma de uuid: la carga la escribe el servidor, pero un
+  // enlace a una ruta nunca se arma con texto que no se ha comprobado.
+  const uuid = (v: unknown) => (typeof v === 'string' && UUID.test(v) ? v : null);
+  const route = routeForNotification({
+    type: d.type,
+    event_id: uuid(d.event_id),
+    group_id: uuid(d.group_id),
+    // requester_id: nombre de la solicitud de amistad en las cargas de 1.x.
+    actor_id: uuid(d.user_id) ?? uuid(d.requester_id),
+  });
+  if (!route) return null;
+
+  // La ficha de una persona va por query (?person=), que routeFromPath quita.
+  const person = route.match(/^\/friends\?person=([0-9a-f-]+)$/i);
+  if (person && UUID.test(person[1])) return route;
+  return routeFromPath(route);
+}
+
+/** El id de la notificación que abrió la app, para contar la apertura. */
+export function notificationIdFromPushData(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null;
+  const id = (data as Record<string, unknown>).notification_id;
+  return typeof id === 'string' && UUID.test(id) ? id : null;
 }
 
 /**
@@ -265,7 +266,11 @@ export async function initDeepLinks(): Promise<void> {
     });
 
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
-      go(routeFromPushData(action.notification?.data));
+      const data = action.notification?.data;
+      const id = notificationIdFromPushData(data);
+      // Métrica de apertura y marcarla leída. Sin await: navegar no espera.
+      if (id) void supabase.rpc('mark_notification_opened', { _id: id });
+      go(routeFromPushData(data));
     });
 
     // Si la app se abrió DESDE un enlace, ese appUrlOpen ya pasó sin oyente.

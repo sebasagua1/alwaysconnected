@@ -33,6 +33,39 @@ supabase secrets set APP_ORIGIN=https://TU-DOMINIO.vercel.app
 > El token de Mapbox NO va aquí: es público y viaja en el bundle vía
 > `VITE_MAPBOX_TOKEN`. Se restringe por dominio desde el panel de Mapbox.
 
+### 1.3 bis Chat de actividad, contactos y notificaciones
+
+Orden de aplicación en el SQL Editor (todas toleran ejecutarse dos veces):
+
+1. `20260916000000_buscar-personas.sql` (si aún no está: la usan la búsqueda
+   y las sugerencias).
+2. `20260923000000_chat-de-actividad.sql`
+3. `20260924000000_contactos-e-invitaciones.sql`
+4. `20260925000000_notificaciones.sql` — cambia TODOS los avisos a la cola
+   nueva. Hasta desplegar `notify-dispatch` (paso siguiente) los avisos se
+   quedan en la bandeja de la app y no salen como push.
+5. `20260925010000_programar-notificaciones.sql` (pg_cron).
+
+Funciones y secretos:
+```bash
+supabase functions deploy notify-dispatch --project-ref myarlozvkbebygwszgkf
+supabase functions deploy contacts-match --project-ref myarlozvkbebygwszgkf
+# 32+ caracteres aleatorios. NUNCA cambiarlo después: las huellas guardadas
+# dejarían de coincidir. Guárdalo también en el Llavero.
+supabase secrets set CONTACTS_HMAC_KEY="$(openssl rand -hex 32)" --project-ref myarlozvkbebygwszgkf
+```
+`notify-dispatch` reutiliza los secretos de APNs de `send-push`
+(`APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY`) y la clave de servidor de
+Vault (`service_role_key`) con la que la base la despierta. `send-push` se
+queda desplegada: nada la llama ya, pero sirve para pruebas manuales.
+
+Comprobar tras aplicar:
+```sql
+select jobname, schedule from cron.job order by jobname;
+select status, count(*) from public.notification_deliveries group by 1;
+select status_code, created from net._http_response order by created desc limit 5;
+```
+
 ### 1.4 Configurar Auth (Dashboard → Authentication)
 - **URL Configuration** → agrega la URL de producción a *Site URL* y *Redirect URLs*
   (ej. `https://TU-DOMINIO.vercel.app`). Sin esto, el login con Google falla en prod.

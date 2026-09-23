@@ -31,11 +31,13 @@ const U = {
 let db: PGlite;
 let ev: string;
 
-const enviar = (uid: string, evento: string, contenido: string, extra: { mentions?: string[]; anuncio?: boolean } = {}) =>
+const enviar = (uid: string, evento: string, contenido: string, extra: { mentions?: string[]; anuncio?: boolean } | string[] = {}) =>
   falla(
     db, uid,
     `INSERT INTO public.messages (event_id, sender_id, content, mentions, is_announcement) VALUES ($1, $2, $3, $4, $5)`,
-    [evento, uid, contenido, extra.mentions ?? [], extra.anuncio ?? false],
+    Array.isArray(extra)
+      ? [evento, uid, contenido, extra, false]
+      : [evento, uid, contenido, extra.mentions ?? [], extra.anuncio ?? false],
   );
 
 const leer = (uid: string, evento: string) =>
@@ -268,62 +270,69 @@ describe('leídos, silencio y contadores', () => {
   });
 });
 
-describe('push del chat', () => {
-  beforeEach(async () => { await peticiones(db); });
+describe('avisos del chat', () => {
+  // Desde 20260925000000 no se llama a send-push directamente: se encola con
+  // notify() (bandeja + cola) y se despierta a notify-dispatch. Las reglas son
+  // las mismas; aquí se comprueban sobre lo que queda encolado.
+  beforeEach(async () => {
+    await peticiones(db);
+    await db.exec(`DELETE FROM public.notifications`);
+  });
 
-  const destinatarios = async () =>
-    (await peticiones(db))
-      .filter((p) => p.url.endsWith('/send-push'))
-      .map((p) => ({ user: p.body.user_id as string, type: (p.body.data as { type: string }).type }));
+  const avisos = async (evento: string) =>
+    (await db.query<{ user_id: string; type: string; count: number }>(
+      `SELECT user_id, type, count FROM public.notifications WHERE event_id = $1 ORDER BY user_id, type`, [evento])).rows;
 
   it('avisa a los demás, nunca a quien escribe, y agrupa los seguidos', async () => {
     const e = await crearEvento(db, U.org, 'Voley');
     await unirse(db, U.ana, e);
     await unirse(db, U.luis, e);
     await prepararPush(db, U.org, U.ana, U.luis);
-    await peticiones(db);
+    await db.exec(`DELETE FROM public.notifications`);
 
     await enviar(U.ana, e, 'primero');
-    expect((await destinatarios()).map((d) => d.user).sort()).toEqual([U.org, U.luis].sort());
-
     await enviar(U.ana, e, 'segundo, justo después');
-    expect(await destinatarios()).toEqual([]);
+    const n = (await avisos(e)).filter((a) => a.type === 'event_message');
+    expect(n.map((a) => a.user_id).sort()).toEqual([U.org, U.luis].sort());
+    expect(n.every((a) => a.count === 2)).toBe(true);
+    // Se despierta al despachador, no a send-push.
+    const urls = (await peticiones(db)).map((p) => p.url);
+    expect(urls.some((u) => u.endsWith('/notify-dispatch'))).toBe(true);
+    expect(urls.some((u) => u.endsWith('/send-push'))).toBe(false);
 
-    // Tras leer, el siguiente vuelve a avisar.
+    // Tras leer, lo siguiente abre un aviso nuevo.
     await rpc(U.luis, `SELECT public.mark_event_chat_read($1)`, [e]);
     await enviar(U.ana, e, 'tercero');
-    expect((await destinatarios()).map((d) => d.user)).toEqual([U.luis]);
+    const deLuis = (await avisos(e)).filter((a) => a.user_id === U.luis);
+    expect(deLuis.map((a) => a.count)).toEqual([2, 1]);
   });
 
   it('silenciado no avisa, pero una mención sí', async () => {
     const e = await crearEvento(db, U.org, 'Pádel');
     await unirse(db, U.ana, e);
     await unirse(db, U.luis, e);
-    await prepararPush(db, U.org, U.ana, U.luis);
     await rpc(U.luis, `SELECT public.set_event_chat_muted($1, true)`, [e]);
-    await peticiones(db);
+    await db.exec(`DELETE FROM public.notifications`);
 
     await enviar(U.ana, e, 'normal');
-    expect((await destinatarios()).map((d) => d.user)).toEqual([U.org]);
+    expect((await avisos(e)).filter((a) => a.user_id === U.luis)).toEqual([]);
 
-    await enviar(U.ana, e, '@Luis mira', { mentions: [U.luis] });
-    const d = await destinatarios();
-    expect(d.find((x) => x.user === U.luis)?.type).toBe('chat_mention');
+    await enviar(U.ana, e, '@Luis mira', [U.luis]);
+    expect((await avisos(e)).find((a) => a.user_id === U.luis)?.type).toBe('chat_mention');
   });
 
-  it('con el chat abierto no hay push', async () => {
+  it('con el chat abierto no hay aviso', async () => {
     const e = await crearEvento(db, U.org, 'Ajedrez');
     await unirse(db, U.ana, e);
-    await prepararPush(db, U.org, U.ana);
     await rpc(U.org, `SELECT public.set_event_chat_presence($1, true)`, [e]);
-    await peticiones(db);
+    await db.exec(`DELETE FROM public.notifications`);
 
     await enviar(U.ana, e, 'org está mirando');
-    expect(await destinatarios()).toEqual([]);
+    expect((await avisos(e)).filter((a) => a.user_id === U.org)).toEqual([]);
 
     await rpc(U.org, `SELECT public.set_event_chat_presence($1, false)`, [e]);
     await enviar(U.ana, e, 'ya se fue');
-    expect((await destinatarios()).map((d) => d.user)).toEqual([U.org]);
+    expect((await avisos(e)).filter((a) => a.user_id === U.org).map((a) => a.type)).toEqual(['event_message']);
   });
 });
 

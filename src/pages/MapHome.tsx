@@ -22,6 +22,7 @@ import i18n from '@/i18n';
 import mapboxgl, { type Map as MapboxMap, type Marker as MapboxMarker } from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { pageTitle } from '@/lib/brand';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
 import { useInstitutionCenter } from '@/hooks/useInstitutionCenter';
 import { toMapEvent, needsServerCheck, type EventRow } from '@/lib/eventSync';
 import { matchesFilter, filterEvents, countActiveFilters, dependsOnClock } from '@/lib/eventFilter';
@@ -994,6 +995,7 @@ export default function MapHome() {
                 </span>
               )}
             </button>
+            <NotificationBell floating />
           </div>
           <div className="flex gap-2 items-center">
             <div className="flex gap-2 overflow-x-auto no-scrollbar py-1 flex-1">
