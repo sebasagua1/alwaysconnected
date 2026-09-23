@@ -29,6 +29,12 @@ jobs:
   comprobar:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # FICTICIAS a proposito (vienen de la auditoria, PR #17): el cliente de
+    # Supabase se crea al importar el modulo, y sin ellas revienta cualquier
+    # prueba que lo importe de refilon. Nada de aqui habla con Supabase.
+    env:
+      VITE_SUPABASE_URL: https://dummy.supabase.co
+      VITE_SUPABASE_PUBLISHABLE_KEY: dummy-anon-key
 
     steps:
       - uses: actions/checkout@v4

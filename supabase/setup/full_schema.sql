@@ -3,7 +3,7 @@
 -- Pegar en el SQL Editor de un proyecto Supabase NUEVO y ejecutar.
 --
 -- NO EDITAR A MANO: lo genera scripts/gen-full-schema.mjs.
--- Migraciones incluidas: 53 (hasta 20260925010000_programar-notificaciones.sql).
+-- Migraciones incluidas: 57 (hasta 20260925010000_programar-notificaciones.sql).
 --
 -- NOTA: se omite el bloque de RLS sobre realtime.messages (tabla
 -- interna de Supabase) porque el SQL Editor no es su dueño. El
@@ -5453,8 +5453,12 @@ CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pg_trgm  WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
--- Misma definicion que en 20260916000000_buscar-personas.sql: la que se
--- aplique primero la crea y la otra la deja igual.
+-- Aqui se define search_normalize(). El comentario anterior la daba por
+-- compartida con 20260916000000_buscar-personas.sql, un archivo que no esta
+-- en el repositorio (vive sin aplicar en la rama feat/buscar-personas). La
+-- busqueda de personas de hoy es un ilike sobre public_profiles
+-- (Friends.tsx), no esta funcion. Si algun dia entra esa migracion, el
+-- CREATE OR REPLACE deja la definicion igual y no hay conflicto.
 CREATE OR REPLACE FUNCTION public.search_normalize(_t text)
 RETURNS text
 LANGUAGE sql
@@ -8689,6 +8693,463 @@ GRANT  EXECUTE ON FUNCTION public.notification_counts() TO authenticated;
 
 COMMIT;
 
+-- >>> 20260920000000_auditoria-columnas-escribibles.sql <<<
+-- ============================================================
+-- Auditoria 2026-09-18: columnas escribibles que nadie protegia
+--
+-- Causa raiz unica de los tres huecos (SEC-01, SEC-02, SEC-04) y de los
+-- dos derivados (SEC-05, SEC-08):
+--
+--   En Supabase, el rol `authenticated` puede escribir TODA columna de una
+--   tabla que tenga politica de escritura, salvo que un disparador o un
+--   WITH CHECK lo impida explicitamente.
+--
+-- El proyecto protegia valores concretos con disparadores dirigidos
+-- (prevent_status_tampering, prevent_score_tampering, guard_message_update)
+-- y esos funcionan. Lo que faltaba era el invariante general: las rutas
+-- LATERALES quedaron abiertas.
+--
+-- Lo que cierra, por hallazgo:
+--   1. SEC-01 (P0) event_participants UPDATE sin WITH CHECK: se podia mover
+--      la propia fila a CUALQUIER event_id, saltandose aprobacion, aforo y
+--      aislamiento por institucion.
+--   2. SEC-02 (P1) friendships INSERT con status='accepted': amistad
+--      autoconcedida, que es la llave de create_dm, add_group_member y los
+--      eventos privacy='friends'.
+--   3. SEC-04 (P1) events.created_at escribible: anulaba el limite de
+--      creacion de 20260903000000 (200/200 eventos en la prueba).
+--   4. Bonus del mismo invariante: events.institution_id y events.creator_id
+--      tampoco estaban protegidos en UPDATE (trg_set_event_institution es
+--      BEFORE INSERT). Un evento podia mudarse de campus despues de creado.
+--   5. SEC-08 (P2) messages.created_at futuro: contador de no leidos que no
+--      se apaga nunca (mark_group_read fija last_read_at = now()).
+--   6. SEC-05 (P2) sin limites de longitud en servidor, y el titulo sin
+--      truncar en la push de plan repetido (APNs corta en 4 KB).
+--   7. PERF-01 (P2) los dos indices que faltan.
+--
+-- Por que SECURITY INVOKER en los guardianes nuevos: necesitan ver
+-- current_user = 'authenticated' para distinguir al cliente del
+-- service_role. Dentro de SECURITY DEFINER, current_user es el DUENO de la
+-- funcion (postgres) y la condicion no se cumple NUNCA. Es exactamente la
+-- trampa que documenta 20260820000000.
+--
+-- No borra ni reescribe datos de usuario. ASCII puro. Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. SEC-01 (P0): la participacion no se muda de evento
+--
+-- La politica declaraba USING sin WITH CHECK. En PostgreSQL eso reutiliza
+-- USING como comprobacion de la fila NUEVA, y USING solo mira user_id: la
+-- fila resultante pasaba siempre que el atacante siguiera siendo su dueno.
+-- event_id no lo miraba nadie.
+--
+-- Los tres disparadores que ya habia no cubrian el hueco:
+--   * set_participant_initial_status  BEFORE INSERT  (no corre en UPDATE)
+--   * prevent_status_tampering        BEFORE UPDATE  (solo compara status)
+--   * recalc_event_spots              AFTER UPDATE OF status
+--     WHEN (OLD.status IS DISTINCT FROM NEW.status) -> un cambio de
+--     event_id ni siquiera recalculaba current_spots.
+-- ------------------------------------------------------------
+DROP POLICY IF EXISTS "Users can update own participation" ON public.event_participants;
+
+CREATE POLICY "Users can update own participation"
+  ON public.event_participants FOR UPDATE TO authenticated
+  USING      (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
+-- Cinturon ademas del tirante: event_id, user_id y joined_at son inmutables
+-- desde el cliente. El WITH CHECK de arriba ya cierra el ataque; esto deja
+-- el invariante escrito donde se ve, y da un codigo estable que el cliente
+-- traduce en vez del error generico de RLS.
+CREATE OR REPLACE FUNCTION public.guard_participation_update()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera.
+SET search_path = public
+AS $$
+BEGIN
+  IF current_user = 'authenticated'
+     AND (NEW.event_id  IS DISTINCT FROM OLD.event_id
+       OR NEW.user_id   IS DISTINCT FROM OLD.user_id
+       OR NEW.joined_at IS DISTINCT FROM OLD.joined_at) THEN
+    RAISE EXCEPTION 'PARTICIPATION_FIELD_LOCKED'
+      USING ERRCODE = '42501',
+            HINT    = 'event_id, user_id y joined_at no se cambian desde el cliente.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_participation_update() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_participation_update ON public.event_participants;
+CREATE TRIGGER trg_guard_participation_update
+  BEFORE UPDATE ON public.event_participants
+  FOR EACH ROW EXECUTE FUNCTION public.guard_participation_update();
+
+
+-- ------------------------------------------------------------
+-- 2. SEC-02 (P1): el estado de una amistad lo decide el servidor
+--
+-- La politica de INSERT comprueba requester_id y bloqueo, pero no status,
+-- y la columna acepta 'accepted' directamente. No habia ningun BEFORE
+-- INSERT sobre friendships: el unico disparador es trg_friend_request_push,
+-- AFTER INSERT y ademas WHEN (NEW.status = 'pending'), asi que la via de
+-- ataque ni siquiera generaba la notificacion que alertaria a la victima.
+--
+-- Mismo patron que set_participant_initial_status, que ya hacia esto bien
+-- en event_participants. La leccion se habia aplicado en una tabla y no en
+-- la otra.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.set_friendship_initial_status()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera.
+SET search_path = public
+AS $$
+BEGIN
+  -- Las escrituras de service_role y las migraciones pasan tal cual.
+  IF current_user = 'authenticated' THEN
+    NEW.status     := 'pending';
+    NEW.created_at := now();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_friendship_initial_status() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_set_friendship_initial_status ON public.friendships;
+CREATE TRIGGER trg_set_friendship_initial_status
+  BEFORE INSERT ON public.friendships
+  FOR EACH ROW EXECUTE FUNCTION public.set_friendship_initial_status();
+
+
+-- ------------------------------------------------------------
+-- 3. SEC-04 (P1) + aislamiento: lo que el cliente no pone en events
+--
+-- created_at tenia DEFAULT now() pero ningun disparador la fijaba, y el
+-- limite de 20260903000000 cuenta filas filtrando por esa misma columna:
+-- mandando created_at en el pasado, el recuento siempre daba cero.
+--
+-- institution_id y creator_id son el mismo descuido en UPDATE:
+-- trg_set_event_institution es BEFORE INSERT, asi que un evento ya creado
+-- podia mudarse a otro campus con un solo PATCH.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.set_event_created_at()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera.
+SET search_path = public
+AS $$
+BEGIN
+  IF current_user = 'authenticated' THEN
+    NEW.created_at := now();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_event_created_at() FROM PUBLIC, anon, authenticated;
+
+-- Prefijo 'a_' A PROPOSITO: los BEFORE de la misma tabla y evento se
+-- ejecutan en orden ALFABETICO, y este tiene que correr ANTES de
+-- trg_event_rate_limit o el limite seguiria contando con el created_at que
+-- mando el cliente. Mismo razonamiento que documenta 20260915000000 para
+-- trg_set_profile_campus.
+DROP TRIGGER IF EXISTS a_trg_set_event_created_at ON public.events;
+CREATE TRIGGER a_trg_set_event_created_at
+  BEFORE INSERT ON public.events
+  FOR EACH ROW EXECUTE FUNCTION public.set_event_created_at();
+
+CREATE OR REPLACE FUNCTION public.guard_event_update()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera.
+SET search_path = public
+AS $$
+BEGIN
+  IF current_user = 'authenticated'
+     AND (NEW.creator_id     IS DISTINCT FROM OLD.creator_id
+       OR NEW.institution_id IS DISTINCT FROM OLD.institution_id
+       OR NEW.created_at     IS DISTINCT FROM OLD.created_at) THEN
+    RAISE EXCEPTION 'EVENT_FIELD_LOCKED'
+      USING ERRCODE = '42501',
+            HINT    = 'creator_id, institution_id y created_at los pone el servidor.';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.guard_event_update() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_event_update ON public.events;
+CREATE TRIGGER trg_guard_event_update
+  BEFORE UPDATE ON public.events
+  FOR EACH ROW EXECUTE FUNCTION public.guard_event_update();
+
+-- La politica de UPDATE tampoco declaraba WITH CHECK. Explicito, por lo
+-- mismo que en event_participants.
+DROP POLICY IF EXISTS "Creators can update their events" ON public.events;
+
+CREATE POLICY "Creators can update their events"
+  ON public.events FOR UPDATE TO authenticated
+  USING      (auth.uid() = creator_id)
+  WITH CHECK (auth.uid() = creator_id);
+
+DROP POLICY IF EXISTS "Creators can update groups" ON public.groups;
+
+CREATE POLICY "Creators can update groups"
+  ON public.groups FOR UPDATE TO authenticated
+  USING      (auth.uid() = created_by)
+  WITH CHECK (auth.uid() = created_by);
+
+
+-- ------------------------------------------------------------
+-- 4. SEC-08 (P2): la fecha de envio de un mensaje la pone el servidor
+--
+-- mark_group_read() fija last_read_at = now(). Un mensaje con created_at en
+-- 2099 satisface `m.created_at > gm.last_read_at` para siempre: globo rojo
+-- permanente para todo el grupo, mensaje anclado al final del chat, y el
+-- chat fijado en lo alto de la lista por chat_summaries()/friends_page().
+--
+-- set_message_expiry ya hacia bien lo que a created_at le faltaba, asi que
+-- se le anade ahi mismo. OJO: pierde SECURITY DEFINER. Dentro de DEFINER,
+-- current_user es postgres y la condicion no se cumpliria nunca. La funcion
+-- no necesita privilegios: solo escribe en NEW.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.set_message_expiry()
+RETURNS trigger
+LANGUAGE plpgsql
+-- INVOKER a proposito, ver cabecera. Antes era DEFINER sin necesitarlo.
+SET search_path = public
+AS $$
+BEGIN
+  -- Lo decide el servidor, no el cliente: si no, cualquiera podria mandar
+  -- mensajes que no caducan nunca (o que caducan al instante en la
+  -- conversacion de otro).
+  NEW.expires_at := now() + interval '90 days';
+
+  -- Y la fecha de envio, por la misma razon.
+  IF current_user = 'authenticated' THEN
+    NEW.created_at := now();
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_message_expiry() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_set_message_expiry ON public.messages;
+CREATE TRIGGER trg_set_message_expiry
+  BEFORE INSERT ON public.messages
+  FOR EACH ROW EXECUTE FUNCTION public.set_message_expiry();
+
+
+-- ------------------------------------------------------------
+-- 5. SEC-05 (P2): limites de longitud en el servidor
+--
+-- El cliente valida con zod (title 3-80, description <=500, address <=120)
+-- y EditEventSheet solo comprueba !title.trim(), pero eso es una
+-- comprobacion de navegador. Un title de 1 MB entraba sin problema, y el
+-- mapa descarga hasta 500 eventos de una vez.
+--
+-- NOT VALID a proposito: solo se aplica a filas NUEVAS, asi que la
+-- migracion no falla si ya existe alguna fila fuera de rango. El VALIDATE
+-- va justo despues y, si alguna fila historica lo impidiera, se puede
+-- quitar sin tocar la proteccion de lo nuevo.
+-- ------------------------------------------------------------
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'events_title_len') THEN
+    ALTER TABLE public.events
+      ADD CONSTRAINT events_title_len
+      CHECK (length(title) BETWEEN 3 AND 80) NOT VALID;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'events_description_len') THEN
+    ALTER TABLE public.events
+      ADD CONSTRAINT events_description_len
+      CHECK (description IS NULL OR length(description) <= 500) NOT VALID;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'events_address_len') THEN
+    ALTER TABLE public.events
+      ADD CONSTRAINT events_address_len
+      CHECK (address IS NULL OR length(address) <= 120) NOT VALID;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'groups_name_len') THEN
+    ALTER TABLE public.groups
+      ADD CONSTRAINT groups_name_len
+      CHECK (length(name) BETWEEN 1 AND 120) NOT VALID;
+  END IF;
+
+  -- deleted_at IS NOT NULL: borrar un mensaje lo deja con content vacio
+  -- (20260914000000 vacia el texto en vez de borrar la fila), y esa fila
+  -- tiene que seguir siendo valida.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'messages_content_len') THEN
+    ALTER TABLE public.messages
+      ADD CONSTRAINT messages_content_len
+      CHECK (length(content) <= 2000
+             AND (deleted_at IS NOT NULL OR length(btrim(content)) > 0)) NOT VALID;
+  END IF;
+END;
+$$;
+
+-- Validar lo que ya hay. Si alguna fila historica lo impidiera, el CHECK
+-- seguiria protegiendo lo nuevo: se quita este bloque y ya.
+ALTER TABLE public.events   VALIDATE CONSTRAINT events_title_len;
+ALTER TABLE public.events   VALIDATE CONSTRAINT events_description_len;
+ALTER TABLE public.events   VALIDATE CONSTRAINT events_address_len;
+ALTER TABLE public.groups   VALIDATE CONSTRAINT groups_name_len;
+ALTER TABLE public.messages VALIDATE CONSTRAINT messages_content_len;
+
+
+-- ------------------------------------------------------------
+-- 6. SEC-05 (P2): truncar el titulo en la push de plan repetido
+--
+-- APNs rechaza cargas de mas de 4 KB, asi que un titulo largo rompia la
+-- notificacion EN SILENCIO. on_message_push ya trunca a 120; esto aplica el
+-- mismo patron. Con el CHECK de arriba el titulo ya no pasa de 80, pero la
+-- push no deberia depender de eso.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.on_event_repeat_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_who   text;
+  v_title text;
+  r       record;
+BEGIN
+  -- Publicar y borrar para volver a publicar no vuelve a avisar.
+  IF EXISTS (
+    SELECT 1 FROM public.events e
+    WHERE e.repeated_from = NEW.repeated_from
+      AND e.creator_id = NEW.creator_id
+      AND e.id <> NEW.id
+      AND e.created_at > now() - interval '12 hours'
+  ) THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT COALESCE(NULLIF(p.name, ''), 'Alguien') INTO v_who
+  FROM public.profiles p WHERE p.id = NEW.creator_id;
+
+  v_title := left(NEW.title, 80);
+  IF length(NEW.title) > 80 THEN
+    v_title := v_title || U&'\2026';
+  END IF;
+
+  FOR r IN
+    SELECT DISTINCT g.uid
+    FROM (
+      SELECT o.creator_id AS uid FROM public.events o WHERE o.id = NEW.repeated_from
+      UNION
+      SELECT ep.user_id FROM public.event_participants ep
+      WHERE ep.event_id = NEW.repeated_from AND ep.status = 'joined'
+    ) g
+    WHERE g.uid <> NEW.creator_id
+      AND NOT public.is_blocked(g.uid, NEW.creator_id)
+      AND public.same_institution(g.uid, NEW.creator_id)
+      AND (
+        NEW.privacy IN ('open', 'private')
+        OR (NEW.privacy = 'friends' AND public.are_friends(NEW.creator_id, g.uid))
+      )
+    LIMIT 100
+  LOOP
+    PERFORM public.push_send(
+      r.uid,
+      'Se repite un plan',
+      COALESCE(v_who, 'Alguien') || U&' organiz\00F3 otra vez \00AB' || v_title || U&'\00BB. \00BFTe apuntas?',
+      jsonb_build_object('type', 'event_repeat', 'event_id', NEW.id)
+    );
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.on_event_repeat_push() FROM PUBLIC, anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 7. PERF-01 (P2): los dos indices que faltaban
+--
+-- profiles.campus_id: search_institutions cuenta perfiles por campus, y se
+-- llama en CADA pulsacion del selector del alta (hasta 50 campus por
+-- respuesta) -> recorrido secuencial de profiles por cada uno.
+--
+-- groups.name: friends_page busca el grupo de DM por nombre construido
+-- ('__dm_' || least || '_' || greatest) en un LATERAL, una vez por amigo de
+-- la pagina (hasta 100).
+--
+-- Sin CONCURRENTLY, por lo mismo que documentan 20260824000000 y
+-- 20260901000000: el SQL Editor ejecuta dentro de una transaccion.
+-- ------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS profiles_campus_id_idx
+  ON public.profiles (campus_id) WHERE campus_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS groups_name_idx
+  ON public.groups (name);
+
+
+-- ------------------------------------------------------------
+-- 8. DEBT-01 (P3): la rama muerta de messages.event_id
+--
+-- El chat de evento nunca llego a usarse: messages.event_id es NULL en
+-- todas las filas y el propio 20260827000000 lo reconoce por escrito. Pero
+-- las tres politicas de messages seguian evaluando esa rama en CADA lectura
+-- de mensaje, llamando a is_event_participant() para nada.
+--
+-- La COLUMNA se queda (borrarla es irreversible) con un COMMENT que lo
+-- explique. Lo que se va es la rama de las politicas.
+-- ------------------------------------------------------------
+DROP POLICY IF EXISTS "Users can view messages in their events or groups" ON public.messages;
+CREATE POLICY "Users can view messages in their events or groups"
+  ON public.messages FOR SELECT TO authenticated
+  USING (
+    NOT public.is_blocked(auth.uid(), sender_id)
+    AND (
+      sender_id = auth.uid()
+      OR (group_id IS NOT NULL AND public.is_group_member(group_id, auth.uid()))
+    )
+  );
+
+DROP POLICY IF EXISTS "Members can send messages" ON public.messages;
+CREATE POLICY "Members can send messages"
+  ON public.messages FOR INSERT TO authenticated
+  WITH CHECK (
+    sender_id = auth.uid()
+    AND group_id IS NOT NULL
+    AND public.is_group_member(group_id, auth.uid())
+  );
+
+DROP POLICY IF EXISTS "Senders can edit own messages" ON public.messages;
+CREATE POLICY "Senders can edit own messages"
+  ON public.messages FOR UPDATE TO authenticated
+  USING (
+    sender_id = auth.uid()
+    AND deleted_at IS NULL
+    AND group_id IS NOT NULL
+    AND public.is_group_member(group_id, auth.uid())
+  )
+  WITH CHECK (sender_id = auth.uid());
+
+COMMENT ON COLUMN public.messages.event_id IS
+  'MUERTA. El chat de evento nunca se implemento: NULL en todas las filas. '
+  'Se conserva la columna porque borrarla es irreversible, pero ninguna '
+  'politica ni consulta la mira desde 20260920000000.';
+
+COMMIT;
+
 -- >>> 20260920000000_perfiles-huerfanos.sql <<<
 -- ============================================================
 -- Cuentas sin perfil: rellenar las que faltan y cerrar el agujero
@@ -8930,6 +9391,107 @@ CREATE TRIGGER trg_prevent_orphan_profile_delete
 
 COMMIT;
 
+-- >>> 20260920010000_auditoria-bucket-avatars.sql <<<
+-- ============================================================
+-- Auditoria 2026-09-18: el bucket de avatares no tenia ningun limite
+--
+-- SEC-06 (P2). El bucket se creo en 20260325002039 asi:
+--
+--   INSERT INTO storage.buckets (id, name, public) VALUES ('avatars','avatars',true);
+--
+-- Sin file_size_limit y sin allowed_mime_types. La politica de INSERT solo
+-- acotaba la CARPETA (la primera parte del nombre tiene que ser tu uuid).
+-- El cliente se comporta bien --reduce la imagen y sube siempre a
+-- `<uuid>/avatar.jpg` con contentType image/jpeg-- pero eso es una
+-- convencion del cliente, no una restriccion.
+--
+-- Por la API directa, una cuenta autenticada podia:
+--   * subir archivos de cualquier tamano y en cualquier cantidad
+--     (almacenamiento y ancho de banda sin techo, y facturables), y
+--   * subir un archivo con Content-Type: text/html a un bucket PUBLICO,
+--     o sea alojar phishing servido desde un dominio *.supabase.co.
+--
+-- Se encadena con SEC-07 (el borrado de cuenta paginaba de 100 en 100 y
+-- dejaba lo que pasara del archivo 101).
+--
+-- VA EN MIGRACION APARTE a proposito: es la unica de esta tanda que puede
+-- rechazar algo que hoy existe. El bloque 2 comprueba primero si hay
+-- avatares con otro nombre y solo aprieta la politica si no los hay.
+--
+-- ASCII puro. Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. Limites del bucket
+--
+-- 2 MB y tres tipos de imagen. El recorte del cliente sale en JPEG y pesa
+-- muy por debajo; esto es el techo, no el objetivo.
+-- ------------------------------------------------------------
+UPDATE storage.buckets
+SET file_size_limit    = 2097152,
+    allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp']
+WHERE id = 'avatars';
+
+
+-- ------------------------------------------------------------
+-- 2. Un archivo por persona, con el nombre que usa la app
+--
+-- La politica pasa de "tu carpeta" a "tu unico archivo". Con esto, la
+-- cantidad deja de ser ilimitada: no se pueden acumular archivos porque
+-- solo cabe un nombre.
+--
+-- Si ya existe algun avatar con otro nombre (subido antes de que el cliente
+-- fijara la extension, o por la API a mano), apretar la politica dejaria a
+-- esa gente sin poder volver a subir foto. Asi que se comprueba antes y, si
+-- los hay, se deja la politica floja y se avisa: hay que renombrarlos o
+-- borrarlos primero y volver a pasar esta migracion.
+-- ------------------------------------------------------------
+DO $$
+DECLARE
+  v_raros int;
+BEGIN
+  SELECT count(*) INTO v_raros
+  FROM storage.objects
+  WHERE bucket_id = 'avatars'
+    AND name !~ '^[0-9a-fA-F-]{36}/avatar\.jpg$';
+
+  IF v_raros > 0 THEN
+    RAISE WARNING 'avatars: % objeto(s) con un nombre que la politica estricta rechazaria. Se deja la politica por carpeta. Revisalos con: SELECT name FROM storage.objects WHERE bucket_id=''avatars'' AND name !~ ''^[0-9a-fA-F-]{36}/avatar\.jpg$'';', v_raros;
+    RETURN;
+  END IF;
+
+  DROP POLICY IF EXISTS "Authenticated can upload own avatar" ON storage.objects;
+  CREATE POLICY "Authenticated can upload own avatar"
+  ON storage.objects FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'avatars'
+    AND auth.uid()::text = (storage.foldername(name))[1]
+    AND name = auth.uid()::text || '/avatar.jpg'
+  );
+
+  -- El cliente sube con upsert:true, asi que la segunda foto de cada
+  -- persona entra por UPDATE, no por INSERT. Sin WITH CHECK aqui, esa ruta
+  -- se saltaria el limite de nombre entero.
+  DROP POLICY IF EXISTS "Users can update own avatar" ON storage.objects;
+  CREATE POLICY "Users can update own avatar"
+  ON storage.objects FOR UPDATE TO authenticated
+  USING (
+    bucket_id = 'avatars'
+    AND auth.uid()::text = (storage.foldername(name))[1]
+  )
+  WITH CHECK (
+    bucket_id = 'avatars'
+    AND name = auth.uid()::text || '/avatar.jpg'
+  );
+
+  RAISE NOTICE 'avatars: politica estricta aplicada (un solo archivo por persona).';
+END;
+$$;
+
+COMMIT;
+
 -- >>> 20260920010000_reconciliar-perfiles-cron.sql <<<
 -- ============================================================
 -- Programar la reconciliacion de perfiles.
@@ -8968,6 +9530,254 @@ SELECT cron.schedule(
   '43 4 * * *',                       -- 04:43 cada dia, despues del purgado
   $$SELECT public.backfill_missing_profiles()$$
 );
+
+-- >>> 20260921000000_aviso-cambio-evento-y-reportes.sql <<<
+-- ============================================================
+-- Auditoria 2026-09-18: avisar de los cambios, y no perder los reportes
+--
+-- 1. UX-02 (P2). El organizador podia cambiar la HORA, el SITIO o cancelar
+--    un evento, y nadie se enteraba. No habia ningun disparador de push
+--    sobre UPDATE de events: los cuatro de 20260827000000 cubren solicitud,
+--    aprobacion, mensaje y amistad, y el de 20260919000000 el plan repetido.
+--    Ninguno cubria el cambio.
+--
+--    Para una app cuyo proposito es que la gente se encuentre FISICAMENTE,
+--    presentarse a un evento cancelado o en el sitio equivocado erosiona la
+--    confianza mas que cualquier fallo tecnico.
+--
+--    Tres casos, y un cuarto que se trata aparte:
+--      * is_active pasa a false  -> "se cancelo"
+--      * cambia starts_at        -> "cambio la hora"
+--      * cambian lat/lng         -> "cambio el lugar"
+--      * privacy de open/private a friends: la RLS deja de mostrarles el
+--        evento aunque su fila siga ahi, asi que pierden de vista algo a lo
+--        que estan apuntados. Se avisa igual, porque es lo unico que van a
+--        recibir: despues ya no lo veran.
+--
+--    Va a quien tiene status='joined' y no ha bloqueado a quien organiza,
+--    igual que on_event_repeat_push. Se reutiliza push_send tal cual: una
+--    push fallida nunca tumba el UPDATE que la provoco.
+--
+-- 2. SEC-09 (P3). reports.reported_user_id era ON DELETE CASCADE, asi que
+--    alguien reportado por acoso borraba su cuenta, se registraba otra vez
+--    con el mismo correo, y el historial de moderacion sobre el desaparecia.
+--    Apple pide actuar sobre el contenido reportado (guideline 1.2) y el
+--    README documenta que la triage se hace a mano desde el SQL Editor: si
+--    los reportes se evaporan antes de que alguien los mire, la cola nunca
+--    los ve.
+--
+--    reports.reporter_id ya se paso a SET NULL en 20260817010000 por esta
+--    misma razon, y blocks guarda blocked_name desnormalizado por si el
+--    bloqueado se va. Aqui se aplica el mismo patron, ya probado en el
+--    propio proyecto, al lado que faltaba.
+--
+-- ASCII puro. Idempotente. No borra datos.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. Aviso al cambiar o cancelar un evento
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.on_event_change_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_title  text;
+  v_cuerpo text;
+  v_tipo   text;
+  r        record;
+BEGIN
+  -- El titulo, truncado por lo mismo que en on_event_repeat_push: APNs
+  -- rechaza cargas de mas de 4 KB y una push rota no avisa de nada.
+  v_title := left(NEW.title, 80);
+  IF length(NEW.title) > 80 THEN
+    v_title := v_title || U&'\2026';
+  END IF;
+
+  -- Un solo aviso por UPDATE, con el cambio mas grave que haya ocurrido.
+  -- Cancelar gana a todo: si el evento ya no existe, la hora da igual.
+  IF OLD.is_active AND NOT NEW.is_active THEN
+    v_tipo   := 'event_cancelled';
+    v_cuerpo := U&'Se cancel\00F3 \00AB' || v_title || U&'\00BB';
+  ELSIF NEW.starts_at IS DISTINCT FROM OLD.starts_at THEN
+    v_tipo   := 'event_changed';
+    v_cuerpo := U&'Cambi\00F3 la hora de \00AB' || v_title || U&'\00BB';
+  ELSIF NEW.lat IS DISTINCT FROM OLD.lat OR NEW.lng IS DISTINCT FROM OLD.lng THEN
+    v_tipo   := 'event_changed';
+    v_cuerpo := U&'Cambi\00F3 el lugar de \00AB' || v_title || U&'\00BB';
+  ELSIF NEW.privacy = 'friends' AND OLD.privacy <> 'friends' THEN
+    -- El ultimo aviso que van a ver: despues la RLS ya no les muestra el
+    -- evento, aunque su fila de participacion siga ahi.
+    v_tipo   := 'event_changed';
+    v_cuerpo := U&'\00AB' || v_title || U&'\00BB ahora es solo para amigos';
+  ELSE
+    RETURN NEW;
+  END IF;
+
+  FOR r IN
+    SELECT ep.user_id
+    FROM   public.event_participants ep
+    WHERE  ep.event_id = NEW.id
+      AND  ep.status   = 'joined'
+      AND  ep.user_id <> NEW.creator_id
+      AND  NOT public.is_blocked(ep.user_id, NEW.creator_id)
+    LIMIT 200
+  LOOP
+    PERFORM public.push_send(
+      r.user_id,
+      CASE WHEN v_tipo = 'event_cancelled' THEN U&'Plan cancelado' ELSE U&'Cambi\00F3 un plan' END,
+      v_cuerpo,
+      jsonb_build_object('type', v_tipo, 'event_id', NEW.id)
+    );
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.on_event_change_push() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_event_change_push ON public.events;
+CREATE TRIGGER trg_event_change_push
+  AFTER UPDATE OF starts_at, lat, lng, is_active, privacy ON public.events
+  FOR EACH ROW
+  -- Sin el WHEN, guardar el evento sin tocar nada disparia la funcion en
+  -- vano para cada participante.
+  WHEN (OLD.is_active  IS DISTINCT FROM NEW.is_active
+     OR OLD.starts_at  IS DISTINCT FROM NEW.starts_at
+     OR OLD.lat        IS DISTINCT FROM NEW.lat
+     OR OLD.lng        IS DISTINCT FROM NEW.lng
+     OR OLD.privacy    IS DISTINCT FROM NEW.privacy)
+  EXECUTE FUNCTION public.on_event_change_push();
+
+
+-- ------------------------------------------------------------
+-- 2. Los reportes sobreviven a que el reportado borre su cuenta
+--
+-- No basta con pasar la clave ajena a SET NULL: reports_one_target exige
+-- que cada reporte apunte a EXACTAMENTE una cosa, y un CHECK se comprueba
+-- tambien en el UPDATE que provoca el SET NULL. El borrado de cuenta
+-- fallaria entero.
+--
+-- Asi que el objetivo se parte en dos columnas:
+--   * reported_user_id  sigue siendo el enlace VIVO, con clave ajena; pasa
+--     a NULL cuando la cuenta se va, y por eso ya no puede sostener el
+--     CHECK.
+--   * reported_user_ref es la copia DURADERA del uuid, SIN clave ajena, que
+--     es la que el CHECK mira. Mas reported_name, para que la cola no tenga
+--     que descifrar un uuid a mano.
+--
+-- Mismo patron que blocks.blocked_name, que ya existe en el proyecto.
+-- ------------------------------------------------------------
+ALTER TABLE public.reports
+  ADD COLUMN IF NOT EXISTS reported_user_ref uuid,
+  ADD COLUMN IF NOT EXISTS reported_name     text;
+
+COMMENT ON COLUMN public.reports.reported_user_ref IS
+  'Copia del uuid reportado, SIN clave ajena a proposito: sobrevive a que la '
+  'cuenta se borre. Es la que sostiene reports_one_target; reported_user_id '
+  'es el enlace vivo y pasa a NULL.';
+COMMENT ON COLUMN public.reports.reported_name IS
+  'Nombre de la persona reportada en el momento del reporte. Desnormalizado '
+  'para que la cola de moderacion siga sabiendo sobre quien era. Mismo patron '
+  'que blocks.blocked_name.';
+
+-- Rellenar lo que ya hay ANTES de tocar el CHECK y la clave ajena.
+UPDATE public.reports r
+SET    reported_user_ref = r.reported_user_id
+WHERE  r.reported_user_id IS NOT NULL
+  AND  r.reported_user_ref IS NULL;
+
+UPDATE public.reports r
+SET    reported_name = p.name
+FROM   public.profiles p
+WHERE  p.id = r.reported_user_id
+  AND  r.reported_name IS NULL;
+
+-- Las dos las pone el servidor en cada reporte nuevo, no el cliente.
+CREATE OR REPLACE FUNCTION public.set_report_reported_target()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  NEW.reported_user_ref := NEW.reported_user_id;
+  NEW.reported_name     := NULL;
+
+  IF NEW.reported_user_id IS NOT NULL THEN
+    SELECT p.name INTO NEW.reported_name
+    FROM public.profiles p WHERE p.id = NEW.reported_user_id;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.set_report_reported_target() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_set_report_reported_target ON public.reports;
+CREATE TRIGGER trg_set_report_reported_target
+  BEFORE INSERT ON public.reports
+  FOR EACH ROW EXECUTE FUNCTION public.set_report_reported_target();
+
+-- El CHECK pasa a mirar la copia duradera.
+ALTER TABLE public.reports DROP CONSTRAINT IF EXISTS reports_one_target;
+ALTER TABLE public.reports
+  ADD CONSTRAINT reports_one_target CHECK (
+    (reported_user_ref   IS NOT NULL)::int
+  + (reported_event_id   IS NOT NULL)::int
+  + (reported_message_id IS NOT NULL)::int = 1
+  );
+
+-- El indice unico tambien: si no, borrar la cuenta y volver a registrarse
+-- con el mismo correo permitiria un reporte duplicado del mismo denunciante.
+DROP INDEX IF EXISTS public.reports_unique_user_target;
+CREATE UNIQUE INDEX IF NOT EXISTS reports_unique_user_target
+  ON public.reports (reporter_id, reported_user_ref) WHERE reported_user_ref IS NOT NULL;
+
+-- Y la cola de moderacion se lee por aqui.
+CREATE INDEX IF NOT EXISTS reports_pending_idx
+  ON public.reports (created_at DESC) WHERE status = 'pending';
+
+-- CASCADE -> SET NULL. El nombre del constraint lo pone Postgres al crear la
+-- tabla, asi que se busca en el catalogo en vez de darlo por sabido.
+DO $$
+DECLARE
+  v_nombre text;
+  v_tipo   "char";
+BEGIN
+  SELECT con.conname, con.confdeltype INTO v_nombre, v_tipo
+  FROM   pg_constraint con
+  JOIN   pg_attribute  att ON att.attrelid = con.conrelid AND att.attnum = con.conkey[1]
+  WHERE  con.conrelid = 'public.reports'::regclass
+    AND  con.contype  = 'f'
+    AND  att.attname  = 'reported_user_id'
+    AND  array_length(con.conkey, 1) = 1;
+
+  IF v_nombre IS NULL THEN
+    RAISE NOTICE 'reports.reported_user_id ya no tiene clave ajena de una sola columna; nada que cambiar.';
+    RETURN;
+  END IF;
+
+  IF v_tipo = 'n' THEN
+    RAISE NOTICE 'reports.reported_user_id ya estaba en SET NULL.';
+    RETURN;
+  END IF;
+
+  EXECUTE format('ALTER TABLE public.reports DROP CONSTRAINT %I', v_nombre);
+  ALTER TABLE public.reports
+    ADD CONSTRAINT reports_reported_user_id_fkey
+    FOREIGN KEY (reported_user_id) REFERENCES auth.users(id) ON DELETE SET NULL;
+  RAISE NOTICE 'reports.reported_user_id: CASCADE -> SET NULL.';
+END;
+$$;
+
+COMMIT;
 
 -- >>> 20260921000000_push-empieza-el-evento.sql <<<
 -- ============================================================
@@ -9126,6 +9936,136 @@ SELECT cron.schedule(
   '*/5 * * * *',
   $$SELECT public.notify_started_events()$$
 );
+
+-- >>> 20260922000000_grupos-sobreviven-a-su-creador.sql <<<
+-- ============================================================
+-- Auditoria 2026-09-18: borrar tu cuenta no borra el grupo de los demas
+--
+-- UX-03 (P3). groups.created_by era NOT NULL ... ON DELETE CASCADE, asi que
+-- borrar una cuenta eliminaba TODOS los grupos que esa persona hubiera
+-- creado y, en cascada, sus group_members y todos los messages de esos
+-- grupos -- incluidos los de las demas personas.
+--
+-- Desde la privacidad de quien se va es correcto que desaparezca lo suyo.
+-- Para el resto del grupo es una perdida de datos inesperada causada por un
+-- tercero, y con create_group_from_event (20260919000000) los grupos pasaron
+-- a ser objetos compartidos con vida propia, lo que lo agrava.
+--
+-- Lo que hace esta migracion:
+--   1. created_by pasa a ser nullable y su clave ajena a ON DELETE SET NULL.
+--   2. Un disparador recoge ese NULL y traspasa el grupo al miembro mas
+--      antiguo que quede. Si no queda nadie, el grupo se borra: un grupo sin
+--      miembros no le sirve a nadie y solo acumularia mensajes huerfanos.
+--   3. Los DM son un caso aparte. Son grupos llamados '__dm_<uuid>_<uuid>'
+--      y solo tienen sentido entre DOS personas concretas: si una se va, el
+--      chat se borra, que es EXACTAMENTE lo que pasaba antes. Traspasarlo
+--      dejaria a la otra persona con un DM sin interlocutor.
+--
+-- Ninguna politica se rompe: las tres que miran created_by lo comparan con
+-- auth.uid(), y NULL = <uuid> no es cierto, asi que un grupo sin dueno
+-- simplemente deja de conceder nada por esa via. Lo comprobe una por una:
+--   * "Members and creators can view groups"        (SELECT groups)
+--   * "Creators can update groups"                  (UPDATE groups)
+--   * la rama de creador en el SELECT de group_members
+-- Todas siguen concediendo por is_group_member, que es lo que importa.
+--
+-- ASCII puro. Idempotente.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. created_by puede quedarse sin dueno mientras se traspasa
+-- ------------------------------------------------------------
+ALTER TABLE public.groups ALTER COLUMN created_by DROP NOT NULL;
+
+DO $$
+DECLARE
+  v_nombre text;
+  v_tipo   "char";
+BEGIN
+  SELECT con.conname, con.confdeltype INTO v_nombre, v_tipo
+  FROM   pg_constraint con
+  JOIN   pg_attribute  att ON att.attrelid = con.conrelid AND att.attnum = con.conkey[1]
+  WHERE  con.conrelid = 'public.groups'::regclass
+    AND  con.contype  = 'f'
+    AND  att.attname  = 'created_by'
+    AND  array_length(con.conkey, 1) = 1;
+
+  IF v_nombre IS NULL THEN
+    RAISE NOTICE 'groups.created_by no tiene clave ajena de una sola columna; nada que cambiar.';
+  ELSIF v_tipo = 'n' THEN
+    RAISE NOTICE 'groups.created_by ya estaba en SET NULL.';
+  ELSE
+    EXECUTE format('ALTER TABLE public.groups DROP CONSTRAINT %I', v_nombre);
+    ALTER TABLE public.groups
+      ADD CONSTRAINT groups_created_by_fkey
+      FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE SET NULL;
+    RAISE NOTICE 'groups.created_by: CASCADE -> SET NULL.';
+  END IF;
+END;
+$$;
+
+
+-- ------------------------------------------------------------
+-- 2. El traspaso
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.transfer_group_on_owner_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_heredero uuid;
+BEGIN
+  -- Un DM no se traspasa: se va con quien se va.
+  IF left(COALESCE(NEW.name, ''), 5) = '__dm_' THEN
+    DELETE FROM public.groups WHERE id = NEW.id;
+    RETURN NULL;
+  END IF;
+
+  -- El miembro mas antiguo que quede, excluyendo a quien se va. Hay que
+  -- excluirlo a mano: el borrado de auth.users dispara varias cascadas y no
+  -- garantiza que su propia fila de group_members se haya ido ya, asi que sin
+  -- esto podria heredar el grupo la misma persona que lo esta dejando.
+  SELECT gm.user_id INTO v_heredero
+  FROM   public.group_members gm
+  WHERE  gm.group_id = NEW.id
+    AND  gm.user_id <> OLD.created_by
+  ORDER  BY gm.joined_at ASC, gm.user_id ASC
+  LIMIT  1;
+
+  IF v_heredero IS NULL THEN
+    -- Nadie mas dentro: el grupo no le sirve a nadie y solo dejaria mensajes
+    -- huerfanos. Mismo efecto que antes de esta migracion.
+    DELETE FROM public.groups WHERE id = NEW.id;
+    RETURN NULL;
+  END IF;
+
+  UPDATE public.groups SET created_by = v_heredero WHERE id = NEW.id;
+  RETURN NULL;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.transfer_group_on_owner_delete() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_transfer_group_on_owner_delete ON public.groups;
+CREATE TRIGGER trg_transfer_group_on_owner_delete
+  AFTER UPDATE OF created_by ON public.groups
+  FOR EACH ROW
+  -- Solo el paso a NULL, que es el que provoca el SET NULL del borrado de
+  -- cuenta. Un cambio normal de dueno no entra aqui.
+  WHEN (NEW.created_by IS NULL AND OLD.created_by IS NOT NULL)
+  EXECUTE FUNCTION public.transfer_group_on_owner_delete();
+
+COMMENT ON COLUMN public.groups.created_by IS
+  'Quien creo el grupo. Nullable desde 20260922000000 solo como paso '
+  'intermedio: si esa cuenta se borra, la clave ajena lo pone en NULL y '
+  'trg_transfer_group_on_owner_delete traspasa el grupo al miembro mas '
+  'antiguo (o lo borra si no queda nadie, y siempre si es un DM).';
+
+COMMIT;
 
 -- >>> 20260923000000_chat-de-actividad.sql <<<
 -- ============================================================

@@ -197,7 +197,12 @@ suite('messages: editar y borrar solo el autor', () => {
 
     const { data, error } = await ctx.b!.rpc('chat_summaries');
     expect(error).toBeNull();
-    const dm = (data ?? []).find((r) => r.group_id === ctx.dmId);
+    // El cliente de esta suite se crea sin el genérico Database (apunta a un
+    // proyecto de pruebas, no al de los tipos generados), así que la fila llega
+    // sin tipar y hay que decir qué se espera de ella.
+    const dm = (data ?? []).find(
+      (r: { group_id: string; last_content: string | null }) => r.group_id === ctx.dmId,
+    );
     expect(dm?.last_content).toBe(anterior.content);
   });
 });

@@ -1,5 +1,5 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "alwaysconnected",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -48,7 +48,7 @@
     "react-easy-crop": "^6.2.3",
     "react-helmet-async": "^3.0.0",
     "react-i18next": "^17.0.8",
-    "react-router-dom": "^6.30.6",
+    "react-router-dom": "^7.18.4",
     "tailwind-merge": "^2.6.0",
     "tailwindcss-animate": "^1.0.7",
     "zod": "^3.25.76",

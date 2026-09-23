@@ -70,7 +70,16 @@ select status_code, created from net._http_response order by created desc limit 
 - **URL Configuration** → agrega la URL de producción a *Site URL* y *Redirect URLs*
   (ej. `https://TU-DOMINIO.vercel.app`). Sin esto, el login con Google falla en prod.
 - **Providers → Google** → activa el proveedor y pega tu Client ID / Secret de Google Cloud.
-- (Opcional) **Email** → decide si exiges verificación de correo antes de iniciar sesión.
+- **Providers → Email → «Confirm email» = ON. OBLIGATORIO.** No es una decisión de
+  comodidad: es el único eslabón que sostiene toda la verificación institucional.
+  `my_email_university()` exige `email_confirmed_at IS NOT NULL`, pero si «Confirm
+  email» está apagado Supabase rellena esa columna **en el momento del alta, sin
+  comprobar nada**, y la base no puede distinguir los dos casos. Con el ajuste
+  apagado, cualquiera se registra con `a01999999@tec.mx` —una dirección real que no
+  es suya— y sale con `institution_verified = true`, matrícula deducida y campus
+  asignado. La insignia de verificado, que es la señal de confianza del producto
+  entero, deja de significar nada.
+  [Abrir el panel](https://supabase.com/dashboard/project/myarlozvkbebygwszgkf/auth/providers)
 
 ---
 
@@ -102,6 +111,21 @@ vercel --prod
 
 ## 3. Verificación post-deploy
 
+- [ ] **«Confirm email» sigue en ON** ([Authentication → Providers → Email](https://supabase.com/dashboard/project/myarlozvkbebygwszgkf/auth/providers)).
+      Va el primero de la lista porque de él cuelga toda la verificación institucional
+      (§1.4). Si alguien lo apaga, nada falla de forma visible: la insignia sigue
+      apareciendo, solo que ya no verifica nada. Auditar las cuentas que entraron por
+      esa vía:
+      ```sql
+      select a.user_id, a.verification_method, a.verified_at, au.email_confirmed_at
+      from   public.profile_affiliations a
+      join   auth.users au on au.id = a.user_id
+      where  a.status = 'verified'
+        and  a.verification_method in ('auth_email_domain', 'legacy_auth_email')
+      order  by a.verified_at;
+      ```
+      Si `email_confirmed_at` coincide con el alta al segundo, esa cuenta se registró
+      con la confirmación desactivada.
 - [ ] Registro con un correo **institucional** entra con la institución ya asignada
       y la insignia de verificado; con uno genérico entra sin institución y el
       onboarding pide elegirla.
@@ -114,15 +138,72 @@ vercel --prod
 
 ## 4. Camino a la App Store (iOS)
 
-La app es una **PWA**; para publicarla en la App Store hay que envolverla en un
-contenedor nativo. Ruta recomendada con **Capacitor**:
+La carpeta `ios/` **ya está en el repositorio** con Capacitor configurado: sus
+capacidades, entitlements y número de build están versionados. No hay nada que
+generar.
 
 ```bash
-npm install @capacitor/core @capacitor/ios
-npm install -D @capacitor/cli
-npx cap init "Always Connected" com.alwaysconnected.app --web-dir=dist
-npm run build && npx cap add ios && npx cap sync
-npx cap open ios   # abre Xcode
+npm run ios:sync   # build web + npx cap sync ios
+npm run ios:open   # abre Xcode
 ```
-Luego en Xcode: firma con tu cuenta de **Apple Developer Program**, configura íconos y
-splash, y sube con **Archive → Distribute App**.
+Luego en Xcode: firma con tu cuenta de **Apple Developer Program** y sube con
+**Archive → Distribute App**.
+
+> `npx cap add ios` **no** se corre: regeneraría el proyecto desde cero y borraría la
+> configuración nativa commiteada. La guía completa, con los pasos de App Store
+> Connect, está en [APP_STORE.md](APP_STORE.md).
+
+---
+
+## 5. Operación: respaldos, vigilancia y riesgos conocidos
+
+La auditoría del 2026-09-18 señaló que no había nada escrito sobre esto (OPS-01).
+Lo que sigue es el estado real, no un plan.
+
+### 5.1 Respaldos
+
+Supabase hace respaldos automáticos según el plan del proyecto:
+[Database → Backups](https://supabase.com/dashboard/project/myarlozvkbebygwszgkf/database/backups).
+
+- [ ] Comprobar **qué política tiene el proyecto hoy** (frecuencia y retención).
+      En los planes gratuitos puede no haber ninguno, o solo del último día.
+- [ ] **Probar una restauración de verdad, una vez.** Un respaldo que nadie ha
+      restaurado nunca es una suposición, no un respaldo. La forma barata de
+      probarlo: restaurar sobre un proyecto NUEVO, no sobre producción.
+- [ ] Anotar aquí la fecha de la última restauración probada: _(nunca)_
+
+Además, el esquema entero vive en el repositorio (`supabase/setup/full_schema.sql`,
+regenerado y verificado por CI), así que una base vacía se puede reconstruir aunque
+no haya respaldo. Lo que no se reconstruye son **los datos**.
+
+### 5.2 Qué falla en silencio
+
+Tres cosas degradan sin romperse, que es justo lo que las hace peligrosas:
+
+| Qué | Cómo se manifiesta | Cómo se comprueba |
+|---|---|---|
+| Falta un secreto en Vault | `push_send()` hace `RAISE WARNING` y sigue. Las notificaciones dejan de llegar y nada avisa. | `select name from vault.secrets;` → deben estar `service_role_key` e `institution_email_pepper` |
+| `pg_cron` no está o el trabajo no corre | Los mensajes no caducan y la base crece sin límite | `select jobname, schedule, active from cron.job;` |
+| «Confirm email» apagado | La verificación institucional sigue dando la insignia sin verificar nada (§1.4) | [Authentication → Providers](https://supabase.com/dashboard/project/myarlozvkbebygwszgkf/auth/providers) |
+
+No hay monitoreo de errores en el cliente ni en las Edge Functions. `ErrorBoundary`
+existe y está probado, pero solo pinta: nadie se entera de los fallos salvo que
+alguien los cuente. Poner Sentry (o equivalente) en el cliente y en las tres Edge
+Functions sigue pendiente; el coste de no tenerlo sube con cada usuario.
+
+### 5.3 Riesgo conocido y aceptado: los DELETE de Realtime
+
+Supabase documenta que **la RLS no se aplica a los eventos `DELETE` de
+`postgres_changes`**: la clave primaria de la fila borrada se reparte a todos los
+suscriptores del canal. La app se suscribe a `events`, `messages` y
+`event_participants` sin filtro.
+
+No hay fallo funcional —el cliente ignora los ids que no tiene, y `MapHome.tsx` lo
+comenta explícitamente— pero cualquier usuario autenticado recibe los UUID de
+eventos y mensajes borrados de **todas** las instituciones. Un UUID suelto vale poco;
+permite estimar volumen de actividad ajena y poco más.
+
+Se acepta a sabiendas. Cerrarlo del todo implica cambiar `postgres_changes` por
+Broadcast sobre `realtime.messages` —que sí tiene RLS y ya está preparado desde la
+migración `20260518070740`—, y eso es una reescritura de las tres suscripciones. Toca
+antes de abrir la app a varias universidades, no antes del próximo lanzamiento.

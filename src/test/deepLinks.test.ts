@@ -84,6 +84,10 @@ describe('routeFromPushData', () => {
     // botón de registrar asistencia. Sin id, a "Mis eventos" como antes.
     expect(routeFromPushData({ type: 'event_started', event_id: UUID })).toBe(`/event/${UUID}`);
     expect(routeFromPushData({ type: 'event_started' })).toBe('/events');
+    // Cambio: a la ficha ya actualizada. Cancelado: a Mis eventos, porque un
+    // evento cancelado ya no se ve (idea de la auditoria, PR #17).
+    expect(routeFromPushData({ type: 'event_changed', event_id: UUID })).toBe(`/event/${UUID}`);
+    expect(routeFromPushData({ type: 'event_cancelled', event_id: UUID })).toBe('/events');
   });
 
   it('aguanta payloads incompletos o desconocidos', () => {
