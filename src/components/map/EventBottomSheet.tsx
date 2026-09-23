@@ -524,7 +524,10 @@ export function EventBottomSheet({ event, onClose }: Props) {
             <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
           ) : (
             <>
-              <ul className="flex gap-3 overflow-x-auto no-scrollbar -mx-1 px-1 pb-1">
+              {/* pt-1.5: el anillo de quien organiza (ring-2 + offset-2) sale
+                  4 px por fuera del avatar, y overflow-x-auto también recorta
+                  en vertical. Sin ese hueco se veía cortado por arriba. */}
+              <ul className="flex gap-3 overflow-x-auto no-scrollbar -mx-1 px-1 pt-1.5 pb-1">
                 {(showAllAttendees ? attendees : attendees.slice(0, ATTENDEES_PREVIEW)).map(a => (
                   <li key={a.user_id} className="shrink-0">
                     <button
