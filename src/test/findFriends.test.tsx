@@ -93,7 +93,11 @@ describe('FindFriends', () => {
   it('"Encontrar amigos" guarda la elección, pide permiso y enseña quién está', async () => {
     c.requestContactsAccess.mockResolvedValue('authorized');
     montar();
-    fireEvent.click(await screen.findByRole('button', { name: 'Encontrar amigos' }));
+    // Ser encontrable empieza desmarcado: se activa, no se presupone.
+    const encontrable = await screen.findByRole('checkbox', { name: /Dejar que mis contactos me encuentren/ });
+    expect(encontrable).not.toBeChecked();
+    fireEvent.click(encontrable);
+    fireEvent.click(screen.getByRole('button', { name: 'Encontrar amigos' }));
 
     expect(await screen.findByText('Mamá López')).toBeInTheDocument();
     expect(rpc).toHaveBeenCalledWith('set_contact_settings', { _discoverable: true, _notify_join: false });

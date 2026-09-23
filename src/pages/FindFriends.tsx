@@ -54,9 +54,13 @@ export default function FindFriends() {
   const [phase, setPhase] = useState<Phase>('checking');
   const [status, setStatus] = useState<ContactsStatus>('notDetermined');
   const [limitedPicker, setLimitedPicker] = useState(false);
-  const [settings, setSettings] = useState<Settings>({ discoverable: true, notify_contacts_join: false, last_synced_at: null });
-  /** En la pantalla previa: lo que la persona elige antes de dar permiso. */
-  const [introDiscoverable, setIntroDiscoverable] = useState(true);
+  const [settings, setSettings] = useState<Settings>({ discoverable: false, notify_contacts_join: false, last_synced_at: null });
+  /**
+   * En la pantalla previa: lo que la persona elige antes de dar permiso.
+   * Desmarcado: dejar que otros te encuentren es compartir tu correo o
+   * teléfono (en forma de huella) y eso se activa, no se presupone.
+   */
+  const [introDiscoverable, setIntroDiscoverable] = useState(false);
   const [introNotify, setIntroNotify] = useState(false);
 
   const [contacts, setContacts] = useState<DeviceContact[]>([]);
@@ -143,7 +147,7 @@ export default function FindFriends() {
       setLimitedPicker(st.limitedPickerAvailable);
       void loadSuggestions();
       if (s) {
-        setIntroDiscoverable(s.last_synced_at ? s.discoverable : true);
+        setIntroDiscoverable(s.discoverable);
         setIntroNotify(s.notify_contacts_join);
       }
       if (st.status === 'unavailable') setPhase('unavailable');
