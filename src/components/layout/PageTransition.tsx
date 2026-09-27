@@ -21,13 +21,35 @@ import { Outlet, useLocation, useNavigationType, type NavigationType } from 'rea
 /** Las cuatro pestañas de la barra inferior. */
 const TAB_PATHS = new Set(['/', '/events', '/friends', '/profile']);
 
-type Variant = 'fade' | 'forward' | 'back';
+type Variant = 'fade' | 'forward' | 'back' | 'none';
 
-const CLASS_FOR: Record<Variant, string> = {
+const CLASS_FOR: Record<Variant, string | undefined> = {
   fade: 'animate-page-fade',
   forward: 'animate-page-forward',
   back: 'animate-page-back',
+  none: undefined,
 };
+
+/**
+ * Último toque que empezó pegado al borde izquierdo.
+ *
+ * Con el gesto nativo de volver (AppViewController), iOS ya anima la vuelta
+ * arrastrando la pantalla anterior con el dedo. Si además entrase la
+ * animación de «atrás» de aquí, la pantalla se deslizaría dos veces. No hay
+ * forma de que el webview diga que un POP vino del gesto, así que se deduce:
+ * un POP poco después de un toque en el borde es el gesto.
+ */
+let lastEdgeTouch = 0;
+if (typeof window !== 'undefined') {
+  window.addEventListener(
+    'touchstart',
+    (e) => {
+      const x = e.touches[0]?.clientX;
+      if (x !== undefined && x < 24) lastEdgeTouch = Date.now();
+    },
+    { passive: true, capture: true },
+  );
+}
 
 function pickVariant(
   pathname: string,
@@ -38,7 +60,7 @@ function pickVariant(
   // primero que se ve es un deslizamiento hacia atrás desde una pantalla
   // que no existió nunca.
   if (isFirstRender) return 'fade';
-  if (navigationType === 'POP') return 'back';
+  if (navigationType === 'POP') return Date.now() - lastEdgeTouch < 1500 ? 'none' : 'back';
   return TAB_PATHS.has(pathname) ? 'fade' : 'forward';
 }
 
@@ -64,7 +86,7 @@ export function PageTransition() {
 }
 
 function AnimatedPage({ variant, children }: { variant: Variant; children: ReactNode }) {
-  const [animating, setAnimating] = useState(true);
+  const [animating, setAnimating] = useState(variant !== 'none');
 
   return (
     <div

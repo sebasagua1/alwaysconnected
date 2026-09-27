@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Cropper, { type Area } from 'react-easy-crop';
 import { useTranslation } from 'react-i18next';
-import { Loader2 } from 'lucide-react';
+import { AlertTriangle, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { downscaleForCrop, cropToSquare, MAX_ZOOM } from '@/lib/imageDownscale';
 
@@ -88,10 +88,13 @@ export function AvatarCropper({ file, onCancel, onCropped }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-[70] flex flex-col bg-foreground/95 animate-fade-in">
+    // Negro en los dos modos, como el recorte de Fotos. Antes era el color del
+    // texto invertido: azul marino en claro, pero casi BLANCO a pantalla
+    // completa en oscuro, y el error en rojo quedaba ilegible sobre los dos.
+    <div className="fixed inset-0 z-[70] flex flex-col bg-black animate-fade-in">
       <div className="px-5 pb-3 text-center pt-[calc(1.25rem+env(safe-area-inset-top,0px))]">
-        <h2 className="text-lg font-extrabold text-background">{t('profile.adjustPhoto')}</h2>
-        <p className="text-xs text-background/70 mt-1">{t('profile.adjustPhotoHint')}</p>
+        <h2 className="text-lg font-extrabold text-white">{t('profile.adjustPhoto')}</h2>
+        <p className="text-xs text-white/70 mt-1">{t('profile.adjustPhotoHint')}</p>
       </div>
 
       <div className="relative flex-1 min-h-0">
@@ -113,15 +116,18 @@ export function AvatarCropper({ file, onCancel, onCropped }: Props) {
             queda en negro y parece que se ha colgado. */}
         {preparing && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-            <Loader2 aria-hidden="true" className="w-6 h-6 animate-spin text-background/80" />
-            <p className="text-xs text-background/70">{t('profile.preparingPhoto')}</p>
+            <Loader2 aria-hidden="true" className="w-6 h-6 animate-spin text-white/80" />
+            <p className="text-xs text-white/70">{t('profile.preparingPhoto')}</p>
           </div>
         )}
       </div>
 
       <div className="px-5 pt-4 space-y-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))]">
         {failed && (
-          <p className="text-xs text-destructive text-center">{t('profile.photoError')}</p>
+          <p role="alert" className="flex items-center justify-center gap-2 rounded-xl bg-white/10 px-3 py-2 text-sm text-white text-center">
+            <AlertTriangle aria-hidden="true" className="w-4 h-4 shrink-0 text-amber-300" />
+            {t('profile.photoError')}
+          </p>
         )}
 
         {/* Control de zoom además del pellizco: en escritorio no hay pellizco. */}
@@ -134,17 +140,17 @@ export function AvatarCropper({ file, onCancel, onCropped }: Props) {
           onChange={(e) => setZoom(Number(e.target.value))}
           aria-label={t('profile.zoom')}
           disabled={preparing}
-          className="w-full accent-primary disabled:opacity-40"
+          className="w-full accent-white disabled:opacity-40"
         />
 
         <div className="flex gap-3">
-          <Button variant="outline" onClick={onCancel} disabled={working} className="h-12 rounded-xl px-6">
+          <Button variant="ghost" onClick={onCancel} disabled={working} className="h-12 rounded-xl px-6 text-white hover:bg-white/10 hover:text-white">
             {t('common.cancel')}
           </Button>
           <Button
             onClick={handleConfirm}
             disabled={working || preparing || !area}
-            className="flex-1 h-12 rounded-xl font-bold"
+            className="flex-1 h-12 rounded-xl font-bold bg-white text-black hover:bg-white/90"
           >
             {working ? <Loader2 className="w-4 h-4 animate-spin" /> : t('profile.usePhoto')}
           </Button>

@@ -4,6 +4,8 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
 import { useToast } from '@/hooks/use-toast';
 import { rpcMessage } from '@/lib/rpcErrors';
+import { haptic } from '@/lib/haptics';
+import { askForPush } from '@/stores/pushPrimerStore';
 
 export type FriendRelation = 'none' | 'outgoing' | 'incoming' | 'friends';
 
@@ -73,7 +75,9 @@ export function useFriendActions(onFriendsChanged?: () => void) {
 
     if (!error && data) {
       setRelation(person.id, { relation: 'outgoing', friendship_id: data.id });
+      haptic.light();
       toast({ title: t('friends.requestSent') });
+      askForPush('friend');
       return;
     }
     // Ya había algo entre las dos personas (otro dispositivo, o la lista
@@ -108,6 +112,7 @@ export function useFriendActions(onFriendsChanged?: () => void) {
       });
       return;
     }
+    haptic.light();
     toast({ title: t('friends.requestAccepted') });
     onFriendsChanged?.();
   };

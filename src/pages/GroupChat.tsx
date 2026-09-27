@@ -32,7 +32,7 @@ import { ModerationMenu } from '@/components/moderation/ModerationMenu';
 import { MessageActionsMenu } from '@/components/chat/MessageActionsMenu';
 import { applyMessageChange, canSaveEdit, type MessageChange } from '@/lib/chat';
 import { cn } from '@/lib/utils';
-import { format } from 'date-fns';
+import { formatTime } from '@/lib/datetime';
 
 /** Mensajes por tanda. Suficiente para llenar la pantalla y poco que pintar. */
 const MESSAGE_PAGE = 40;
@@ -67,6 +67,8 @@ export default function GroupChat() {
   const [sending, setSending] = useState(false);
   /** Mensaje propio que se está editando, con su texto de antes. */
   const [editing, setEditing] = useState<{ id: string; original: string } | null>(null);
+  /** Mensaje tocado: enseña su hora y sus acciones. */
+  const [activeMsgId, setActiveMsgId] = useState<string | null>(null);
   /** Lo escrito antes de empezar a editar, para devolverlo al cancelar. */
   const draftBeforeEditRef = useRef('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -502,7 +504,10 @@ export default function GroupChat() {
   };
 
   return (
-    <div className="flex flex-col h-screen-nav overflow-hidden bg-background">
+    // Sin barra de pestañas en las conversaciones (ver BottomNav): el chat
+    // ocupa la pantalla entera y el campo de escribir respeta el indicador de
+    // inicio.
+    <div className="flex flex-col h-screen-full overflow-hidden bg-background">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 pb-3 bg-card border-b border-border shrink-0 pt-[calc(1rem+env(safe-area-inset-top,0px))]">
         <button
@@ -627,7 +632,7 @@ export default function GroupChat() {
           atBottomRef.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 64;
         }}
-        className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3"
+        className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-3"
       >
         {hasOlder && (
           <button
@@ -641,13 +646,25 @@ export default function GroupChat() {
         {messages.length === 0 && (
           <p className="text-center text-sm text-muted-foreground py-12">{t('groups.noMessages')}</p>
         )}
-        {messages.map((msg) => {
+        {messages.map((msg, i) => {
           const isMe = msg.sender_id === user?.id;
           const isDeleted = Boolean(msg.deleted_at);
           const isBeingEdited = editing?.id === msg.id;
+          // Tanda de la misma persona (hasta una hora): el nombre una vez
+          // arriba. La hora, solo al final de una ráfaga (menos de 5 minutos
+          // entre mensajes). Antes «Valentina Ossa» salía encima de cada uno
+          // de sus mensajes, con su hora debajo de cada uno.
+          const prev = messages[i - 1];
+          const next = messages[i + 1];
+          const gap = (a: { created_at: string }, b: { created_at: string }) =>
+            Math.abs(new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+          const startsGroup = !prev || prev.sender_id !== msg.sender_id || gap(prev, msg) >= 60 * 60_000;
+          const endsGroup = !next || next.sender_id !== msg.sender_id || gap(msg, next) >= 5 * 60_000;
+          const active = activeMsgId === msg.id;
           return (
-            <div key={msg.id} className={cn('flex flex-col gap-0.5', isMe ? 'items-end' : 'items-start')}>
-              {!isMe && (
+            <div key={msg.id} className={cn('flex flex-col gap-0.5', isMe ? 'items-end' : 'items-start', startsGroup ? 'mt-3 first:mt-0' : 'mt-0.5')}>
+              {/* En un chat de dos, el nombre no dice nada que no diga la cabecera. */}
+              {!isMe && !isDM && startsGroup && (
                 <span className="text-xs text-muted-foreground px-1">{msg.senderName}</span>
               )}
               <div className="flex items-center gap-1 max-w-[85%]">
@@ -665,6 +682,7 @@ export default function GroupChat() {
                 ) : (
                   <>
                     <div
+                      onClick={() => setActiveMsgId(active ? null : msg.id)}
                       className={cn(
                         'px-3.5 py-2 rounded-2xl text-sm break-words',
                         isMe
@@ -675,6 +693,9 @@ export default function GroupChat() {
                     >
                       {msg.content}
                     </div>
+                    {/* Acciones al tocar el mensaje; en el DOM siempre, para
+                        teclado y VoiceOver. */}
+                    <span className={cn('transition-opacity', active ? 'opacity-100' : 'opacity-0 focus-within:opacity-100')}>
                     {isMe ? (
                       <MessageActionsMenu
                         onEdit={() => startEditing(msg)}
@@ -690,13 +711,16 @@ export default function GroupChat() {
                         className="p-1 shrink-0"
                       />
                     )}
+                    </span>
                   </>
                 )}
               </div>
-              <span className="text-xs text-muted-foreground px-1">
-                {format(new Date(msg.created_at), 'HH:mm')}
-                {msg.edited_at && !isDeleted && ` · ${t('chat.edited')}`}
-              </span>
+              {(endsGroup || active || (msg.edited_at && !isDeleted)) && (
+                <span className="text-xs text-muted-foreground px-1">
+                  {formatTime(new Date(msg.created_at), i18n.language ?? 'es')}
+                  {msg.edited_at && !isDeleted && ` · ${t('chat.edited')}`}
+                </span>
+              )}
             </div>
           );
         })}
@@ -705,7 +729,7 @@ export default function GroupChat() {
 
       {/* Input. Al editar se reutiliza el mismo campo, con una franja encima
           que dice qué se está editando y cómo salir. */}
-      <div className="bg-background border-t border-border shrink-0">
+      <div className="bg-background border-t border-border shrink-0 safe-bottom">
         {editing && (
           <div className="flex items-center gap-2 pl-4 pr-2 pt-2 text-xs font-semibold text-primary">
             <Pencil className="w-3.5 h-3.5 shrink-0" />

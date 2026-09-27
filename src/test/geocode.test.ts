@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import {
   buildReverseUrl, pickPlaceName, roundCoord, cacheKey,
   reverseGeocode, _clearCache, COORD_PRECISION,
+  buildSearchUrl, parseSearch,
 } from '@/lib/geocode';
 
 describe('roundCoord', () => {
@@ -109,5 +110,27 @@ describe('reverseGeocode', () => {
     await expect(reverseGeocode(-98.2, 19, 'tok')).resolves.toBeNull();
     await expect(reverseGeocode(-98.2, 19, 'tok')).resolves.toBeNull();
     expect(f).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('búsqueda de lugares', () => {
+  it('pide cerca del punto dado y con autocompletado', () => {
+    const url = new URL(buildSearchUrl(' biblioteca ', 'tok', 'es', { lng: -74.07851, lat: 4.63159 }));
+    expect(url.pathname).toMatch(/\/biblioteca\.json$/);
+    expect(url.searchParams.get('proximity')).toBe('-74.0785,4.6316');
+    expect(url.searchParams.get('autocomplete')).toBe('true');
+    // Y solo dentro de la ciudad: con proximity sola salían resultados de otro país.
+    expect(url.searchParams.get('bbox')).toBe('-74.2585,4.4516,-73.8985,4.8116');
+  });
+
+  it('separa el nombre del resto de la dirección y descarta lo que no tiene punto', () => {
+    const r = parseSearch({
+      features: [
+        { id: 'a', text: 'Biblioteca Central', place_name: 'Biblioteca Central, Calle 45, Bogotá', center: [-74.1, 4.6] },
+        { id: 'b', text: 'Sin punto', place_name: 'Sin punto, X' },
+      ],
+    });
+    expect(r).toEqual([{ id: 'a', name: 'Biblioteca Central', detail: 'Calle 45, Bogotá', lng: -74.1, lat: 4.6 }]);
   });
 });

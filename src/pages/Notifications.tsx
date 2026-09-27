@@ -17,6 +17,8 @@ import { copyFor, inboxSection, routeForNotification, upsertInbox, type InboxIte
 import { pageTitle } from '@/lib/brand';
 import { cn } from '@/lib/utils';
 import { useStaggerReveal } from '@/hooks/useStaggerReveal';
+import { rpcMessage } from '@/lib/rpcErrors';
+import { haptic } from '@/lib/haptics';
 
 const PAGE = 30;
 
@@ -169,6 +171,64 @@ export default function Notifications() {
 
   const goBack = () => (location.key === 'default' ? navigate('/') : navigate(-1));
 
+  // ---- Responder sin salir de aquí ---------------------------------------
+  //
+  // «Lucía te quiere agregar» y «Tomás quiere unirse a tu plan» son los avisos
+  // con más intención de toda la app, y para contestarlos había que ir a otra
+  // pantalla. Solo en los no leídos y de una sola persona: uno agrupado
+  // («3 personas quieren unirse») se resuelve en la ficha del evento.
+  const [resolved, setResolved] = useState<Record<string, 'accepted' | 'declined'>>({});
+  const [acting, setActing] = useState<string | null>(null);
+  const canActInline = (n: Row) =>
+    !n.read_at && n.count === 1 && !!n.actor_id && !resolved[n.id] &&
+    (n.type === 'friend_request' || (n.type === 'join_request' && !!n.event_id));
+
+  const respond = async (n: Row, accept: boolean) => {
+    if (!userId || !n.actor_id || acting) return;
+    setActing(n.id);
+    let ok = false;
+    let gone = false;
+    if (n.type === 'friend_request') {
+      const { data: row } = await supabase
+        .from('friendships')
+        .select('id')
+        .eq('requester_id', n.actor_id)
+        .eq('addressee_id', userId)
+        .eq('status', 'pending')
+        .maybeSingle();
+      if (!row) {
+        gone = true;
+      } else {
+        const { error } = accept
+          ? await supabase.from('friendships').update({ status: 'accepted' }).eq('id', row.id)
+          : await supabase.from('friendships').delete().eq('id', row.id);
+        ok = !error;
+      }
+    } else if (n.event_id) {
+      const { error } = await supabase.rpc('respond_to_join_request', {
+        _event_id: n.event_id,
+        _user_id: n.actor_id,
+        _approve: accept,
+      });
+      if (error) {
+        toast({ title: t('common.error'), description: rpcMessage(error.message, t), variant: 'destructive' });
+      } else {
+        ok = true;
+      }
+    }
+    setActing(null);
+    if (gone) {
+      toast({ title: t('friends.requestGone') });
+      void markRead([n.id]);
+      return;
+    }
+    if (!ok) return;
+    haptic.light();
+    setResolved((r) => ({ ...r, [n.id]: accept ? 'accepted' : 'declined' }));
+    void markRead([n.id]);
+    refreshCounts();
+  };
+
   const visible = useMemo(() => (filter === 'unread' ? items.filter((n) => !n.read_at) : items), [items, filter]);
   const dateLocale = i18n.language?.startsWith('en') ? 'en-US' : 'es-MX';
   const timeOf = (iso: string) => {
@@ -211,7 +271,8 @@ export default function Notifications() {
             onClick={() => setFilter(f)}
             aria-pressed={filter === f}
             className={cn(
-              'inline-flex items-center justify-center min-h-[44px] px-4 rounded-full text-sm font-semibold transition-colors',
+              // nowrap: a 375 pt «Sin leer (3)» se partía en dos líneas.
+              'inline-flex items-center justify-center min-h-[44px] px-4 rounded-full text-sm font-semibold whitespace-nowrap shrink-0 transition-colors',
               filter === f ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
             )}
           >
@@ -220,8 +281,17 @@ export default function Notifications() {
         ))}
         <span className="flex-1" />
         {items.some((n) => !n.read_at) && (
-          <Button variant="ghost" size="sm" className="gap-1.5 rounded-full" onClick={() => markRead(null)}>
-            <CheckCheck className="w-4 h-4" aria-hidden="true" /> {t('notificationCenter.markAll')}
+          // En pantallas estrechas solo el icono (con su nombre para
+          // VoiceOver): con el texto, a 375 pt tocaba el borde.
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-1.5 rounded-full whitespace-nowrap min-h-[44px] min-w-[44px] shrink-0"
+            aria-label={t('notificationCenter.markAll')}
+            onClick={() => markRead(null)}
+          >
+            <CheckCheck className="w-4 h-4" aria-hidden="true" />
+            <span className="hidden min-[400px]:inline">{t('notificationCenter.markAll')}</span>
           </Button>
         )}
       </div>
@@ -270,12 +340,12 @@ export default function Notifications() {
                     {t(`notificationCenter.section.${header}`)}
                   </h2>
                 )}
+                {/* La tarjeta envuelve el aviso Y sus botones de respuesta, que
+                    no pueden ir dentro del <button> principal. */}
+                <div className={cn('rounded-xl', unread ? 'bg-primary/5 border border-primary/20' : 'bg-card shadow-soft')}>
                 <button
                   onClick={() => open(n)}
-                  className={cn(
-                    'w-full flex items-start gap-3 text-left rounded-xl p-3 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                    unread ? 'bg-primary/5 border border-primary/20' : 'bg-card shadow-soft',
-                  )}
+                  className="w-full flex items-start gap-3 text-left rounded-xl p-3 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <span className="relative shrink-0" aria-hidden="true">
                     {n.actor_id && n.actor_name ? (
@@ -301,6 +371,35 @@ export default function Notifications() {
                   </span>
                   {unread && <span className="mt-1.5 w-2.5 h-2.5 rounded-full bg-primary shrink-0" aria-hidden="true" />}
                 </button>
+                {canActInline(n) && (
+                  <div className="flex gap-2 pl-[3.75rem] pr-3 pb-3 -mt-1">
+                    <Button
+                      size="sm"
+                      disabled={acting === n.id}
+                      onClick={() => void respond(n, true)}
+                      className="h-10 min-h-[44px] rounded-full px-4 font-bold"
+                    >
+                      {n.type === 'friend_request' ? t('friends.accept') : t('event.approve')}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={acting === n.id}
+                      onClick={() => void respond(n, false)}
+                      className="h-10 min-h-[44px] rounded-full px-4 font-semibold"
+                    >
+                      {t('event.decline')}
+                    </Button>
+                  </div>
+                )}
+                {resolved[n.id] && (
+                  <p role="status" className="pl-[3.75rem] pr-3 pb-3 -mt-1 text-sm font-semibold text-muted-foreground">
+                    {resolved[n.id] === 'accepted'
+                      ? n.type === 'friend_request' ? t('friends.requestAccepted') : t('event.requestApproved')
+                      : n.type === 'friend_request' ? t('friends.requestDeclined') : t('event.requestDeclined')}
+                  </p>
+                )}
+                </div>
               </li>
             );
           })}

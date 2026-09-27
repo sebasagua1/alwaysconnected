@@ -29,6 +29,8 @@ import { formatChatTime } from '@/lib/chat';
 import { FindPeople } from '@/components/friends/FindPeople';
 import { GroupInvites } from '@/components/chat/GroupInvites';
 import { NotificationBell } from '@/components/notifications/NotificationBell';
+import { haptic } from '@/lib/haptics';
+import { askForPush } from '@/stores/pushPrimerStore';
 
 type FriendData = Pick<
   Database['public']['Views']['public_profiles']['Row'],
@@ -71,7 +73,7 @@ type LeaderEntry = {
 type ActiveTab = 'friends' | 'groups' | 'leaderboard';
 
 export default function Friends() {
-  const { user } = useAuthStore();
+  const { user, profile } = useAuthStore();
   const { toast } = useToast();
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -108,6 +110,10 @@ export default function Friends() {
     }
   }, [searchParams, setSearchParams]);
   const [leaderLoading, setLeaderLoading] = useState(false);
+  // El ranking era de todo el campus y vivía dentro de «Amigos», sin decir
+  // dónde estás tú: quien iba el 150 no se encontraba nunca.
+  const [leaderScope, setLeaderScope] = useState<'campus' | 'friends'>('campus');
+  const [myRank, setMyRank] = useState<number | null>(null);
   const [leaderOffset, setLeaderOffset] = useState(0);
   const [leaderHasMore, setLeaderHasMore] = useState(true);
 
@@ -245,6 +251,48 @@ export default function Friends() {
   const fetchLeaderboard = useCallback(async (offset = 0) => {
     setLeaderLoading(true);
     try {
+      if (leaderScope === 'friends') {
+        // Entre amigos: la lista es corta y cabe de una vez. Tope de 150
+        // porque los ids viajan en la URL (ver el comentario de loadFriends).
+        if (!user) return;
+        const { data: rows, error: fErr } = await supabase
+          .from('friendships')
+          .select('requester_id, addressee_id')
+          .eq('status', 'accepted')
+          .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`)
+          .limit(150);
+        if (fErr) {
+          toast({ title: i18n.t('errors.leaderboardLoad'), variant: 'destructive' });
+          return;
+        }
+        const ids = [user.id, ...(rows ?? []).map((r) => (r.requester_id === user.id ? r.addressee_id : r.requester_id))];
+        const { data, error } = await supabase
+          .from('public_profiles')
+          .select('id, name, avatar_url, points')
+          .in('id', ids)
+          .order('points', { ascending: false })
+          .order('id', { ascending: true });
+        if (error) {
+          toast({ title: i18n.t('errors.leaderboardLoad'), variant: 'destructive' });
+          return;
+        }
+        const list = (data ?? []) as LeaderEntry[];
+        setLeaderboard(list);
+        setLeaderHasMore(false);
+        const idx = list.findIndex((e) => e.id === user.id);
+        setMyRank(idx >= 0 ? idx + 1 : null);
+        return;
+      }
+
+      // Mi puesto en el campus: cuántos tienen más puntos que yo, más uno.
+      if (offset === 0 && profile) {
+        const { count } = await supabase
+          .from('public_profiles')
+          .select('id', { count: 'exact', head: true })
+          .gt('points', profile.points ?? 0);
+        setMyRank(typeof count === 'number' ? count + 1 : null);
+      }
+
       const { data, error } = await supabase
         .from('public_profiles')
         // Ordena por `points`, NO por `reputation`. Son dos monedas distintas:
@@ -272,11 +320,12 @@ export default function Friends() {
     } finally {
       setLeaderLoading(false);
     }
-  }, [toast]);
+  }, [toast, leaderScope, user, profile]);
 
   useEffect(() => {
     if (activeTab === 'groups') fetchGroups();
     if (activeTab === 'leaderboard') { setLeaderOffset(0); fetchLeaderboard(0); }
+    // fetchLeaderboard cambia con el ámbito (campus/amigos): se vuelve a pedir.
   }, [activeTab, fetchGroups, fetchLeaderboard]);
 
   // Se re-pide cuando cambia el contador global: la suscripción vive en
@@ -376,6 +425,7 @@ export default function Friends() {
     setPendingRequests((prev) => prev.filter((r) => r.friendshipId !== req.friendshipId));
     // Recién aceptado no hay chat todavía: va con los que no tienen, al final.
     setFriends((prev) => [...prev, { ...req.profile, last_message_at: null, last_content: null, last_sender_id: null }]);
+    haptic.light();
     toast({ title: t('friends.requestAccepted') });
   };
 
@@ -406,7 +456,9 @@ export default function Friends() {
         toast({ title: t('common.error'), description: rpcMessage(error.message, t), variant: 'destructive' });
       }
     } else {
+      haptic.light();
       toast({ title: t('friends.requestSent') });
+      askForPush('friend');
     }
   };
 
@@ -475,12 +527,14 @@ export default function Friends() {
             por la pantalla que explica para qué. */}
         <span className="flex items-center gap-1">
         <NotificationBell />
+        {/* Icono con nombre accesible, como la campana: con el texto al lado
+            el título «Amigos y grupos» no cabía y se partía en dos líneas. */}
         <button
           onClick={() => navigate('/friends/find')}
-          className="inline-flex items-center gap-1.5 min-h-[44px] px-3 rounded-full bg-primary/10 text-primary text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label={t('findFriends.entry')}
+          className="w-11 h-11 inline-flex items-center justify-center rounded-full bg-primary/10 text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <UserPlus className="w-4 h-4" aria-hidden="true" />
-          {t('findFriends.entry')}
+          <UserPlus className="w-5 h-5" aria-hidden="true" />
         </button>
         </span>
       </div>
@@ -652,16 +706,23 @@ export default function Friends() {
       {/* Groups tab */}
       {activeTab === 'groups' && (
         <div className="space-y-4">
-          <Button
-            onClick={() => setShowCreateGroup(true)}
-            className="w-full h-11 rounded-xl font-semibold"
-          >
-            <Plus className="w-4 h-4 mr-2" />
-            {t('groups.new')}
-          </Button>
+          {/* Con grupos, un botón discreto arriba; sin ninguno, la invitación
+              va en el propio estado vacío y no hay dos botones iguales. */}
+          {(groupsLoading || groups.length > 0) && (
+            <Button
+              variant="outline"
+              onClick={() => setShowCreateGroup(true)}
+              className="w-full h-11 rounded-xl font-semibold"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              {t('groups.new')}
+            </Button>
+          )}
 
           <div className="space-y-2">
-            <h2 className="text-sm font-semibold text-muted-foreground">{t('groups.myGroups')}</h2>
+            {(groupsLoading || groups.length > 0) && (
+              <h2 className="text-sm font-semibold text-muted-foreground">{t('groups.myGroups')}</h2>
+            )}
             {groupsLoading ? (
               [1, 2].map((i) => (
                 <div key={i} className="flex items-center gap-3 bg-card rounded-xl p-3 shadow-soft">
@@ -670,9 +731,14 @@ export default function Friends() {
                 </div>
               ))
             ) : groups.length === 0 ? (
-              <div className="text-center py-12">
-                <Users className="w-12 h-12 text-muted-foreground/40 mx-auto mb-3" />
-                <p className="text-muted-foreground text-sm">{t('groups.empty')}</p>
+              <div className="text-center py-12 px-6">
+                <Users className="w-12 h-12 text-muted-foreground/40 mx-auto mb-3" aria-hidden="true" />
+                <p className="text-base font-bold text-foreground">{t('groups.emptyTitle')}</p>
+                <p className="text-sm text-muted-foreground mt-1 max-w-[30ch] mx-auto">{t('groups.emptyBody')}</p>
+                <Button onClick={() => setShowCreateGroup(true)} className="mt-4 h-11 rounded-xl font-bold px-5">
+                  <Plus className="w-4 h-4 mr-2" aria-hidden="true" />
+                  {t('groups.emptyCta')}
+                </Button>
               </div>
             ) : (
               groups.map((g) => (
@@ -711,10 +777,38 @@ export default function Friends() {
       {/* Leaderboard tab */}
       {activeTab === 'leaderboard' && (
         <div className="space-y-2">
-          <h2 className="text-sm font-semibold text-muted-foreground flex items-center gap-2">
-            <Trophy className="w-4 h-4 text-primary" />
-            {t('leaderboard.title')}
-          </h2>
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-muted-foreground flex items-center gap-2">
+              <Trophy className="w-4 h-4 text-primary" aria-hidden="true" />
+              {t('leaderboard.title')}
+            </h2>
+            <div role="group" aria-label={t('leaderboard.scope')} className="inline-flex p-1 rounded-full bg-muted">
+              {(['campus', 'friends'] as const).map((sc) => (
+                <button
+                  key={sc}
+                  aria-pressed={leaderScope === sc}
+                  onClick={() => setLeaderScope(sc)}
+                  className={cn(
+                    'min-h-[36px] px-3 rounded-full text-xs font-semibold transition-colors',
+                    leaderScope === sc ? 'bg-card text-foreground shadow-soft' : 'text-muted-foreground',
+                  )}
+                >
+                  {sc === 'campus' ? t('leaderboard.campus') : t('leaderboard.friends')}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Tu puesto, siempre a la vista, aunque no estés en la primera página. */}
+          {!leaderLoading && myRank !== null && profile && (
+            <div className="flex items-center gap-3 rounded-xl p-3 bg-primary/10 border border-primary/30">
+              <span className="w-7 shrink-0 text-center text-sm font-extrabold text-primary">#{myRank}</span>
+              <UserAvatar url={profile.avatar_url} name={profile.name} className="w-10 h-10 bg-primary/10" textClassName="text-sm text-primary" />
+              <p className="flex-1 font-semibold text-sm text-foreground truncate">{t('leaderboard.you')}</p>
+              <span className="text-sm font-bold text-primary shrink-0">
+                {profile.points ?? 0} {t('leaderboard.pts')}
+              </span>
+            </div>
+          )}
           {leaderLoading ? (
             [1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="flex items-center gap-3 bg-card rounded-xl p-3 shadow-soft">
@@ -769,7 +863,7 @@ export default function Friends() {
                 />
                 <p className="flex-1 font-semibold text-sm text-foreground truncate">{entry.name}</p>
                 <span className="text-sm font-bold text-primary shrink-0">
-                  {entry.points} {t('leaderboard.pts')}
+                  {entry.points ?? 0} {t('leaderboard.pts')}
                 </span>
               </button>
             ))

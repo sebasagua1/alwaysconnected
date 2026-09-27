@@ -8,6 +8,7 @@ import { AppShell } from '@/components/layout/AppShell';
 import Auth from '@/pages/Auth';
 import { registerPush } from '@/lib/push';
 import { initDeepLinks, setDeepLinkNavigator } from '@/lib/deepLinks';
+import { markSignedIn } from '@/lib/authHints';
 
 // Rutas cargadas bajo demanda: mantienen el bundle inicial pequeño
 // (importante en móvil). Auth se queda eager porque es el primer
@@ -64,10 +65,14 @@ function AuthGate() {
   // Fetch profile when user changes
   useEffect(() => {
     if (user) fetchProfile();
+    // Para que la pantalla de acceso abra en «Iniciar sesión» la próxima vez.
+    if (user) markSignedIn();
   }, [user, fetchProfile]);
 
-  // Registro para push. En web no hace nada; en iOS pide permiso la primera
-  // vez y renueva el token en cada arranque, que APNs los rota por su cuenta.
+  // Registro para push. En web no hace nada; en iOS renueva el token en cada
+  // arranque (APNs los rota por su cuenta) SOLO si ya había permiso. La
+  // pregunta ya no sale aquí, en frío: la hace PushPrimer después de algo que
+  // la justifique. Ver lib/push.ts.
   useEffect(() => {
     if (user) registerPush();
   }, [user]);

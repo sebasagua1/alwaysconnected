@@ -70,6 +70,13 @@ export default function EventChat() {
   const refreshCounts = useNotificationStore((s) => s.refresh);
 
   const [phase, setPhase] = useState<Phase>('loading');
+  /** Sube para volver a cargar desde el estado de error. */
+  const [reloadKey, setReloadKey] = useState(0);
+  /**
+   * Mensaje tocado: enseña su hora y sus acciones. Antes cada burbuja llevaba
+   * su «···» y su hora a la vista, y la conversación se leía como un registro.
+   */
+  const [activeMsgId, setActiveMsgId] = useState<string | null>(null);
   const [event, setEvent] = useState<ChatEvent | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [messages, setMessages] = useState<EventChatMessage[]>([]);
@@ -169,7 +176,7 @@ export default function EventChat() {
     })();
 
     return () => { cancelled = true; };
-  }, [eventId, myId, loadSummary, loadMembers]);
+  }, [eventId, myId, loadSummary, loadMembers, reloadKey]);
 
   const loadOlder = async () => {
     if (!eventId || loadingOlder || messages.length === 0) return;
@@ -610,7 +617,7 @@ export default function EventChat() {
   const keyboardOpen = keyboard > 0 && visible.height > 0;
   const shellClass = keyboardOpen
     ? 'fixed inset-x-0 mx-auto sm:max-w-[430px] z-[55] flex flex-col overflow-hidden bg-background'
-    : 'flex flex-col h-screen-nav overflow-hidden bg-background';
+    : 'flex flex-col h-screen-full overflow-hidden bg-background';
   const shellStyle = keyboardOpen ? { top: visible.top, height: visible.height } : undefined;
 
   const header = (
@@ -654,7 +661,7 @@ export default function EventChat() {
 
   if (phase === 'loading') {
     return (
-      <div className="flex flex-col h-screen-nav overflow-hidden bg-background">
+      <div className="flex flex-col h-screen-full overflow-hidden bg-background">
         {header}
         <div className="flex-1 px-4 py-4 space-y-3" aria-busy="true" aria-label={t('common.loading')}>
           {[0, 1, 2, 3].map((i) => (
@@ -670,7 +677,7 @@ export default function EventChat() {
   if (phase === 'no-access' || phase === 'error') {
     const removed = phase === 'no-access' && summary?.removed;
     return (
-      <div className="flex flex-col h-screen-nav overflow-hidden bg-background">
+      <div className="flex flex-col h-screen-full overflow-hidden bg-background">
         {header}
         <div className="flex-1 flex flex-col items-center justify-center text-center px-8 gap-3">
           {phase === 'error' ? (
@@ -684,7 +691,16 @@ export default function EventChat() {
           <p className="text-sm text-muted-foreground">
             {phase === 'error' ? t('eventChat.checkConnection') : removed ? t('eventChat.removedDesc') : t('eventChat.noAccessDesc')}
           </p>
-          <Button variant="outline" className="mt-2 rounded-xl" onClick={goBack}>{t('common.back')}</Button>
+          {/* El texto dice «inténtalo de nuevo»: aquí está el botón para hacerlo. */}
+          <div className="mt-2 flex gap-2">
+            <Button variant="outline" className="rounded-xl" onClick={goBack}>{t('common.back')}</Button>
+            {phase === 'error' && (
+              <Button className="rounded-xl" onClick={() => setReloadKey((k) => k + 1)}>
+                <RotateCw className="w-4 h-4" aria-hidden="true" />
+                {t('eventChat.retry')}
+              </Button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -739,7 +755,17 @@ export default function EventChat() {
               const day = dayKey(msg.created_at);
               const showDay = day !== lastDay;
               lastDay = day;
-              const grouped = !showDay && prev && prev.sender_id === msg.sender_id && !prev.is_announcement && !msg.is_announcement;
+              // Tanda de la misma persona (hasta una hora): nombre y avatar una
+              // vez. La hora, solo al final de una ráfaga (menos de 5 minutos
+              // entre mensajes) o al cambiar de persona.
+              const gap = (a: { created_at: string }, b: { created_at: string }) =>
+                Math.abs(new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+              const grouped = !showDay && prev && prev.sender_id === msg.sender_id && !prev.is_announcement && !msg.is_announcement && gap(prev, msg) < 60 * 60_000;
+              const next = messages[i + 1];
+              const endsGroup = !next || next.sender_id !== msg.sender_id || next.is_announcement || msg.is_announcement
+                || dayKey(next.created_at) !== day || gap(msg, next) >= 5 * 60_000;
+              const active = activeMsgId === msg.id;
+              const showMeta = endsGroup || active || (msg.state !== undefined && msg.state !== 'sent') || Boolean(msg.edited_at);
               const senderName = nameOf(msg.sender_id) ?? t('profile.student');
               const isDeleted = Boolean(msg.deleted_at);
               const removedByOrganizer = isDeleted && msg.deleted_by && msg.deleted_by !== msg.sender_id;
@@ -794,6 +820,7 @@ export default function EventChat() {
                         ) : (
                           <>
                             <div
+                              onClick={() => setActiveMsgId(active ? null : msg.id)}
                               className={cn(
                                 'px-3.5 py-2 rounded-2xl text-sm break-words whitespace-pre-wrap',
                                 msg.is_announcement
@@ -827,7 +854,10 @@ export default function EventChat() {
                               )}
                             </div>
                             {msg.state === undefined || msg.state === 'sent' ? (
-                              isMe ? (
+                              // Las acciones se ven al tocar el mensaje. Siguen en el
+                              // DOM (solo transparentes) para teclado y VoiceOver.
+                              <span className={cn('transition-opacity', active ? 'opacity-100' : 'opacity-0 focus-within:opacity-100', isMe && 'order-0')}>
+                              {isMe ? (
                                 <MessageActionsMenu onEdit={() => startEditing(msg)} onDelete={() => deleteOwn(msg)} className="p-1 shrink-0" />
                               ) : isOrganizer ? (
                                 <button
@@ -845,12 +875,14 @@ export default function EventChat() {
                                   onBlocked={() => setMessages((prev) => prev.filter((m) => m.sender_id !== msg.sender_id))}
                                   className="p-1 shrink-0"
                                 />
-                              )
+                              )}
+                              </span>
                             ) : null}
                           </>
                         )}
                       </div>
 
+                      {showMeta && (
                       <span className="flex items-center gap-1 text-[11px] text-muted-foreground px-1 mt-0.5">
                         {formatTime(msg.created_at)}
                         {msg.edited_at && !isDeleted && ` · ${t('chat.edited')}`}
@@ -863,6 +895,7 @@ export default function EventChat() {
                           <Check className="w-3 h-3" aria-label={t('eventChat.sent')} />
                         )}
                       </span>
+                      )}
 
                       {isMe && msg.state === 'failed' && (
                         <div className="flex items-center gap-1 mt-1" role="alert">
@@ -902,8 +935,10 @@ export default function EventChat() {
         )}
       </div>
 
-      {/* Escribir. Al editar se reutiliza el campo, con una franja encima. */}
-      <div className="bg-background border-t border-border shrink-0">
+      {/* Escribir. Al editar se reutiliza el campo, con una franja encima.
+          Sin barra de pestañas debajo, el campo respeta la zona del indicador
+          de inicio; con el teclado abierto ese hueco ya lo tapa el teclado. */}
+      <div className={cn('bg-background border-t border-border shrink-0', !keyboardOpen && 'safe-bottom')}>
         {candidates.length > 0 && (
           <ul role="listbox" aria-label={t('eventChat.mentionList')} className="max-h-48 overflow-y-auto border-b border-border">
             {candidates.map((c) => {

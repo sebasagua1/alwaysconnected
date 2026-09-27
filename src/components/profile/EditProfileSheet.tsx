@@ -172,19 +172,25 @@ export function EditProfileSheet({ profile, onClose }: Props) {
       <div className="flex-1 overflow-y-auto px-5 py-5 space-y-6">
         {/* Avatar */}
         <div className="flex flex-col items-center gap-3">
+          {/* La cámara siempre visible: antes solo salía con hover, que en un
+              teléfono no existe, y la foto no parecía tocable. */}
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="relative w-20 h-20 rounded-full overflow-hidden bg-primary/10 flex items-center justify-center group"
+            aria-label={t('profile.changePhoto')}
+            className="relative w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center"
           >
             {avatarPreview ? (
-              <img src={avatarPreview} alt="avatar" className="w-full h-full object-cover" />
+              <img src={avatarPreview} alt="" className="w-full h-full object-cover rounded-full" />
             ) : (
-              <span className="text-2xl font-bold text-primary">{name?.[0] ?? '?'}</span>
+              <span className="text-2xl font-bold text-primary" aria-hidden="true">{name?.[0] ?? '?'}</span>
             )}
-            <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity rounded-full">
-              <Camera className="w-6 h-6 text-white" />
-            </div>
+            <span
+              aria-hidden="true"
+              className="absolute -bottom-0.5 -right-0.5 w-8 h-8 rounded-full bg-primary text-primary-foreground border-2 border-card flex items-center justify-center shadow-soft"
+            >
+              <Camera className="w-4 h-4" />
+            </span>
           </button>
           <button
             type="button"

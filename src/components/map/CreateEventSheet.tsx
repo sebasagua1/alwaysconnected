@@ -1,11 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { useTranslation } from 'react-i18next';
-import { X, Minus, Plus as PlusIcon, MapPin, CalendarIcon, Repeat } from 'lucide-react';
+import { X, Minus, Plus as PlusIcon, MapPin, CalendarIcon, Repeat, AlertCircle } from 'lucide-react';
 import { PrivacySelector } from '@/components/ui/privacy-selector';
 import { CATEGORY_ICONS } from '@/lib/categoryIcons';
-import { format } from 'date-fns';
-import { es as esLocale, enUS } from 'date-fns/locale';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { useFormatWhen } from '@/hooks/useFormatWhen';
+import { useSheetDrag } from '@/hooks/useSheetDrag';
+import { haptic } from '@/lib/haptics';
+import { askForPush } from '@/stores/pushPrimerStore';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -57,7 +69,7 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
   const { user } = useAuthStore();
   const { toast } = useToast();
   const { t, i18n } = useTranslation();
-  const dateLocale = i18n.language?.startsWith('en') ? enUS : esLocale;
+  const formatWhen = useFormatWhen();
   const [title, setTitle] = useState(initial?.title ?? '');
   const [category, setCategory] = useState(initial?.category ?? 'study');
   const [date, setDate] = useState<Date | undefined>(initial?.startsAt);
@@ -97,6 +109,55 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
     return () => { cancelada = true; ctrl.abort(); };
   }, [pickedLocation, i18n.language]);
 
+  // ---- Validación a la vista ------------------------------------------------
+  //
+  // Antes «Publicar» estaba desactivado hasta tener título, fecha, hora y
+  // lugar, al final de un formulario largo y sin decir qué faltaba: la gente
+  // veía un botón apagado y no sabía por qué. Ahora siempre se puede pulsar;
+  // si falta algo, se marca en el campo, se dice arriba del botón y se sube
+  // hasta el primero.
+  const [showErrors, setShowErrors] = useState(false);
+  const startsAtPreview = date && time ? combineDateTime(date, time) : null;
+  const errors = {
+    title: title.trim().length < 3,
+    when: !startsAtPreview || startsAtPreview.getTime() < Date.now() - 60_000,
+    location: !pickedLocation,
+  };
+  const missing = [
+    errors.title && t('create.missingTitle'),
+    errors.when && t('create.missingWhen'),
+    errors.location && t('create.missingLocation'),
+  ].filter(Boolean) as string[];
+  const titleRef = useRef<HTMLInputElement>(null);
+  const whenRef = useRef<HTMLDivElement>(null);
+  const locationRef = useRef<HTMLDivElement>(null);
+
+  // ---- Cerrar sin perder un borrador -----------------------------------------
+  //
+  // Tocar fuera de la hoja o la X borraba todo, incluido el sitio ya marcado
+  // en el mapa, sin preguntar.
+  const dirty =
+    !!initial ||
+    title.trim() !== '' ||
+    description.trim() !== '' ||
+    !!date ||
+    !!pickedLocation ||
+    (addressTouched.current && address.trim() !== '');
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const requestClose = () => {
+    if (dirty) setConfirmDiscard(true);
+    else onClose();
+  };
+  const { sheetRef, scrollRef, handleProps } = useSheetDrag<HTMLDivElement>({
+    onClose,
+    enabled: !hidden,
+    canClose: () => {
+      if (!dirty) return true;
+      setConfirmDiscard(true);
+      return false;
+    },
+  });
+
   const DURATION_OPTIONS = [
     { mins: 30, label: t('create.duration30') },
     { mins: 60, label: t('create.duration60') },
@@ -108,12 +169,12 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
   const handlePublish = async () => {
     if (!user) return;
 
-    if (!date || !time) {
-      toast({ title: t('create.missingInfo'), description: t('create.missingInfoDesc'), variant: 'destructive' });
-      return;
-    }
-    if (!pickedLocation) {
-      toast({ title: t('create.locationRequired'), description: t('create.locationRequiredDesc'), variant: 'destructive' });
+    if (errors.title || errors.when || errors.location || !date || !time || !pickedLocation) {
+      setShowErrors(true);
+      haptic.warning();
+      const first = errors.title ? titleRef.current : errors.when ? whenRef.current : locationRef.current;
+      first?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (errors.title) titleRef.current?.focus({ preventScroll: true });
       return;
     }
 
@@ -166,12 +227,22 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
       // rpcMessage el usuario vería el texto crudo de Postgres.
       toast({ title: t('common.error'), description: rpcMessage(error.message, t), variant: 'destructive' });
     } else {
+      haptic.success();
       toast({ title: t('create.created'), description: t('create.createdDesc') });
       onClose();
+      // Con un plan publicado, los avisos de «alguien se unió» valen la pena.
+      askForPush('created');
     }
     setLoading(false);
   };
 
+
+  const errorText = (msg: string) => (
+    <p className="mt-1.5 flex items-center gap-1.5 text-sm text-destructive">
+      <AlertCircle aria-hidden="true" className="w-4 h-4 shrink-0" />
+      {msg}
+    </p>
+  );
 
   return (
     // Mismo z que el sheet de editar, por encima de BottomNav (z-50): en z-30
@@ -179,29 +250,36 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
     // pantalla atenuada, además de seguir siendo pulsable con el modal abierto.
     <div
       className={cn(
-        'fixed inset-0 z-[60] bg-foreground/40 animate-fade-in',
+        'fixed inset-0 z-[60] bg-scrim animate-fade-in',
         // `invisible` y no un desmontaje: conserva el estado. Ademas quita el
         // elemento del hit-testing, asi que los toques llegan al mapa de
         // debajo para poner el pin.
         hidden && 'invisible pointer-events-none',
       )}
-      onClick={onClose}
+      onClick={requestClose}
       aria-hidden={hidden}
     >
       <div
-        className="absolute bottom-0 left-0 right-0 bg-card rounded-t-3xl shadow-lifted animate-slide-up max-h-[85vh] overflow-y-auto mx-auto sm:max-w-[430px]"
+        ref={sheetRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-event-title"
+        className="absolute bottom-0 left-0 right-0 bg-card rounded-t-3xl shadow-lifted animate-slide-up max-h-[88dvh] flex flex-col mx-auto sm:max-w-[430px]"
         onClick={e => e.stopPropagation()}
       >
-        <div className="drag-handle" />
-
-        <div className="px-5 pb-nav">
-          <div className="flex items-center justify-between mb-5">
-            <h2 className="text-xl font-extrabold text-foreground">{t('create.title')}</h2>
-            <button onClick={onClose} aria-label={t('common.close')} className="p-3 -m-2 text-muted-foreground">
+        {/* Cabecera fija: la X ya no se va con el scroll, y desde aquí se
+            puede bajar la hoja con el dedo. */}
+        <div {...handleProps} className="shrink-0 px-5 pt-1 pb-3 border-b border-border/60">
+          <div className="drag-handle" />
+          <div className="flex items-center justify-between">
+            <h2 id="create-event-title" className="text-xl font-extrabold text-foreground">{t('create.title')}</h2>
+            <button onClick={requestClose} aria-label={t('common.close')} className="w-11 h-11 -mr-2 inline-flex items-center justify-center text-muted-foreground">
               <X className="w-5 h-5" />
             </button>
           </div>
+        </div>
 
+        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))]">
           <div className="space-y-5">
             {initial && (
               <p className="flex items-start gap-2 rounded-xl bg-primary/10 text-primary text-sm font-medium p-3">
@@ -209,14 +287,21 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
                 {t('afterEvent.repeatBanner', { title: initial.title })}
               </p>
             )}
-            {/* Title */}
-            <Input
-              placeholder={t('create.titlePh')}
-              aria-label={t('create.titlePh')}
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              className="h-12 rounded-xl text-base"
-            />
+            {/* Title — con etiqueta visible: el placeholder desaparecía al
+                escribir y el campo se quedaba sin nombre. */}
+            <div>
+              <label htmlFor="create-title" className="text-sm font-semibold text-foreground mb-2 block">{t('create.titleLabel')}</label>
+              <Input
+                id="create-title"
+                ref={titleRef}
+                placeholder={t('create.titlePh')}
+                value={title}
+                onChange={e => setTitle(e.target.value)}
+                aria-invalid={showErrors && errors.title}
+                className={cn('h-12 rounded-xl text-base', showErrors && errors.title && 'border-destructive')}
+              />
+              {showErrors && errors.title && errorText(t('create.errorTitle'))}
+            </div>
 
             {/* Category chips */}
             <div>
@@ -243,24 +328,31 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
             </div>
 
             {/* Date & Time */}
-            <div>
+            <div ref={whenRef}>
               <label className="text-sm font-semibold text-foreground mb-1 block">{t('create.when')}</label>
               <Button
                 type="button"
                 variant="outline"
                 onClick={() => setWhenOpen(true)}
+                aria-invalid={showErrors && errors.when}
                 className={cn(
                   'h-12 w-full justify-start text-left font-normal rounded-xl',
-                  !(date && time) && 'text-muted-foreground'
+                  !startsAtPreview && 'text-muted-foreground',
+                  showErrors && errors.when && 'border-destructive',
                 )}
               >
                 <CalendarIcon className="mr-2 h-4 w-4" />
-                {date && time
-                  ? format(combineDateTime(date, time), "EEE d MMM · h:mm a", { locale: dateLocale })
+                {startsAtPreview
+                  // Con la hora de fin según la duración: «Hoy · 19:00 – 21:00».
+                  ? formatWhen(
+                      startsAtPreview.toISOString(),
+                      new Date(startsAtPreview.getTime() + durationMins * 60_000).toISOString(),
+                      { range: true },
+                    )
                   : <span>{t('create.pickWhen')}</span>}
               </Button>
+              {showErrors && errors.when && errorText(startsAtPreview ? t('create.errorPast') : t('create.errorWhen'))}
             </div>
-
             {/* Duration */}
             <div>
               <label className="text-sm font-semibold text-foreground mb-2 block">{t('create.duration')}</label>
@@ -290,7 +382,7 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
                 para quien organiza. Se guardan igual, solo no se pintan.
                 Cuando el geocoding no da nombre, la etiqueta es neutra —
                 NUNCA se vuelve a caer en las coordenadas. */}
-            <div>
+            <div ref={locationRef}>
               <label className="text-sm font-semibold text-foreground mb-2 block">{t('create.location')}</label>
               {pickedLocation ? (
                 <div className="flex items-center gap-3 p-3 bg-primary/10 rounded-xl border border-primary/20">
@@ -315,7 +407,10 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
               ) : (
                 <button
                   onClick={onPickLocation}
-                  className="w-full flex items-center gap-3 p-3 bg-muted rounded-xl text-left hover:bg-muted/80 transition-colors"
+                  className={cn(
+                    'w-full flex items-center gap-3 p-3 bg-muted rounded-xl text-left hover:bg-muted/80 transition-colors',
+                    showErrors && errors.location && 'ring-1 ring-destructive',
+                  )}
                 >
                   <MapPin className="w-5 h-5 text-muted-foreground flex-shrink-0" />
                   <span className="flex-1">
@@ -328,12 +423,16 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
                   </span>
                 </button>
               )}
+              {showErrors && errors.location && errorText(t('create.errorLocation'))}
+              <label htmlFor="create-place" className="text-sm font-semibold text-foreground mt-4 mb-2 block">
+                {t('create.placeNameLabel')} <span className="font-normal text-muted-foreground">({t('common.optional')})</span>
+              </label>
               <Input
-                placeholder={t('create.locationNamePh')}
-                aria-label={t('create.locationNamePh')}
+                id="create-place"
+                placeholder={t('create.placeNamePh')}
                 value={address}
                 onChange={e => { addressTouched.current = true; setAddress(e.target.value); }}
-                className="h-12 rounded-xl text-base mt-2"
+                className="h-12 rounded-xl text-base"
               />
             </div>
 
@@ -344,7 +443,7 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
                 <button
                   onClick={() => setMaxSpots(Math.max(2, maxSpots - 1))}
                   aria-label={t('create.decreaseSpots')}
-                  className="w-10 h-10 rounded-full bg-muted flex items-center justify-center"
+                  className="w-11 h-11 rounded-full bg-muted flex items-center justify-center"
                 >
                   <Minus className="w-4 h-4" />
                 </button>
@@ -352,7 +451,7 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
                 <button
                   onClick={() => setMaxSpots(Math.min(100, maxSpots + 1))}
                   aria-label={t('create.increaseSpots')}
-                  className="w-10 h-10 rounded-full bg-muted flex items-center justify-center"
+                  className="w-11 h-11 rounded-full bg-muted flex items-center justify-center"
                 >
                   <PlusIcon className="w-4 h-4" />
                 </button>
@@ -360,13 +459,18 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
             </div>
 
             {/* Description */}
-            <Textarea
-              placeholder={t('create.descriptionPh')}
-              aria-label={t('create.descriptionPh')}
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              className="rounded-xl min-h-[80px]"
-            />
+            <div>
+              <label htmlFor="create-description" className="text-sm font-semibold text-foreground mb-2 block">
+                {t('create.descriptionLabel')} <span className="font-normal text-muted-foreground">({t('common.optional')})</span>
+              </label>
+              <Textarea
+                id="create-description"
+                placeholder={t('create.descriptionPh2')}
+                value={description}
+                onChange={e => setDescription(e.target.value)}
+                className="rounded-xl min-h-[80px]"
+              />
+            </div>
 
             {/* Privacidad, en el formulario y no escondida tras un acordeon:
                 decidir quien puede ver tu evento no es una opcion avanzada,
@@ -374,14 +478,25 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
                 valor por defecto sin haberlo elegido. */}
             <PrivacySelector value={privacy} onChange={setPrivacy} />
 
-            {/* Publish */}
-            <Button
-              onClick={handlePublish}
-              disabled={loading || !title || !date || !time || !pickedLocation}
-              className="w-full h-12 rounded-xl font-bold text-base"
-            >
-              {loading ? t('create.publishing') : t('create.publish')}
-            </Button>
+            {/* Publish: siempre pulsable. Si falta algo, lo dice aquí mismo. */}
+            <div className="space-y-2">
+              {showErrors && missing.length > 0 && (
+                <p role="alert" className="text-sm text-destructive text-center">
+                  {t('create.missingSummary', {
+                    list: missing.length > 1
+                      ? `${missing.slice(0, -1).join(', ')} ${t('common.and')} ${missing[missing.length - 1]}`
+                      : missing[0],
+                  })}
+                </p>
+              )}
+              <Button
+                onClick={handlePublish}
+                disabled={loading}
+                className="w-full h-12 rounded-xl font-bold text-base"
+              >
+                {loading ? t('create.publishing') : t('create.publish')}
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -399,6 +514,24 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
           }}
         />
       )}
+
+      <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <AlertDialogContent onClick={(e) => e.stopPropagation()}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('create.discardTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('create.discardDesc')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('create.keepEditing')}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={onClose}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {t('create.discard')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

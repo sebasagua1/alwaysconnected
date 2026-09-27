@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { LogOut, Award, TrendingUp, Calendar, Star, Pencil, Zap, Ban, Trash2, FileText, Shield, Loader2, ChevronRight, Bell, Contact } from 'lucide-react';
+import { LogOut, Award, TrendingUp, Calendar, Star, Pencil, Zap, Ban, Trash2, FileText, Shield, Loader2, ChevronRight, Bell, Contact, Languages } from 'lucide-react';
 import { NotificationBell } from '@/components/notifications/NotificationBell';
 import { useNavigate } from 'react-router-dom';
-import { format } from 'date-fns';
+import { regionalLocale } from '@/lib/datetime';
 import { BADGE_ICONS } from '@/lib/categoryIcons';
 import { EditProfileSheet } from '@/components/profile/EditProfileSheet';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -190,32 +190,10 @@ export default function Profile() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-extrabold text-foreground">{t('profile.title')}</h1>
-        <div className="flex items-center gap-3">
-          <NotificationBell className="-m-1" />
-          <LanguageSwitcher />
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <button aria-label={t('profile.signOut')} className="w-11 h-11 inline-flex items-center justify-center -m-2 text-muted-foreground">
-                <LogOut className="w-5 h-5" />
-              </button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>{t('profile.signOutConfirmTitle')}</AlertDialogTitle>
-                <AlertDialogDescription>{t('profile.signOutConfirmDesc')}</AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={signOut}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
-                  {t('profile.signOut')}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
+        {/* Solo la campana. El idioma y cerrar sesión eran ajustes de uso raro
+            en el sitio más visible de la pantalla: ahora viven en «Cuenta y
+            privacidad», abajo. */}
+        <NotificationBell className="-m-1" />
       </div>
 
       {/* Profile card */}
@@ -233,11 +211,15 @@ export default function Profile() {
               <p className="text-sm font-semibold text-foreground/80">{formatAffiliation(verification, t)}</p>
             )}
             <p className="text-sm text-muted-foreground">{profile.major ?? t('profile.noMajor')}</p>
-            <p className="text-xs text-muted-foreground">
-              {profile.residence_type ? t('residence.' + profile.residence_type) : ''}
-              {originLabel && ` · ${originLabel}`}
-              {' · '}{t('profile.semester')} {profile.semester ?? '—'}
-            </p>
+            {/* Solo lo que hay: antes, sin semestre, se pintaba «· Semestre —». */}
+            {(() => {
+              const parts = [
+                profile.residence_type ? t('residence.' + profile.residence_type) : null,
+                originLabel || null,
+                profile.semester ? `${t('profile.semester')} ${profile.semester}` : null,
+              ].filter(Boolean);
+              return parts.length > 0 ? <p className="text-xs text-muted-foreground">{parts.join(' · ')}</p> : null;
+            })()}
             {/* Solo si hay: la matrícula sale del correo institucional, así que
                 quien entró con un correo genérico no tiene ninguna, y una línea
                 con un guion no informa de nada. No es editable a propósito —
@@ -269,6 +251,33 @@ export default function Profile() {
           </div>
         )}
       </div>
+
+      {/* Lo que se dejó para después en el onboarding (ahora esos pasos se
+          pueden omitir): un recordatorio discreto con el camino directo. */}
+      {(() => {
+        const missing = [
+          !profile.major,
+          !profile.residence_type,
+          !(profile.interests?.length),
+          !(profile.languages?.length),
+        ].filter(Boolean).length;
+        if (missing === 0) return null;
+        return (
+          <button
+            onClick={() => setEditOpen(true)}
+            className="w-full mb-5 flex items-center gap-3 rounded-2xl p-4 text-left bg-primary/5 border border-primary/25 active:scale-[0.98] transition-transform"
+          >
+            <span className="w-10 h-10 shrink-0 rounded-xl bg-primary/10 text-primary flex items-center justify-center" aria-hidden="true">
+              <Pencil className="w-4 h-4" />
+            </span>
+            <span className="flex-1 min-w-0">
+              <span className="block text-sm font-bold text-foreground">{t('profile.completeTitle')}</span>
+              <span className="block text-xs text-muted-foreground">{t('profile.completeBody', { count: missing })}</span>
+            </span>
+            <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" aria-hidden="true" />
+          </button>
+        );
+      })()}
 
       <VerificationCard state={verification} loading={verificationLoading} onOpen={() => setVerifyOpen(true)} />
       {verifyOpen && (
@@ -396,7 +405,7 @@ export default function Profile() {
                 <div>
                   <p className="text-sm text-foreground">{t(`pointsHistory.${entry.reason}`)}</p>
                   <p className="text-xs text-muted-foreground">
-                    {format(new Date(entry.created_at), 'MMM d, yyyy')}
+                    {new Intl.DateTimeFormat(regionalLocale(i18n.language ?? 'es'), { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(entry.created_at))}
                   </p>
                 </div>
                 <span className="text-sm font-bold text-primary">+{entry.points}</span>
@@ -458,6 +467,37 @@ export default function Profile() {
           <span className="flex-1 text-sm font-medium text-foreground">{t('legal.terms')}</span>
           <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
         </a>
+
+        {/* Idioma: aquí y no en la cabecera. */}
+        <div className="w-full flex items-center gap-3 px-5 py-2.5 border-t border-border">
+          <Languages className="w-4 h-4 text-muted-foreground shrink-0" aria-hidden="true" />
+          <span className="flex-1 text-sm font-medium text-foreground">{t('common.language')}</span>
+          <LanguageSwitcher />
+        </div>
+
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <button className="w-full flex items-center gap-3 px-5 py-3.5 border-t border-border text-left hover:bg-muted/40 transition-colors">
+              <LogOut className="w-4 h-4 text-muted-foreground shrink-0" aria-hidden="true" />
+              <span className="flex-1 text-sm font-medium text-foreground">{t('profile.signOut')}</span>
+            </button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t('profile.signOutConfirmTitle')}</AlertDialogTitle>
+              <AlertDialogDescription>{t('profile.signOutConfirmDesc')}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={signOut}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {t('profile.signOut')}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         <button
           onClick={() => { setDeleteConfirm(''); setDeleteOpen(true); }}

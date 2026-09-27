@@ -125,7 +125,9 @@ export default function NotificationSettings() {
   };
 
   const enablePush = async () => {
-    await registerPush();
+    // Aquí sí: la persona ha tocado «Activar», el diálogo del sistema es lo
+    // que espera ver.
+    await registerPush({ ask: true });
     const p = await PushNotifications.checkPermissions();
     setPushState(p.receive === 'granted' ? 'granted' : p.receive === 'denied' ? 'denied' : 'prompt');
   };

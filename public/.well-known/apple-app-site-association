@@ -4,7 +4,8 @@
       {
         "appIDs": ["89RWP86552.com.alwaysconnected.app"],
         "components": [
-          { "/": "/i/*", "comment": "Invitaciones: el codigo es opaco" }
+          { "/": "/i/*", "comment": "Invitaciones: el codigo es opaco" },
+          { "/": "/event/*", "comment": "Ficha de una actividad compartida desde la app" }
         ]
       }
     ]

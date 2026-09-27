@@ -5,6 +5,7 @@ import { es as esLocale, enUS } from 'date-fns/locale';
 import { EVENT_CATEGORIES } from '@/lib/constants';
 import { CATEGORY_ICONS } from '@/lib/categoryIcons';
 import { cn } from '@/lib/utils';
+import { formatTime } from '@/lib/datetime';
 import type { MapEvent } from '@/stores/eventStore';
 import { filterEvents, dayGroupKey, startsSoon, fromDateKey, type EventFilter } from '@/lib/eventFilter';
 import { useStaggerReveal } from '@/hooks/useStaggerReveal';
@@ -128,7 +129,9 @@ export function EventListView({ events, filter, now = new Date(), onSelect, onCr
                     <div className="space-y-1.5">
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
                         <Clock className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span>{format(new Date(event.starts_at), 'EEE d MMM · HH:mm', { locale: dateLocale })}</span>
+                        {/* El día ya lo dice la cabecera de la sección: aquí solo las horas,
+                            con la de fin, que antes no aparecía. */}
+                        <span>{formatTime(new Date(event.starts_at), i18n.language ?? 'es')} – {formatTime(new Date(event.ends_at), i18n.language ?? 'es')}</span>
                         {soon && (
                           <span className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary font-bold">
                             {soon.kind === 'live' && (

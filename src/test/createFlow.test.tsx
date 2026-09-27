@@ -45,7 +45,7 @@ describe('PrivacySelector', () => {
   it('avisa del cambio con la clave, no con la etiqueta traducida', () => {
     const onChange = vi.fn();
     render(<PrivacySelector value="open" onChange={onChange} />);
-    fireEvent.click(screen.getByRole('radio', { name: /Privado/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /Con aprobación/ }));
     expect(onChange).toHaveBeenCalledWith('private');
   });
 });
@@ -143,9 +143,9 @@ describe('CreateEventSheet: no se pierde lo escrito al ir a por la ubicación', 
     const { CreateEventSheet } = await import('@/components/map/CreateEventSheet');
     const { rerender } = render(<CreateEventSheet {...props} />);
 
-    const titulo = screen.getByPlaceholderText('Título del evento');
+    const titulo = screen.getByLabelText('Título');
     fireEvent.change(titulo, { target: { value: 'Estudiar para el final' } });
-    fireEvent.change(screen.getByPlaceholderText(/Descripción corta/i), {
+    fireEvent.change(screen.getByLabelText(/Descripción/i), {
       target: { value: 'Traigan calculadora' },
     });
 

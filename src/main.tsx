@@ -10,12 +10,16 @@ import "@fontsource/plus-jakarta-sans/800.css";
 import App from "./App.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
 import { watchColorScheme } from "./lib/theme.ts";
+import { watchDynamicType } from "./lib/dynamicType.ts";
 import "./index.css";
 import "./i18n";
 
 // Mantiene la clase .dark al día si el sistema cambia de tema con la app
 // abierta. El estado inicial ya lo puso el script en línea del index.html.
 watchColorScheme();
+
+// El tamaño de letra de Ajustes de iOS, que el webview no aplica solo.
+watchDynamicType();
 
 createRoot(document.getElementById("root")!).render(
   <ErrorBoundary>

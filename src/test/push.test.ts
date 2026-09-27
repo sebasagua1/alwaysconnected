@@ -101,6 +101,36 @@ describe('registerPush', () => {
     expect(traza.filter((t) => t === 'register')).toHaveLength(2);
   });
 
+  it('en el arranque NO pregunta: con el permiso sin decidir no hace nada', async () => {
+    permiso = 'prompt';
+    const pedir = vi.fn(async () => ({ receive: 'granted' }));
+    const { PushNotifications } = await import('@capacitor/push-notifications');
+    const original = PushNotifications.requestPermissions;
+    (PushNotifications as { requestPermissions: unknown }).requestPermissions = pedir;
+    try {
+      const { registerPush } = await cargar();
+      await registerPush();
+      expect(pedir).not.toHaveBeenCalled();
+      expect(traza).not.toContain('register');
+    } finally {
+      (PushNotifications as { requestPermissions: unknown }).requestPermissions = original;
+    }
+  });
+
+  it('con ask: true sí pide el permiso y registra', async () => {
+    permiso = 'prompt';
+    const { PushNotifications } = await import('@capacitor/push-notifications');
+    const original = PushNotifications.requestPermissions;
+    (PushNotifications as { requestPermissions: unknown }).requestPermissions = async () => ({ receive: 'granted' });
+    try {
+      const { registerPush } = await cargar();
+      await registerPush({ ask: true });
+      expect(traza).toContain('register');
+    } finally {
+      (PushNotifications as { requestPermissions: unknown }).requestPermissions = original;
+    }
+  });
+
   it('sin permiso del sistema no llega a registrar', async () => {
     permiso = 'denied';
     const { registerPush } = await cargar();

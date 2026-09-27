@@ -64,11 +64,31 @@ async function attachListeners(): Promise<void> {
   });
 }
 
+/** En qué punto está el permiso de notificaciones, sin pedirlo. */
+export async function pushPermission(): Promise<'granted' | 'denied' | 'prompt' | 'unsupported'> {
+  if (!isNative) return 'unsupported';
+  try {
+    const { receive } = await PushNotifications.checkPermissions();
+    if (receive === 'granted') return 'granted';
+    if (receive === 'denied') return 'denied';
+    return 'prompt';
+  } catch {
+    return 'unsupported';
+  }
+}
+
 /**
- * Pide permiso y registra el dispositivo. Idempotente: APNs rota los tokens
- * por su cuenta, así que esto se llama en cada arranque con sesión abierta.
+ * Registra el dispositivo. Idempotente: APNs rota los tokens por su cuenta,
+ * así que esto se llama en cada arranque con sesión abierta.
+ *
+ * `ask` decide si puede salir el diálogo del sistema. En el arranque NO:
+ * antes se pedía nada más entrar, justo detrás del de ubicación y sin
+ * ninguna explicación, e iOS solo enseña ese diálogo una vez — quien decía
+ * que no ya no recibía avisos salvo que fuera a Ajustes. Ahora el arranque
+ * solo renueva el token si ya había permiso, y la pregunta la hace
+ * PushPrimer después de algo que la justifica (unirse, crear un plan…).
  */
-export async function registerPush(): Promise<void> {
+export async function registerPush({ ask = false }: { ask?: boolean } = {}): Promise<void> {
   if (!isNative) return;
   if (inFlight) return inFlight;
 
@@ -79,6 +99,7 @@ export async function registerPush(): Promise<void> {
       // otra vez no molesta pero tampoco sirve.
       let permission = await PushNotifications.checkPermissions();
       if (permission.receive === 'prompt' || permission.receive === 'prompt-with-rationale') {
+        if (!ask) return;
         permission = await PushNotifications.requestPermissions();
       }
       if (permission.receive !== 'granted') {
