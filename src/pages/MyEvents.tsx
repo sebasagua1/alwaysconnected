@@ -13,8 +13,9 @@ import type { MapEvent } from '@/stores/eventStore';
 import { useNotificationStore } from '@/stores/notificationStore';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useStaggerReveal } from '@/hooks/useStaggerReveal';
-import { format, isPast, formatDistanceToNow } from 'date-fns';
-import { es as esLocale, enUS } from 'date-fns/locale';
+import { isPast } from 'date-fns';
+import { useFormatWhen } from '@/hooks/useFormatWhen';
+import { startsSoonMinutes } from '@/lib/datetime';
 import { pageTitle } from '@/lib/brand';
 import { NotificationBell } from '@/components/notifications/NotificationBell';
 
@@ -30,8 +31,8 @@ interface EventWithParticipation extends MapEvent {
 export default function MyEvents() {
   const { user } = useAuthStore();
   const { toast } = useToast();
-  const { t, i18n } = useTranslation();
-  const dateLocale = i18n.language?.startsWith('en') ? enUS : esLocale;
+  const { t } = useTranslation();
+  const formatWhen = useFormatWhen();
   const [activeTab, setActiveTab] = useState<'upcoming' | 'past'>('upcoming');
   const [events, setEvents] = useState<EventWithParticipation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -238,61 +239,65 @@ export default function MyEvents() {
               onClick={() => setSelected(event)}
               className="w-full text-left bg-card rounded-2xl p-4 shadow-soft active:scale-[0.98] transition-transform"
             >
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <div
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold text-white mb-2"
-                    style={{ background: cat?.color }}
-                  >
-                    {cat && (() => { const Icon = CATEGORY_ICONS[cat.key]; return <Icon className="w-2.5 h-2.5 mr-0.5 inline" />; })()}
-                    {cat ? t('categories.' + cat.key) : ''}
-                  </div>
-                  <h2 className="font-bold text-foreground text-base">{event.title}</h2>
-                  <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground">
-                    <Clock className="w-3.5 h-3.5" />
-                    <span>{format(new Date(event.starts_at), 'MMM d, h:mm a', { locale: dateLocale })}</span>
-                  </div>
+              {/* Categoría y papel en la misma fila, y el título a todo el ancho.
+                  Antes el tiempo relativo iba a la derecha del título y lo partía
+                  en dos líneas. */}
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <div
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold text-white"
+                  style={{ background: cat?.color }}
+                >
+                  {cat && (() => { const Icon = CATEGORY_ICONS[cat.key]; return <Icon aria-hidden="true" className="w-3 h-3" />; })()}
+                  {cat ? t('categories.' + cat.key) : ''}
                 </div>
-                <div className="flex flex-col items-end gap-1">
-                  <span className={cn(
-                    'px-2 py-0.5 rounded-full text-xs font-bold',
-                    event.role === 'organizer' ? 'bg-primary/10 text-primary' : 'bg-success/10 text-success'
-                  )}>
-                    {event.role === 'organizer' ? t('myEvents.organizer') : t('myEvents.joined')}
-                  </span>
-                  {!isPast(new Date(event.starts_at)) && (
-                    <span className="text-xs text-muted-foreground">
-                      {formatDistanceToNow(new Date(event.starts_at), { addSuffix: true, locale: dateLocale })}
-                    </span>
-                  )}
-                </div>
+                <span className={cn(
+                  'px-2 py-0.5 rounded-full text-xs font-bold shrink-0',
+                  event.role === 'organizer' ? 'bg-primary/10 text-primary' : 'bg-success/10 text-success'
+                )}>
+                  {event.role === 'organizer' ? t('myEvents.organizer') : t('myEvents.joined')}
+                </span>
+              </div>
+              <h2 className="font-bold text-foreground text-base">{event.title}</h2>
+              <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground">
+                <Clock aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {formatWhen(event.starts_at, event.ends_at, { range: true })}
+                  {(() => {
+                    const min = startsSoonMinutes(event.starts_at);
+                    return min ? <span className="font-semibold text-primary"> · {t('when.inMinutes', { count: min })}</span> : null;
+                  })()}
+                </span>
               </div>
 
               {/* Pie: aforo, solicitudes por aprobar y pista de que se toca */}
-              <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">
-                <span className="flex items-center gap-2">
+              <div className="flex items-center justify-between gap-2 mt-3 pt-3 border-t border-border">
+                {/* Las pastillas no se parten: a 375 pt «2 por aprobar» y «Ver
+                    detalles» se quedaban en dos líneas. Si no caben, bajan de
+                    fila enteras. */}
+                <span className="flex flex-wrap items-center gap-2 min-w-0">
                   <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     <Users className="w-3.5 h-3.5" />
                     {event.current_spots}/{event.max_spots}
                   </span>
                   {pendingByEvent[event.id] > 0 && (
-                    <span className="px-2 py-0.5 rounded-full bg-destructive text-destructive-foreground text-xs font-bold">
+                    // Ámbar y no rojo: es algo pendiente de hacer, no un error.
+                    <span className="px-2 py-0.5 rounded-full bg-warning/15 text-warning text-xs font-bold whitespace-nowrap">
                       {t('myEvents.requests', { count: pendingByEvent[event.id] })}
                     </span>
                   )}
                   {chatUnreadByEvent[event.id] > 0 && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-bold">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-bold whitespace-nowrap">
                       <MessagesSquare className="w-3 h-3" aria-hidden="true" />
                       {t('eventChat.unreadChip', { count: chatUnreadByEvent[event.id] })}
                     </span>
                   )}
                   {event.justApproved && (
-                    <span className="px-2 py-0.5 rounded-full bg-success/15 text-success text-xs font-bold">
+                    <span className="px-2 py-0.5 rounded-full bg-success/15 text-success text-xs font-bold whitespace-nowrap">
                       {t('myEvents.approved')}
                     </span>
                   )}
                 </span>
-                <span className="flex items-center gap-0.5 text-xs font-semibold text-primary">
+                <span className="flex items-center gap-0.5 text-xs font-semibold text-primary whitespace-nowrap shrink-0">
                   {isPast(new Date(event.ends_at)) ? t('afterEvent.whatsNext') : t('myEvents.viewDetails')}
                   <ChevronRight className="w-3.5 h-3.5" />
                 </span>
@@ -318,7 +323,7 @@ export default function MyEvents() {
           <button
             aria-label={t('common.close')}
             onClick={handleCloseSheet}
-            className="absolute inset-0 bg-black/30"
+            className="absolute inset-0 bg-scrim"
           />
           {/* El sheet se coloca con `absolute left-0 right-0`, así que ocupa el
               ancho de su contenedor. Sin esta columna se estiraba a todo el

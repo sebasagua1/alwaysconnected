@@ -11,7 +11,11 @@
     "clearSearch": "Clear search",
     "remove": "Remove",
     "language": "Language",
-    "loadMore": "Load more"
+    "loadMore": "Load more",
+    "seeMore": "See more",
+    "seeLess": "See less",
+    "optional": "optional",
+    "and": "and"
   },
   "bottomNav": {
     "map": "Map",
@@ -42,7 +46,8 @@
     "sendResetLink": "Send me the link",
     "backToSignIn": "Back to sign in",
     "resetSent": "Check your email",
-    "resetSentDesc": "If that address has an account, a link to choose a new password is on its way."
+    "resetSentDesc": "If that address has an account, a link to choose a new password is on its way.",
+    "modeLabel": "Do you have an account?"
   },
   "onboarding": {
     "campusTitle": "Your institution",
@@ -54,7 +59,7 @@
     "fullName": "Full name",
     "fullNamePh": "Your full name",
     "major": "Major",
-    "majorPh": "e.g. CS, ME, BA",
+    "majorPh": "E.g. Industrial Engineering",
     "semester": "Semester",
     "semesterPh": "1-12",
     "residenceTitle": "Residence",
@@ -79,7 +84,9 @@
     "countryFilter": "Filter by country",
     "allCountries": "All",
     "institutionResults_one": "{{count}} institution",
-    "institutionResults_other": "{{count}} institutions"
+    "institutionResults_other": "{{count}} institutions",
+    "stepOf": "Step {{step}} of {{total}}",
+    "skip": "Skip for now"
   },
   "profile": {
     "title": "Profile",
@@ -117,7 +124,10 @@
     "photoTooLarge": "Image is too large (max 15 MB)",
     "interests": "Interests",
     "languages": "Languages",
-    "studentId": "Student ID"
+    "studentId": "Student ID",
+    "completeTitle": "Complete your profile",
+    "completeBody_one": "{{count}} detail missing so people can find you.",
+    "completeBody_other": "{{count}} details missing so people can find you."
   },
   "myEvents": {
     "title": "My Events",
@@ -201,12 +211,19 @@
     "leave": "Leave group",
     "leaveConfirmTitle": "Leave group?",
     "leaveConfirmDesc": "You'll no longer receive messages from this group.",
-    "sendFailed": "Message couldn't be sent"
+    "sendFailed": "Message couldn't be sent",
+    "emptyTitle": "Your groups",
+    "emptyBody": "For your soccer team or study group: plans and chat in one place.",
+    "emptyCta": "Create a group"
   },
   "leaderboard": {
     "title": "Leaderboard",
     "pts": "points",
-    "empty": "No data yet"
+    "empty": "No data yet",
+    "scope": "Leaderboard for",
+    "campus": "Campus",
+    "friends": "Friends",
+    "you": "Your rank"
   },
   "pointsHistory": {
     "title": "Points History",
@@ -270,11 +287,18 @@
     "you": "You",
     "noAttendeesYet": "No one has joined yet. Be the first.",
     "showAllAttendees": "See {{count}} more people",
-    "seeAll": "See all"
+    "seeAll": "See all",
+    "organizedBy": "Hosted by",
+    "directions": "Directions",
+    "onTheMap": "Location on the map",
+    "share": "Share this plan",
+    "shareShort": "Share",
+    "shareText": "Want to come? “{{title}}” · {{when}}",
+    "linkCopied": "Link copied"
   },
   "create": {
     "title": "New Event",
-    "titlePh": "Event title",
+    "titlePh": "E.g. 5-a-side soccer on the back field",
     "category": "Category",
     "date": "Date",
     "pickDate": "Pick date",
@@ -288,7 +312,7 @@
     "privacy": "Privacy",
     "privacyOpen": "Public",
     "privacyFriends": "Friends",
-    "privacyPrivate": "Private",
+    "privacyPrivate": "Approval",
     "publish": "Publish Event",
     "publishing": "Publishing…",
     "missingInfo": "Missing info",
@@ -314,7 +338,30 @@
     "locationConfirmed": "This is where it'll be",
     "locationChange": "Change location",
     "locationUnnamed": "Selected location",
-    "locationLooking": "Looking up the place…"
+    "locationLooking": "Looking up the place…",
+    "locationCancel": "Cancel and go back to the form",
+    "locationSearchPh": "Search for a place",
+    "locationResults": "Places found",
+    "locationNoResults": "We couldn't find that place. Tap the map to mark it.",
+    "locationHere": "Where I am",
+    "locationUse": "Use this location",
+    "titleLabel": "Title",
+    "placeNameLabel": "Place name",
+    "placeNamePh": "E.g. Building B, 2nd floor",
+    "descriptionLabel": "Description",
+    "descriptionPh2": "What to bring, where to meet…",
+    "missingTitle": "a title",
+    "missingWhen": "a date and time",
+    "missingLocation": "a place",
+    "missingSummary": "To publish, add {{list}}.",
+    "errorTitle": "Give it a title of at least 3 letters.",
+    "errorWhen": "Pick when it is.",
+    "errorPast": "That time has passed. Pick another.",
+    "errorLocation": "Mark on the map where it is.",
+    "discardTitle": "Discard this event?",
+    "discardDesc": "What you wrote and the marked place will be lost.",
+    "keepEditing": "Keep editing",
+    "discard": "Discard"
   },
   "edit": {
     "title": "Edit event",
@@ -326,7 +373,9 @@
     "endBeforeStart": "End time must be after start time",
     "spotsBelowCurrent": "Capacity cannot be lower than current attendees",
     "spotsAtMin": "Minimum: {{count}} (current attendees)",
-    "notifyNotice": "If you change the time, the place or the privacy, we'll notify everyone who joined."
+    "notifyNotice": "If you change the time, the place or the privacy, we'll notify everyone who joined.",
+    "discardTitle": "Discard changes?",
+    "discardDesc": "Your changes won't be saved."
   },
   "categories": {
     "study": "Study",
@@ -394,7 +443,7 @@
   },
   "residence": {
     "local": "Local",
-    "foraneo": "Non-local",
+    "foraneo": "From another city",
     "international": "International"
   },
   "badges": {
@@ -517,7 +566,12 @@
       "live": "Happening now",
       "startsIn": "Starts in {{count}} min"
     },
-    "truncated": "Showing the {{count}} soonest events. Use the filters to narrow it down."
+    "truncated": "Showing the {{count}} soonest events. Use the filters to narrow it down.",
+    "pinNow": "NOW",
+    "locCardTitle": "See what's happening near you?",
+    "locCardBody": "Turn on location to see plans around you and check in to events.",
+    "locCardEnable": "Turn on location",
+    "locCardLater": "Not now"
   },
   "rpcErrors": {
     "notAuthenticated": "Your session expired. Sign in again.",
@@ -630,7 +684,10 @@
     "hour": "Hour",
     "minute": "Minute",
     "meridiem": "AM or PM",
-    "done": "Done"
+    "done": "Done",
+    "now": "Now",
+    "until": "until {{time}}",
+    "inMinutes": "in {{count}} min"
   },
   "interestGroups": {
     "sports": "Sports",
@@ -1049,5 +1106,16 @@
     "skipped_one": "{{count}} didn't get it: already invited or can't receive it",
     "skipped_other": "{{count}} didn't get it: already invited or can't receive it",
     "limit": "Up to {{max}} at a time"
+  },
+  "pushPrimer": {
+    "title": "Want a heads-up?",
+    "body": {
+      "joined": "We'll let you know when your plan is about to start and if anything changes last minute.",
+      "created": "We'll let you know when someone joins or asks to join your plan.",
+      "friend": "We'll let you know when they accept and when your friends make plans."
+    },
+    "yes": "Yes, notify me",
+    "notNow": "Not now",
+    "footnote": "You can change this anytime in Notification preferences."
   }
 }

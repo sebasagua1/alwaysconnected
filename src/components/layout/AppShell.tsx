@@ -1,8 +1,10 @@
 import { Suspense } from 'react';
+import { useLocation } from 'react-router-dom';
 import { BottomNav } from './BottomNav';
 import { PageTransition } from './PageTransition';
 import { useNotificationSync } from '@/hooks/useNotificationSync';
 import { PendingInvite } from '@/components/friends/PendingInvite';
+import { PushPrimer } from '@/components/notifications/PushPrimer';
 import { useNotificationPrefsSync } from '@/hooks/useNotificationPrefsSync';
 
 /** Rueda que ocupa solo el hueco del contenido, sin comerse la barra. */
@@ -20,6 +22,7 @@ export function AppShell() {
   useNotificationSync();
   // Zona horaria e idioma para el horario silencioso y el texto de las push.
   useNotificationPrefsSync();
+  const { pathname } = useLocation();
 
   return (
     <div className="mx-auto sm:max-w-[430px] min-h-screen relative bg-background">
@@ -30,8 +33,19 @@ export function AppShell() {
       <Suspense fallback={<ContentSpinner />}>
         <PageTransition />
       </Suspense>
+      {/* Franja opaca bajo la hora y la batería para las pantallas que hacen
+          scroll. En el mapa no: el mapa no se desplaza y debe llegar hasta el
+          borde, como en Mapas. z-40: por debajo de la barra inferior (z-50) y
+          de hojas y diálogos (z-60 en adelante), que la tapan al abrirse. */}
+      {pathname !== '/' && (
+        <div
+          aria-hidden="true"
+          className="status-bar-scrim fixed inset-x-0 top-0 z-40 pointer-events-none bg-background/85 backdrop-blur-xl"
+        />
+      )}
       <BottomNav />
       <PendingInvite />
+      <PushPrimer />
     </div>
   );
 }

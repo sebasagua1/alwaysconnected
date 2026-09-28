@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { MapEvent, useEventStore } from '@/stores/eventStore';
@@ -15,7 +15,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import { Clock, MapPin, Users, X, Loader2, Pencil, Star, MessagesSquare, ChevronRight, UserPlus } from 'lucide-react';
+import { Clock, MapPin, Users, X, Loader2, Pencil, Star, MessagesSquare, ChevronRight, UserPlus, Share2, Navigation } from 'lucide-react';
 import { InviteFriendsSheet } from '@/components/map/InviteFriendsSheet';
 import { CATEGORY_ICONS } from '@/lib/categoryIcons';
 import { EditEventSheet } from '@/components/map/EditEventSheet';
@@ -30,8 +30,12 @@ import { UserProfileSheet } from '@/components/profile/UserProfileSheet';
 import { PostEventActions } from '@/components/map/PostEventActions';
 import { rpcMessage } from '@/lib/rpcErrors';
 import { cn } from '@/lib/utils';
-import { format } from 'date-fns';
-import { es as esLocale, enUS } from 'date-fns/locale';
+import { useFormatWhen } from '@/hooks/useFormatWhen';
+import { useSheetDrag } from '@/hooks/useSheetDrag';
+import { shareLink } from '@/lib/contacts';
+import { SITE_URL } from '@/lib/legal';
+import { haptic } from '@/lib/haptics';
+import { askForPush } from '@/stores/pushPrimerStore';
 
 /** Caras que se enseñan antes del "+N", contando a quien organiza. */
 export const ATTENDEES_PREVIEW = 5;
@@ -39,15 +43,59 @@ export const ATTENDEES_PREVIEW = 5;
 interface Props {
   event: MapEvent;
   onClose: () => void;
+  /**
+   * Dónde empieza la ficha, en px desde arriba de la ventana. El mapa lo usa
+   * para colocar el pin del evento en la parte que queda a la vista: antes lo
+   * centraba en la pantalla y la ficha lo tapaba.
+   */
+  onTopChange?: (top: number) => void;
 }
 
-export function EventBottomSheet({ event, onClose }: Props) {
+/** «Cómo llegar»: Mapas de Apple, que en iOS abre la app y en la web la página. */
+function directionsUrl(event: MapEvent): string | null {
+  if (!event.location) return null;
+  const { lat, lng } = event.location;
+  const q = encodeURIComponent(event.address || event.title);
+  return `https://maps.apple.com/?daddr=${lat},${lng}&q=${q}&dirflg=w`;
+}
+
+export function EventBottomSheet({ event, onClose, onTopChange }: Props) {
   const cat = EVENT_CATEGORIES.find(c => c.key === event.category);
   const { user } = useAuthStore();
   const { toast } = useToast();
   const removeEvent = useEventStore((s) => s.removeEvent);
-  const { t, i18n } = useTranslation();
-  const dateLocale = i18n.language?.startsWith('en') ? enUS : esLocale;
+  const { t } = useTranslation();
+  const formatWhen = useFormatWhen();
+  const { sheetRef, scrollRef, handleProps } = useSheetDrag<HTMLDivElement>({ onClose });
+  // La descripción se corta a dos líneas; «Ver más» solo si de verdad se cortó.
+  const descRef = useRef<HTMLParagraphElement>(null);
+  const [descExpanded, setDescExpanded] = useState(false);
+  const [descClamped, setDescClamped] = useState(false);
+  useLayoutEffect(() => {
+    setDescExpanded(false);
+  }, [event.id]);
+  useLayoutEffect(() => {
+    const el = descRef.current;
+    if (!el || descExpanded) return;
+    setDescClamped(el.scrollHeight > el.clientHeight + 1);
+  }, [event.description, descExpanded]);
+
+  // Avisar al mapa de dónde empieza la ficha, y cada vez que cambie de alto.
+  useEffect(() => {
+    const el = sheetRef.current;
+    if (!el || !onTopChange) return;
+    // offsetTop y no getBoundingClientRect: la ficha entra deslizándose, y
+    // durante la animación el rectángulo incluye el transform. Lo que interesa
+    // es dónde se queda.
+    const report = () => {
+      const parentTop = (el.offsetParent as HTMLElement | null)?.getBoundingClientRect().top ?? 0;
+      onTopChange(parentTop + el.offsetTop);
+    };
+    report();
+    const ro = new ResizeObserver(report);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [onTopChange, sheetRef, event.id]);
   const [localCurrentSpots, setLocalCurrentSpots] = useState(event.current_spots);
   const spotsLeft = event.max_spots - localCurrentSpots;
   // null = fuera · 'pending' = solicitud enviada · 'joined' = dentro
@@ -232,6 +280,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
         toast({ title: t('event.alreadyJoined') });
       } else if (error.message?.includes('EVENT_FULL')) {
         setMyStatus(prevStatus);
+        haptic.warning();
         toast({ title: t('event.eventFull'), variant: 'destructive' });
       } else if (error.message?.includes('REMOVED_FROM_EVENT')) {
         setMyStatus(null);
@@ -249,11 +298,15 @@ export function EventBottomSheet({ event, onClose }: Props) {
       }
     } else {
       setAttendeesVersion(v => v + 1);
+      haptic.light();
       if (needsApproval) {
         toast({ title: t('event.requestSent'), description: t('event.requestSentDesc') });
       } else {
         toast({ title: t('event.joinedToast'), description: t('event.joinedDesc', { title: event.title }) });
       }
+      // Justo ahora es cuando los avisos tienen sentido: «empieza pronto»,
+      // «te aprobaron». Si el permiso está sin decidir, se ofrece.
+      askForPush('joined');
     }
     setSubmitting(false);
   };
@@ -301,6 +354,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
       });
     } else {
       setRequests(prev => prev.filter(r => r.id !== userId));
+      haptic.light();
       if (approve) setLocalCurrentSpots(sp => sp + 1);
       setAttendeesVersion(v => v + 1);
       toast({ title: approve ? t('event.requestApproved') : t('event.requestDeclined') });
@@ -350,6 +404,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
         });
         if (error) {
           const msg = error.message ?? '';
+          haptic.warning();
           if (msg.includes('TOO_FAR_FROM_EVENT')) {
             toast({ title: t('event.checkInTooFar'), variant: 'destructive' });
           } else if (msg.includes('OUTSIDE_EVENT_WINDOW')) {
@@ -361,6 +416,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
           }
         } else {
           setCheckedIn(true);
+          haptic.success();
           toast({ title: t('event.checkInSuccess') });
         }
         setCheckingIn(false);
@@ -384,6 +440,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
       toast({ title: t('common.error'), description: error.message, variant: 'destructive' });
     } else {
       setUserRating(stars);
+      haptic.light();
       toast({ title: t('event.ratingSubmitted') });
     }
     setSubmittingRating(false);
@@ -392,14 +449,26 @@ export function EventBottomSheet({ event, onClose }: Props) {
   const eventEnded = Date.now() > new Date(event.ends_at).getTime();
   // Estable entre renders: la hoja de invitar vuelve a pedir amigos si cambia.
   const attendeeIds = useMemo(() => attendees.map((a) => a.user_id), [attendees]);
+  const organizer = attendees.find((a) => a.is_creator) ?? null;
+  const directions = directionsUrl(event);
+
+  const handleShare = async () => {
+    const url = `${SITE_URL}/event/${event.id}`;
+    const text = t('event.shareText', { title: event.title, when: formatWhen(event.starts_at, event.ends_at) });
+    const result = await shareLink(text, url);
+    if (result === 'copied') toast({ title: t('event.linkCopied') });
+  };
 
   return (
     <>
-    <div className="absolute above-nav left-0 right-0 z-20 animate-slide-up">
+    <div ref={sheetRef} className="absolute above-nav left-0 right-0 z-20 animate-slide-up">
       {/* Con "¿Qué sigue?" la ficha de un evento pasado es más alta que la
           pantalla: sin tope, el título se salía por arriba. */}
-      <div className="mx-3 bg-card rounded-3xl shadow-lifted p-5 relative max-h-[calc(100dvh-8rem)] overflow-y-auto">
-        <div className="drag-handle" />
+      <div ref={scrollRef} className="mx-3 bg-card rounded-3xl shadow-lifted p-5 relative max-h-[calc(100dvh-8rem)] overflow-y-auto overscroll-contain">
+        {/* Zona de agarre: se puede bajar la ficha con el dedo para cerrarla. */}
+        <div {...handleProps} className="-mx-5 -mt-5 pt-3 pb-1 mb-1">
+          <div className="drag-handle !my-0" />
+        </div>
 
         <div className="absolute top-3 right-3 flex items-center">
           {/* Reportar/bloquear vive junto al contenido, no en ajustes */}
@@ -427,15 +496,48 @@ export function EventBottomSheet({ event, onClose }: Props) {
 
         <h3 className="text-lg font-extrabold text-foreground mb-2">{event.title}</h3>
 
+        {/* Quién organiza, a la vista. Entre desconocidos es el primer dato
+            de confianza, y antes solo salía como una etiqueta de 10 px en la
+            fila de asistentes. */}
+        {!isCreator && organizer && (
+          <button
+            type="button"
+            onClick={() => setViewingUserId(organizer.user_id)}
+            className="mb-3 -ml-1 inline-flex items-center gap-2 min-h-[44px] pl-1 pr-3 rounded-full text-left active:opacity-60 transition-opacity"
+          >
+            <UserAvatar
+              url={organizer.avatar_url}
+              name={organizer.name}
+              className="w-8 h-8 bg-muted"
+              textClassName="text-xs font-bold text-muted-foreground"
+            />
+            <span className="text-sm text-muted-foreground">
+              {t('event.organizedBy')}{' '}
+              <span className="font-semibold text-foreground">{organizer.name ?? t('profile.student')}</span>
+            </span>
+          </button>
+        )}
+
         <div className="space-y-2 mb-4">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Clock className="w-4 h-4" />
-            <span>{format(new Date(event.starts_at), 'MMM d, h:mm a', { locale: dateLocale })}</span>
+            <Clock aria-hidden="true" className="w-4 h-4 shrink-0" />
+            <span>{formatWhen(event.starts_at, event.ends_at, { range: true })}</span>
           </div>
-          {event.address && (
+          {(event.address || directions) && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <MapPin className="w-4 h-4" />
-              <span>{event.address}</span>
+              <MapPin aria-hidden="true" className="w-4 h-4 shrink-0" />
+              <span className="flex-1 min-w-0 truncate">{event.address || t('event.onTheMap')}</span>
+              {directions && !eventEnded && (
+                <a
+                  href={directions}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="shrink-0 inline-flex items-center gap-1 min-h-[44px] -my-3 px-1 text-sm font-semibold text-primary"
+                >
+                  <Navigation aria-hidden="true" className="w-3.5 h-3.5" />
+                  {t('event.directions')}
+                </a>
+              )}
             </div>
           )}
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -451,7 +553,24 @@ export function EventBottomSheet({ event, onClose }: Props) {
         </div>
 
         {event.description && (
-          <p className="text-sm text-muted-foreground mb-4 line-clamp-2">{event.description}</p>
+          <div className="mb-4">
+            <p
+              ref={descRef}
+              className={cn('text-sm text-muted-foreground whitespace-pre-line', !descExpanded && 'line-clamp-2')}
+            >
+              {event.description}
+            </p>
+            {(descClamped || descExpanded) && (
+              <button
+                type="button"
+                onClick={() => setDescExpanded((v) => !v)}
+                aria-expanded={descExpanded}
+                className="inline-flex items-center min-h-[44px] -my-2 text-sm font-semibold text-primary"
+              >
+                {descExpanded ? t('common.seeLess') : t('common.seeMore')}
+              </button>
+            )}
+          </div>
         )}
 
 
@@ -542,11 +661,11 @@ export function EventBottomSheet({ event, onClose }: Props) {
                         className={cn('w-12 h-12 bg-muted', a.is_creator && 'ring-2 ring-primary ring-offset-2 ring-offset-card')}
                         textClassName="text-base font-bold text-muted-foreground"
                       />
-                      <span className="w-full text-[11px] font-medium text-foreground truncate">
+                      <span className="w-full text-xs font-medium text-foreground truncate">
                         {a.user_id === user?.id ? t('event.you') : a.name?.split(' ')[0] ?? '?'}
                       </span>
                       {a.is_creator && (
-                        <span className="-mt-1 text-[10px] font-semibold text-primary">{t('event.organizer')}</span>
+                        <span className="-mt-1 text-xs font-semibold text-primary">{t('event.organizer')}</span>
                       )}
                     </button>
                   </li>
@@ -562,7 +681,7 @@ export function EventBottomSheet({ event, onClose }: Props) {
                       <span className="w-12 h-12 rounded-full bg-primary/10 text-primary text-sm font-bold flex items-center justify-center">
                         +{attendees.length - ATTENDEES_PREVIEW}
                       </span>
-                      <span className="w-full text-[11px] font-medium text-muted-foreground truncate">{t('event.seeAll')}</span>
+                      <span className="w-full text-xs font-medium text-muted-foreground truncate">{t('event.seeAll')}</span>
                     </button>
                   </li>
                 )}
@@ -697,14 +816,24 @@ export function EventBottomSheet({ event, onClose }: Props) {
                 : needsApproval ? t('event.askToJoin') : t('event.join')}
             </Button>
           )}
-          {/* Terminado ya no hay nada que unirse, salirse ni cancelar. */}
-          <Button
-            variant="outline"
-            onClick={onClose}
-            className={cn('h-12 rounded-xl font-semibold px-6', !checking && eventEnded && 'flex-1')}
-          >
-            {t('common.close')}
-          </Button>
+          {/* «Compartir» donde antes había un «Cerrar» que repetía la X de
+              arriba. Pasar un plan por WhatsApp es como llega gente nueva.
+              Terminado ya no hay nada que compartir: ahí sí, cerrar. */}
+          {!checking && eventEnded ? (
+            <Button variant="outline" onClick={onClose} className="flex-1 h-12 rounded-xl font-semibold">
+              {t('common.close')}
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              onClick={() => void handleShare()}
+              aria-label={t('event.share')}
+              className="h-12 rounded-xl font-semibold px-5 gap-2"
+            >
+              <Share2 aria-hidden="true" className="w-4 h-4" />
+              {t('event.shareShort')}
+            </Button>
+          )}
         </div>
 
         {isPending && (

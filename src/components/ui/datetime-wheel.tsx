@@ -4,6 +4,8 @@ import { format, addDays, isSameDay, startOfDay } from 'date-fns';
 import { es as esLocale, enUS } from 'date-fns/locale';
 import { Button } from '@/components/ui/button';
 import { WheelColumn, WHEEL_ITEM_HEIGHT } from '@/components/ui/wheel-column';
+import { meridiemLabels, uses24h } from '@/lib/datetime';
+import { useSheetDrag } from '@/hooks/useSheetDrag';
 
 const ITEM_H = WHEEL_ITEM_HEIGHT;
 const DAYS_AHEAD = 365;
@@ -19,6 +21,7 @@ interface Props {
 
 export function DateTimeWheel({ value, minDate, title, onCancel, onConfirm }: Props) {
   const { t, i18n } = useTranslation();
+  const { sheetRef, handleProps } = useSheetDrag<HTMLDivElement>({ onClose: onCancel });
   const locale = i18n.language?.startsWith('en') ? enUS : esLocale;
 
   // Con `value` a null esto sería un Date nuevo en cada render, y arrastraría
@@ -49,17 +52,27 @@ export function DateTimeWheel({ value, minDate, title, onCancel, onConfirm }: Pr
     [days, locale, t]
   );
 
-  const hours = useMemo(() => Array.from({ length: 12 }, (_, i) => `${i + 1}`), []);
+  // 24 h o 12 h según la región, como el reloj del teléfono: «AM/PM» en una
+  // pantalla en español no lo escribe nadie en México ni en Colombia.
+  const lang = i18n.language ?? 'es';
+  const is24h = useMemo(() => uses24h(lang), [lang]);
+  const hours = useMemo(
+    () => (is24h
+      ? Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0'))
+      : Array.from({ length: 12 }, (_, i) => `${i + 1}`)),
+    [is24h],
+  );
   const minutes = useMemo(
     () => Array.from({ length: 12 }, (_, i) => (i * 5).toString().padStart(2, '0')),
     []
   );
-  const meridiems = useMemo(() => ['AM', 'PM'], []);
+  const meridiems = useMemo(() => meridiemLabels(lang), [lang]);
 
   const [dayIdx, setDayIdx] = useState(() =>
     Math.max(0, days.findIndex((d) => isSameDay(d, base)))
   );
   const [hourIdx, setHourIdx] = useState(() => {
+    if (is24h) return base.getHours();
     const h = base.getHours() % 12;
     return h === 0 ? 11 : h - 1;
   });
@@ -68,21 +81,33 @@ export function DateTimeWheel({ value, minDate, title, onCancel, onConfirm }: Pr
 
   const handleConfirm = () => {
     const d = new Date(days[dayIdx]);
-    const hour12 = parseInt(hours[hourIdx], 10);
-    const hour24 = merIdx === 1 ? (hour12 === 12 ? 12 : hour12 + 12) : hour12 === 12 ? 0 : hour12;
+    const picked = parseInt(hours[hourIdx], 10);
+    const hour24 = is24h
+      ? picked
+      : merIdx === 1 ? (picked === 12 ? 12 : picked + 12) : picked === 12 ? 0 : picked;
     d.setHours(hour24, parseInt(minutes[minIdx], 10), 0, 0);
     onConfirm(d);
   };
 
   return (
-    <div className="fixed inset-0 z-[80] bg-foreground/40 animate-fade-in" onClick={onCancel}>
+    // stopPropagation: esta rueda se abre DENTRO de las hojas de crear y
+    // editar, y el toque fuera de ella subía hasta el fondo de la hoja, que
+    // lo tomaba como «cerrar el formulario» y tiraba todo lo escrito.
+    <div className="fixed inset-0 z-[80] bg-scrim animate-fade-in" onClick={(e) => { e.stopPropagation(); onCancel(); }}>
       <div
+        ref={sheetRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
         className="absolute bottom-0 left-0 right-0 mx-auto sm:max-w-[430px] bg-card rounded-t-3xl shadow-lifted animate-slide-up safe-bottom"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="drag-handle" />
-        <div className="px-5 pt-1 pb-3 text-center">
-          <h2 className="text-base font-extrabold text-foreground">{title}</h2>
+        {/* Se baja con el dedo desde aquí; las columnas giran con su propio scroll. */}
+        <div {...handleProps}>
+          <div className="drag-handle" />
+          <div className="px-5 pt-1 pb-3 text-center">
+            <h2 className="text-base font-extrabold text-foreground">{title}</h2>
+          </div>
         </div>
 
         <div className="relative px-4">
@@ -96,7 +121,9 @@ export function DateTimeWheel({ value, minDate, title, onCancel, onConfirm }: Pr
             <WheelColumn items={dayLabels} index={dayIdx} onIndexChange={setDayIdx} label={t('when.date')} className="flex-[2]" />
             <WheelColumn items={hours} index={hourIdx} onIndexChange={setHourIdx} label={t('when.hour')} className="flex-1" />
             <WheelColumn items={minutes} index={minIdx} onIndexChange={setMinIdx} label={t('when.minute')} className="flex-1" />
-            <WheelColumn items={meridiems} index={merIdx} onIndexChange={setMerIdx} label={t('when.meridiem')} className="flex-1" />
+            {!is24h && (
+              <WheelColumn items={meridiems} index={merIdx} onIndexChange={setMerIdx} label={t('when.meridiem')} className="flex-1" />
+            )}
           </div>
         </div>
 

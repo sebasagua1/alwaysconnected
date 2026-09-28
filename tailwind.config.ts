@@ -3,6 +3,12 @@ import tailwindcssAnimate from "tailwindcss-animate";
 
 export default {
   darkMode: ["class"],
+  // Los `hover:` solo donde de verdad hay puntero. En iOS el hover se queda
+  // «pegado» después de tocar: un botón con hover:bg-accent seguía azul
+  // intenso tras pulsarlo, como si estuviera seleccionado.
+  future: {
+    hoverOnlyWhenSupported: true,
+  },
   content: ["./pages/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./app/**/*.{ts,tsx}", "./src/**/*.{ts,tsx}"],
   prefix: "",
   theme: {

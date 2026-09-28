@@ -235,6 +235,31 @@ export async function shareInvite(text: string, url: string, recipients: number)
   return completed;
 }
 
+/**
+ * Compartir un enlace cualquiera (un evento, por ejemplo) con la hoja del
+ * sistema. Igual que shareInvite, pero sin contar nada: no es una invitación.
+ * Devuelve 'copied' cuando no hay hoja de compartir y se copió al portapapeles.
+ */
+export async function shareLink(text: string, url: string): Promise<'shared' | 'copied' | 'cancelled'> {
+  if (contactsSupported()) {
+    const r = await ContactsBridge.share({ text, url });
+    return r.completed ? 'shared' : 'cancelled';
+  }
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    try {
+      await navigator.share({ text, url });
+      return 'shared';
+    } catch {
+      return 'cancelled';
+    }
+  }
+  if (typeof navigator !== 'undefined' && navigator.clipboard) {
+    await navigator.clipboard.writeText(`${text} ${url}`);
+    return 'copied';
+  }
+  return 'cancelled';
+}
+
 // ---------------------------------------------------------------- invitación pendiente
 
 const PENDING_INVITE_KEY = 'ac_pending_invite';

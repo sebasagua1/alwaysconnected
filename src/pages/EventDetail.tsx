@@ -56,7 +56,7 @@ export default function EventDetail() {
 
   return (
     <div className="fixed inset-0 z-[60]">
-      <button aria-label={t('common.close')} onClick={close} className="absolute inset-0 bg-black/30" />
+      <button aria-label={t('common.close')} onClick={close} className="absolute inset-0 bg-scrim" />
       <div className="relative mx-auto h-full w-full sm:max-w-[430px]">
         {event && <EventBottomSheet event={event} onClose={close} />}
       </div>

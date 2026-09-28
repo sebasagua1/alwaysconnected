@@ -11,7 +11,11 @@
     "clearSearch": "Borrar búsqueda",
     "remove": "Quitar",
     "language": "Idioma",
-    "loadMore": "Cargar más"
+    "loadMore": "Cargar más",
+    "seeMore": "Ver más",
+    "seeLess": "Ver menos",
+    "optional": "opcional",
+    "and": "y"
   },
   "bottomNav": {
     "map": "Mapa",
@@ -42,19 +46,20 @@
     "sendResetLink": "Enviarme el enlace",
     "backToSignIn": "Volver a iniciar sesión",
     "resetSent": "Revisa tu correo",
-    "resetSentDesc": "Si esa dirección tiene cuenta, te llega un enlace para elegir contraseña nueva."
+    "resetSentDesc": "Si esa dirección tiene cuenta, te llega un enlace para elegir contraseña nueva.",
+    "modeLabel": "¿Tienes cuenta?"
   },
   "onboarding": {
     "campusTitle": "Tu institución",
     "campusSubtitle": "Busca tu universidad, escuela o campus",
     "campusSearch": "Nombre, siglas o ciudad…",
     "campusEmpty": "No encontramos esa institución.",
-    "welcomeTitle": "¡Bienvenido!",
+    "welcomeTitle": "¡Te damos la bienvenida!",
     "welcomeSubtitle": "Configuremos tu perfil",
     "fullName": "Nombre completo",
     "fullNamePh": "Tu nombre completo",
     "major": "Carrera",
-    "majorPh": "ej. ITC, IMT, LAD",
+    "majorPh": "Ej. Ingeniería Industrial",
     "semester": "Semestre",
     "semesterPh": "1-12",
     "residenceTitle": "Residencia",
@@ -79,7 +84,9 @@
     "countryFilter": "Filtrar por país",
     "allCountries": "Todos",
     "institutionResults_one": "{{count}} institución",
-    "institutionResults_other": "{{count}} instituciones"
+    "institutionResults_other": "{{count}} instituciones",
+    "stepOf": "Paso {{step}} de {{total}}",
+    "skip": "Omitir por ahora"
   },
   "profile": {
     "title": "Perfil",
@@ -117,7 +124,10 @@
     "photoTooLarge": "La imagen es demasiado grande (máx. 15 MB)",
     "interests": "Intereses",
     "languages": "Idiomas",
-    "studentId": "Matrícula"
+    "studentId": "Matrícula",
+    "completeTitle": "Completa tu perfil",
+    "completeBody_one": "Te falta {{count}} dato para que te encuentren mejor.",
+    "completeBody_other": "Te faltan {{count}} datos para que te encuentren mejor."
   },
   "myEvents": {
     "title": "Mis eventos",
@@ -201,12 +211,19 @@
     "leave": "Salir del grupo",
     "leaveConfirmTitle": "¿Salir del grupo?",
     "leaveConfirmDesc": "Ya no recibirás mensajes de este grupo.",
-    "sendFailed": "No se pudo enviar el mensaje"
+    "sendFailed": "No se pudo enviar el mensaje",
+    "emptyTitle": "Tus grupos",
+    "emptyBody": "Para tu equipo de fútbol o tu grupo de estudio: planes y chat en un solo sitio.",
+    "emptyCta": "Crear un grupo"
   },
   "leaderboard": {
     "title": "Clasificación",
     "pts": "puntos",
-    "empty": "Sin datos aún"
+    "empty": "Sin datos aún",
+    "scope": "Clasificación de",
+    "campus": "Campus",
+    "friends": "Amigos",
+    "you": "Tu puesto"
   },
   "pointsHistory": {
     "title": "Historial de puntos",
@@ -270,11 +287,18 @@
     "you": "Tú",
     "noAttendeesYet": "Aún no se ha unido nadie. Sé la primera persona.",
     "showAllAttendees": "Ver a las {{count}} personas más",
-    "seeAll": "Ver todos"
+    "seeAll": "Ver todos",
+    "organizedBy": "Organiza",
+    "directions": "Cómo llegar",
+    "onTheMap": "Ubicación en el mapa",
+    "share": "Compartir este plan",
+    "shareShort": "Compartir",
+    "shareText": "¿Te apuntas? «{{title}}» · {{when}}",
+    "linkCopied": "Enlace copiado"
   },
   "create": {
     "title": "Nuevo evento",
-    "titlePh": "Título del evento",
+    "titlePh": "Ej. Fútbol 5 en la cancha de atrás",
     "category": "Categoría",
     "date": "Fecha",
     "pickDate": "Elegir fecha",
@@ -288,7 +312,7 @@
     "privacy": "Privacidad",
     "privacyOpen": "Público",
     "privacyFriends": "Amigos",
-    "privacyPrivate": "Privado",
+    "privacyPrivate": "Con aprobación",
     "publish": "Publicar evento",
     "publishing": "Publicando…",
     "missingInfo": "Falta información",
@@ -314,7 +338,30 @@
     "locationConfirmed": "Aquí va a ser el evento",
     "locationChange": "Cambiar ubicación",
     "locationUnnamed": "Ubicación seleccionada",
-    "locationLooking": "Buscando el lugar…"
+    "locationLooking": "Buscando el lugar…",
+    "locationCancel": "Cancelar y volver al formulario",
+    "locationSearchPh": "Buscar un lugar",
+    "locationResults": "Lugares encontrados",
+    "locationNoResults": "No encontramos ese lugar. Toca el mapa para marcarlo.",
+    "locationHere": "Aquí donde estoy",
+    "locationUse": "Usar esta ubicación",
+    "titleLabel": "Título",
+    "placeNameLabel": "Nombre del lugar",
+    "placeNamePh": "Ej. Edificio B, segundo piso",
+    "descriptionLabel": "Descripción",
+    "descriptionPh2": "Qué llevar, dónde se encuentran…",
+    "missingTitle": "el título",
+    "missingWhen": "la fecha y hora",
+    "missingLocation": "el lugar",
+    "missingSummary": "Para publicar falta {{list}}.",
+    "errorTitle": "Ponle un título de al menos 3 letras.",
+    "errorWhen": "Elige cuándo es.",
+    "errorPast": "Esa hora ya pasó. Elige otra.",
+    "errorLocation": "Marca en el mapa dónde es.",
+    "discardTitle": "¿Descartar este evento?",
+    "discardDesc": "Se perderá lo que has escrito y el lugar marcado.",
+    "keepEditing": "Seguir editando",
+    "discard": "Descartar"
   },
   "edit": {
     "title": "Editar evento",
@@ -326,7 +373,9 @@
     "endBeforeStart": "La hora de fin debe ser después del inicio",
     "spotsBelowCurrent": "El cupo no puede ser menor al número de asistentes actuales",
     "spotsAtMin": "Mínimo: {{count}} (asistentes actuales)",
-    "notifyNotice": "Si cambias la hora, el lugar o la privacidad, avisaremos por notificación a quienes se apuntaron."
+    "notifyNotice": "Si cambias la hora, el lugar o la privacidad, avisaremos por notificación a quienes se apuntaron.",
+    "discardTitle": "¿Descartar los cambios?",
+    "discardDesc": "Lo que has cambiado no se guardará."
   },
   "categories": {
     "study": "Estudio",
@@ -394,7 +443,7 @@
   },
   "residence": {
     "local": "Local",
-    "foraneo": "Foráneo",
+    "foraneo": "De otra ciudad",
     "international": "Internacional"
   },
   "badges": {
@@ -517,7 +566,12 @@
       "live": "En curso",
       "startsIn": "Empieza en {{count}} min"
     },
-    "truncated": "Mostrando los {{count}} eventos más próximos. Usa los filtros para acotar."
+    "truncated": "Mostrando los {{count}} eventos más próximos. Usa los filtros para acotar.",
+    "pinNow": "AHORA",
+    "locCardTitle": "¿Ves lo que pasa cerca de ti?",
+    "locCardBody": "Activa tu ubicación para ver los planes a tu alrededor y registrar tu asistencia.",
+    "locCardEnable": "Activar ubicación",
+    "locCardLater": "Ahora no"
   },
   "rpcErrors": {
     "notAuthenticated": "Tu sesión expiró. Vuelve a iniciar sesión.",
@@ -629,8 +683,11 @@
     "date": "Fecha",
     "hour": "Hora",
     "minute": "Minuto",
-    "meridiem": "AM o PM",
-    "done": "Listo"
+    "meridiem": "a. m. o p. m.",
+    "done": "Listo",
+    "now": "Ahora",
+    "until": "hasta {{time}}",
+    "inMinutes": "en {{count}} min"
   },
   "interestGroups": {
     "sports": "Deporte",
@@ -1049,5 +1106,16 @@
     "skipped_one": "A {{count}} no le llegó: ya tenía invitación o no puede recibirla",
     "skipped_other": "A {{count}} no les llegó: ya tenían invitación o no pueden recibirla",
     "limit": "Máximo {{max}} por vez"
+  },
+  "pushPrimer": {
+    "title": "¿Te avisamos?",
+    "body": {
+      "joined": "Te avisamos cuando tu plan esté por empezar y si cambia algo de última hora.",
+      "created": "Te avisamos cuando alguien se una o pida entrar a tu plan.",
+      "friend": "Te avisamos cuando acepten tu solicitud y cuando tus amigos armen planes."
+    },
+    "yes": "Sí, avísame",
+    "notNow": "Ahora no",
+    "footnote": "Puedes cambiarlo cuando quieras en Preferencias de notificaciones."
   }
 }

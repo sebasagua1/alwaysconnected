@@ -17,6 +17,8 @@ import {
 } from '@/lib/socialAuth';
 import { APP_NAME } from '@/lib/brand';
 import { AUTH_CALLBACK_URL } from '@/lib/deepLinks';
+import { hasSignedInBefore } from '@/lib/authHints';
+import { cn } from '@/lib/utils';
 
 // A dónde manda Supabase al pulsar el enlace del correo.
 //
@@ -39,7 +41,8 @@ export default function Auth() {
   const { t } = useTranslation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [isSignUp, setIsSignUp] = useState(false);
+  // Primera vez en este dispositivo: se abre en «Crear cuenta».
+  const [isSignUp, setIsSignUp] = useState(() => !hasSignedInBefore());
   const [forgot, setForgot] = useState(false);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -231,6 +234,28 @@ export default function Auth() {
           </>
         )}
 
+        {/* Crear cuenta / Iniciar sesión, arriba y a la vista. Antes el
+            formulario abría siempre en «Iniciar sesión» y el «Regístrate»
+            quedaba por debajo del pliegue en un iPhone de 375 pt. */}
+        {!forgot && (
+          <div role="group" aria-label={t('auth.modeLabel')} className="grid grid-cols-2 p-1 rounded-xl bg-muted">
+            {([true, false] as const).map((signUp) => (
+              <button
+                key={String(signUp)}
+                type="button"
+                aria-pressed={isSignUp === signUp}
+                onClick={() => setIsSignUp(signUp)}
+                className={cn(
+                  'min-h-[44px] rounded-lg text-sm font-semibold transition-colors',
+                  isSignUp === signUp ? 'bg-card text-foreground shadow-soft' : 'text-muted-foreground',
+                )}
+              >
+                {signUp ? t('auth.createAccount') : t('auth.signIn')}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
@@ -298,26 +323,16 @@ export default function Auth() {
           </a>.
         </p>
 
-        <p className="text-center text-sm text-muted-foreground">
-          {forgot ? (
+        {forgot && (
+          <p className="text-center text-sm text-muted-foreground">
             <button
               onClick={() => setForgot(false)}
               className="inline-flex items-center min-h-[44px] px-1 text-primary font-semibold hover:underline"
             >
               {t('auth.backToSignIn')}
             </button>
-          ) : (
-            <>
-              {isSignUp ? t('auth.hasAccount') : t('auth.noAccount')}{' '}
-              <button
-                onClick={() => setIsSignUp(!isSignUp)}
-                className="inline-flex items-center min-h-[44px] px-1 text-primary font-semibold hover:underline"
-              >
-                {isSignUp ? t('auth.signIn') : t('auth.signUp')}
-              </button>
-            </>
-          )}
-        </p>
+          </p>
+        )}
       </div>
     </div>
   );

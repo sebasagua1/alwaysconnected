@@ -96,3 +96,73 @@ export async function reverseGeocode(
     return null;
   }
 }
+
+/* -------------------------------------------------------------------------
+   Búsqueda de lugares (forward geocoding), para elegir la ubicación de un
+   evento escribiendo «Biblioteca» en vez de buscar el punto a ojo en el mapa.
+   ------------------------------------------------------------------------- */
+
+export interface PlaceResult {
+  id: string;
+  name: string;
+  /** Segunda línea: la dirección o la zona, sin repetir el nombre. */
+  detail: string;
+  lng: number;
+  lat: number;
+}
+
+interface ForwardFeature extends Feature {
+  id?: string;
+  center?: [number, number];
+}
+
+/** Medio lado del recuadro de búsqueda, en grados (~20 km en el ecuador). */
+export const SEARCH_BOX_DEGREES = 0.18;
+
+export function buildSearchUrl(
+  query: string,
+  token: string,
+  language = 'es',
+  proximity?: { lng: number; lat: number },
+): string {
+  const params = new URLSearchParams({
+    access_token: token,
+    language,
+    types: 'poi,address,place,neighborhood,locality',
+    limit: '5',
+    autocomplete: 'true',
+  });
+  // Cerca del campus, y SOLO cerca: `proximity` es una preferencia blanda, y
+  // con ella sola «Biblioteca» devolvía bibliotecas de Argentina y Brasil. El
+  // recuadro (unos 40 km de lado) deja fuera lo que no es de la ciudad.
+  if (proximity) {
+    params.set('proximity', `${roundCoord(proximity.lng)},${roundCoord(proximity.lat)}`);
+    const d = SEARCH_BOX_DEGREES;
+    params.set('bbox', [proximity.lng - d, proximity.lat - d, proximity.lng + d, proximity.lat + d].map(roundCoord).join(','));
+  }
+  return `${BASE}/${encodeURIComponent(query.trim())}.json?${params}`;
+}
+
+export function parseSearch(data: { features?: ForwardFeature[] } | null | undefined): PlaceResult[] {
+  return (data?.features ?? [])
+    .filter((f) => Array.isArray(f.center) && f.center.length === 2)
+    .map((f, i) => {
+      const name = f.text?.trim() || f.place_name?.split(',')[0]?.trim() || '';
+      const rest = (f.place_name ?? '').split(',').slice(1).join(',').trim();
+      return { id: f.id ?? String(i), name, detail: rest, lng: f.center![0], lat: f.center![1] };
+    })
+    .filter((r) => r.name);
+}
+
+export async function searchPlaces(
+  query: string,
+  token: string,
+  language = 'es',
+  proximity?: { lng: number; lat: number },
+  signal?: AbortSignal,
+): Promise<PlaceResult[]> {
+  if (query.trim().length < 2 || !token) return [];
+  const res = await fetch(buildSearchUrl(query, token, language, proximity), { signal });
+  if (!res.ok) return [];
+  return parseSearch(await res.json());
+}

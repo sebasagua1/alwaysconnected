@@ -21,6 +21,13 @@ import { pageTitle } from '@/lib/brand';
 import { PRIVACY_URL, TERMS_URL } from '@/lib/legal';
 import { rpcMessage } from '@/lib/rpcErrors';
 
+/**
+ * Pasos que se pueden dejar para después. Antes había que pasar por siete
+ * pantallas antes de ver un solo plan; ahora solo campus, nombre y la parte
+ * legal son obligatorios, y lo demás se completa luego desde Perfil.
+ */
+const OPTIONAL_STEPS = new Set(['residence', 'origin', 'interests', 'languages']);
+
 export default function Onboarding() {
   const { user, profile, profileLoaded, fetchProfile } = useAuthStore();
   const { toast } = useToast();
@@ -28,9 +35,9 @@ export default function Onboarding() {
   const [step, setStep] = useState(0);
   const [name, setName] = useState('');
   const [major, setMajor] = useState('');
-  // Con rueda de scroll ya no hay "campo vacío": siempre hay una fila
-  // seleccionada, así que arranca en el primer semestre en vez de en blanco.
-  const [semester, setSemester] = useState('1');
+  // La rueda arranca en «—» (sin decir). Antes arrancaba en 1, y quien no la
+  // tocaba quedaba guardado en primer semestre sin haberlo elegido.
+  const [semester, setSemester] = useState('');
   const [residence, setResidence] = useState('');
   const [origin, setOrigin] = useState<string | null>(null);
   const [interests, setInterests] = useState<string[]>([]);
@@ -124,6 +131,19 @@ export default function Onboarding() {
   const [direction, setDirection] = useState<'fwd' | 'back'>('fwd');
   const goNext = () => { setDirection('fwd'); setStep((v) => v + 1); };
   const goBack = () => { setDirection('back'); setStep((v) => v - 1); };
+  const stepRef = useRef(step);
+  stepRef.current = step;
+
+  // Residencia es una elección única: al elegir se avanza solo, sin pedir un
+  // segundo toque en «Siguiente». Con un respiro para ver la selección, y
+  // solo si nadie se ha movido de paso entre medias.
+  const chooseResidence = (value: string) => {
+    setResidence(value);
+    const at = stepRef.current;
+    window.setTimeout(() => {
+      if (stepRef.current === at) goNext();
+    }, 220);
+  };
 
   // Al cambiar de paso el contenido puede quedar desplazado del anterior.
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -147,7 +167,8 @@ export default function Onboarding() {
       name: name.trim() || null,
       major,
       semester: parseInt(semester) || null,
-      residence_type: residence,
+      // null si se omitió el paso: la columna lo admite y Perfil lo pide luego.
+      residence_type: residence || null,
       // Solo tiene sentido para quien no es local.
       origin: residence === 'local' ? null : origin,
       interests,
@@ -211,9 +232,9 @@ export default function Onboarding() {
                 aria-hidden
               />
               <WheelColumn
-                items={SEMESTER_OPTIONS}
-                index={Math.min(11, Math.max(0, parseInt(semester, 10) - 1 || 0))}
-                onIndexChange={(i) => setSemester(SEMESTER_OPTIONS[i])}
+                items={['—', ...SEMESTER_OPTIONS]}
+                index={semester ? Math.min(12, Math.max(1, parseInt(semester, 10) || 0)) : 0}
+                onIndexChange={(i) => setSemester(i === 0 ? '' : SEMESTER_OPTIONS[i - 1])}
                 label={t('onboarding.semester')}
                 labelledBy="onb-semester-label"
                 className="relative w-full"
@@ -231,7 +252,7 @@ export default function Onboarding() {
             <h2 className="text-2xl font-extrabold text-foreground mb-1">{t('onboarding.residenceTitle')}</h2>
             <p className="text-muted-foreground text-sm">{t('onboarding.residenceSubtitle')}</p>
           </div>
-          <ResidencePicker value={residence} onChange={setResidence} />
+          <ResidencePicker value={residence} onChange={chooseResidence} />
         </div>
       );
     }
@@ -403,11 +424,15 @@ export default function Onboarding() {
           Resultado: la pastilla caía encima de la barra de progreso y tapaba
           su último segmento, con notch y sin él. Mismo fallo, y misma
           solución, que en Auth.tsx. */}
-      <div className="flex justify-end mb-4">
+      <div className="flex items-center justify-between mb-4">
+        {/* Los segmentos solos no decían cuánto faltaba. */}
+        <p className="text-sm font-semibold text-muted-foreground" aria-live="polite">
+          {t('onboarding.stepOf', { step: Math.min(step, totalSteps - 1) + 1, total: totalSteps })}
+        </p>
         <LanguageSwitcher />
       </div>
       {/* Progress */}
-      <div className="flex gap-1.5 mb-8">
+      <div className="flex gap-1.5 mb-8" aria-hidden="true">
         {Array.from({ length: totalSteps }).map((_, i) => (
           <div
             key={i}
@@ -438,8 +463,23 @@ export default function Onboarding() {
         </div>
       </div>
 
+      {/* Dejar un paso opcional para luego, sin tener que rellenarlo. */}
+      {OPTIONAL_STEPS.has(current) && (
+        <button
+          type="button"
+          onClick={() => {
+            if (current === 'residence') { setResidence(''); setOrigin(null); }
+            if (current === 'origin') setOrigin(null);
+            goNext();
+          }}
+          className="self-center mt-6 min-h-[44px] px-4 text-sm font-semibold text-muted-foreground"
+        >
+          {t('onboarding.skip')}
+        </button>
+      )}
+
       {/* Navigation */}
-      <div className="flex gap-3 mt-8">
+      <div className={cn('flex gap-3', OPTIONAL_STEPS.has(current) ? 'mt-2' : 'mt-8')}>
         {step > 0 && (
           <Button variant="outline" onClick={goBack} className="h-12 rounded-xl px-6">
             <ChevronLeft className="w-4 h-4 mr-1" /> {t('common.back')}

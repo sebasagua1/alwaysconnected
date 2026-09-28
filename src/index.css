@@ -41,6 +41,12 @@
 
     --radius: 1rem;
 
+    /* Velo detrás de hojas y diálogos. Oscuro en los dos modos: antes varias
+       hojas usaban bg-foreground/40, y en oscuro `foreground` es casi blanco,
+       así que la pantalla de detrás se aclaraba en vez de apagarse. Lleva el
+       alfa dentro para que todos los velos de la app sean el mismo. */
+    --scrim: 234 45% 6% / 0.5;
+
     /* Que los controles nativos del sistema (barras de scroll, selectores)
        se pinten en el mismo modo que la app. */
     color-scheme: light;
@@ -101,6 +107,7 @@
     --border: 234 25% 22%;
     --input: 234 25% 22%;
     --ring: 216 100% 66%;
+    --scrim: 0 0% 0% / 0.6;
 
     color-scheme: dark;
   }
@@ -183,6 +190,12 @@
     height: 100dvh;
     padding-bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
   }
+  /* Pantalla completa SIN el hueco de la barra inferior: para las
+     conversaciones, donde la barra de pestañas ya no se enseña. */
+  .h-screen-full {
+    height: 100vh;
+    height: 100dvh;
+  }
   .safe-bottom {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
@@ -209,6 +222,16 @@
   }
   .glass {
     @apply bg-card/80 backdrop-blur-xl;
+  }
+  .bg-scrim {
+    background-color: hsl(var(--scrim));
+  }
+  /* Franja fija bajo la barra de estado (hora, batería). Sin ella, al hacer
+     scroll el contenido pasaba por DEBAJO de la hora y se montaban el uno
+     sobre el otro: ninguna pantalla tiene cabecera fija. Mide exactamente el
+     inset superior, así que en la web y en aparatos sin muesca no ocupa nada. */
+  .status-bar-scrim {
+    height: env(safe-area-inset-top, 0px);
   }
   .shadow-soft {
     box-shadow: 0 4px 24px rgba(0,0,0,0.08);
@@ -255,6 +278,41 @@
 /* Bottom sheet drag handle */
 .drag-handle {
   @apply w-10 h-1 rounded-full bg-muted-foreground/30 mx-auto mt-2 mb-3;
+}
+
+/* Etiqueta bajo cada pin del mapa: la hora, o «AHORA» si está pasando.
+   Solo con zoom de calle (clase show-pin-labels en el contenedor del mapa);
+   la de lo que está pasando y la del pin abierto se ven siempre. */
+.pin-label {
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 4px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 2px 7px;
+  border-radius: 9999px;
+  font: 700 11px/16px 'Plus Jakarta Sans', system-ui, sans-serif;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+.pin-label.is-live {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  letter-spacing: 0.04em;
+}
+.show-pin-labels .pin-label,
+.pin-label.is-live,
+.pin-label.is-selected {
+  display: block;
+}
+/* El pin del evento abierto. Con outline y no con transform: el latido de
+   los que están pasando ya anima el transform. */
+.pin-selected {
+  outline: 3px solid hsl(var(--primary));
+  outline-offset: 3px;
 }
 
 /* User location marker (live GPS) */

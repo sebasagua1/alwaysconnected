@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import type { RepeatDraft } from '@/lib/repeatPlan';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { Plus, LocateFixed, Layers, List, Map as MapIcon, Search, SlidersHorizontal, X as XIcon, type LucideIcon } from 'lucide-react';
+import { Plus, LocateFixed, Layers, List, Map as MapIcon, Search, SlidersHorizontal, X as XIcon, Navigation, type LucideIcon } from 'lucide-react';
 import { useEventStore, selectSelectedEvent } from '@/stores/eventStore';
 import { EVENT_CATEGORIES, MAPBOX_STYLE_LIGHT, MAPBOX_STYLE_DARK } from '@/lib/constants';
 import { prefersDark, onColorSchemeChange } from '@/lib/theme';
@@ -29,12 +29,52 @@ import { matchesFilter, filterEvents, countActiveFilters, dependsOnClock } from 
 import { EventFiltersSheet } from '@/components/map/EventFiltersSheet';
 import { ActiveFilterChips } from '@/components/map/ActiveFilterChips';
 import { planMarkers, CLUSTER_MAX_ZOOM, MAX_MAP_EVENTS } from '@/lib/mapClusters';
+import { checkPermission, isNativeGeo } from '@/lib/geo';
+import { formatTime } from '@/lib/datetime';
+import { useHideBottomNav } from '@/stores/uiStore';
+
+/** Zoom a partir del cual los pines llevan su hora debajo. */
+const PIN_LABEL_ZOOM = 15.5;
+/** «Ahora no» en la tarjeta de ubicación: no vuelve a salir en unos días. */
+const LOC_CARD_SNOOZE_KEY = 'ac_loc_card_snoozed_until';
+const LOC_CARD_SNOOZE_DAYS = 3;
+
+/**
+ * Lo que dice la etiqueta de un pin: «AHORA» si está pasando, la hora si es
+ * hoy, y el día corto con la hora si es otro día. Antes el pin era solo el
+ * icono de la categoría y había que tocarlos uno a uno para saber nada.
+ */
+function pinLabel(startsAt: string, endsAt: string, now: Date, lang: string): { text: string; live: boolean } {
+  const start = new Date(startsAt);
+  const end = new Date(endsAt);
+  if (start <= now && now < end) return { text: i18n.t('map.pinNow'), live: true };
+  const time = formatTime(start, lang);
+  if (start.toDateString() === now.toDateString()) return { text: time, live: false };
+  const day = new Intl.DateTimeFormat(lang.startsWith('en') ? 'en-US' : 'es-MX', { weekday: 'short' })
+    .format(start)
+    .replace(/\.$/, '');
+  return { text: `${day} ${time}`, live: false };
+}
+
+/** Pone la etiqueta de un pin al día y enciende el latido solo si está pasando. */
+function applyPinLabel(entry: { label: HTMLDivElement; inner: HTMLDivElement; startsAt: string; endsAt: string }, now: Date): void {
+  if (!entry.startsAt) return;
+  const { text, live } = pinLabel(entry.startsAt, entry.endsAt, now, i18n.language ?? 'es');
+  if (entry.label.textContent !== text) entry.label.textContent = text;
+  entry.label.classList.toggle('is-live', live);
+  // Antes TODOS los pines latían, así que el latido no distinguía nada.
+  entry.inner.classList.toggle('animate-flag-pulse', live);
+}
 
 /** Un marcador vivo, con lo justo para saber qué hay que refrescar de él. */
 type MarkerEntry = {
   marker: MapboxMarker;
   /** El hijo que lleva el color y el icono; a la raíz la posiciona Mapbox. */
   inner: HTMLDivElement;
+  /** La hora (o «AHORA») debajo del pin. */
+  label: HTMLDivElement;
+  startsAt: string;
+  endsAt: string;
   category: string;
   lng: number;
   lat: number;
@@ -125,13 +165,49 @@ export default function MapHome() {
   // Se alcanzó MAX_MAP_EVENTS y hay más eventos de los que caben (PERF-03).
   const [eventsTruncated, setEventsTruncated] = useState(false);
   const pickMarkerRef = useRef<MapboxMarker | null>(null);
+  // Los escuchadores de los marcadores viven fuera de React: leen de refs.
+  const pickingRef = useRef(false);
+  pickingRef.current = pickingLocation;
+  const placePickRef = useRef<(lng: number, lat: number) => void>(() => {});
+  const topBarHeightRef = useRef(0);
+  topBarHeightRef.current = topBarHeight;
+  /** Evento al que hay que llevar la cámara cuando la ficha diga dónde empieza. */
+  const focusRef = useRef<{ lng: number; lat: number; until: number } | null>(null);
+  const lastSheetTopRef = useRef<number | null>(null);
   const userMarkerRef = useRef<MapboxMarker | null>(null);
   const hasAutoCenteredRef = useRef(false);
   /** Si la cámara acompaña al punto azul. Se apaga al mover el mapa a mano. */
   const followUserRef = useRef(true);
   const deniedToastShownRef = useRef(false);
 
+  // Ubicación con permiso preparado.
+  //
+  // Antes el mapa pedía la ubicación nada más montarse, y encima el aviso de
+  // notificaciones salía justo detrás: dos diálogos del sistema seguidos, sin
+  // ninguna explicación, en el primer segundo de uso. Ahora, si el permiso
+  // está sin decidir, primero sale una tarjeta que dice para qué sirve, y el
+  // diálogo del sistema solo aparece al tocar «Activar» (o «Ubicarme»). El
+  // mapa funciona igual sin ella: se centra en el campus.
+  const [locConsent, setLocConsent] = useState<'checking' | 'ask' | 'on' | 'off'>(isNativeGeo ? 'checking' : 'on');
+  useEffect(() => {
+    if (!isNativeGeo) return;
+    let cancelled = false;
+    checkPermission().then((estado) => {
+      if (cancelled) return;
+      if (estado !== 'prompt') { setLocConsent('on'); return; }
+      let snoozed = false;
+      try { snoozed = Date.now() < Number(localStorage.getItem(LOC_CARD_SNOOZE_KEY) || 0); } catch { /* sin almacenamiento */ }
+      setLocConsent(snoozed ? 'off' : 'ask');
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const snoozeLocationCard = () => {
+    try { localStorage.setItem(LOC_CARD_SNOOZE_KEY, String(Date.now() + LOC_CARD_SNOOZE_DAYS * 86_400_000)); } catch { /* nada */ }
+    setLocConsent('off');
+  };
+
   const { location: userLocation, error: geoError, permission } = useUserLocation({
+    enabled: locConsent === 'on',
     enableHighAccuracy: true,
     maximumAge: 4000,
     timeout: 15000,
@@ -321,7 +397,15 @@ export default function MapHome() {
         if ((e as { originalEvent?: Event }).originalEvent) followUserRef.current = false;
       });
 
+      // Las etiquetas de hora de los pines solo con zoom de calle: más lejos
+      // se pisarían unas con otras.
+      const syncLabelZoom = () => {
+        mapContainer.current?.classList.toggle('show-pin-labels', map.getZoom() >= PIN_LABEL_ZOOM);
+      };
+      map.on('zoomend', syncLabelZoom);
+
       map.on('load', () => {
+        syncLabelZoom();
         setMapLoaded(true);
         // El contenedor puede medir 0 en el primer frame (lazy-load + async);
         // reajusta el tamaño para que mapbox pida y pinte los tiles.
@@ -362,6 +446,63 @@ export default function MapHome() {
   useEffect(() => onColorSchemeChange((dark) => {
     mapRef.current?.setStyle(dark ? MAPBOX_STYLE_DARK : MAPBOX_STYLE_LIGHT);
   }), []);
+
+  /**
+   * Llevar la cámara a un evento DEJANDO SU PIN A LA VISTA.
+   *
+   * Antes el pin se centraba en la pantalla, y la ficha, que ocupa la mitad
+   * de abajo, lo tapaba justo al abrirla. Ahora la cámara espera a que la
+   * ficha diga dónde empieza (onTopChange) y coloca el pin en el centro del
+   * hueco que queda entre la barra de arriba y la ficha. Durante un momento
+   * se sigue ajustando, porque la ficha crece cuando llega la lista de
+   * asistentes.
+   */
+  const focusOn = useCallback((lng: number, lat: number) => {
+    focusRef.current = { lng, lat, until: Date.now() + 1500 };
+    // La ficha ya estaba abierta (otro pin): no va a volver a medirse sola.
+    if (lastSheetTopRef.current !== null) handleSheetTopRef.current(lastSheetTopRef.current);
+  }, []);
+
+  const handleSheetTop = useCallback((top: number) => {
+    lastSheetTopRef.current = top;
+    const f = focusRef.current;
+    const map = mapRef.current;
+    if (!f || !map || Date.now() > f.until) return;
+    const height = map.getContainer().clientHeight;
+    const visibleTop = topBarHeightRef.current;
+    const visibleBottom = Math.max(visibleTop + 80, top);
+    const centerY = (visibleTop + visibleBottom) / 2;
+    map.easeTo({
+      center: [f.lng, f.lat],
+      zoom: Math.max(map.getZoom(), 16),
+      offset: [0, centerY - height / 2],
+      duration: 500,
+      essential: true,
+    });
+  }, []);
+  const handleSheetTopRef = useRef(handleSheetTop);
+  handleSheetTopRef.current = handleSheetTop;
+
+  // El pin del evento abierto se distingue de los demás.
+  const selectedId = selectedEvent?.id ?? null;
+  useEffect(() => {
+    if (!selectedId) lastSheetTopRef.current = null;
+    markersRef.current.forEach((entry, id) => {
+      const on = id === selectedId;
+      entry.inner.classList.toggle('pin-selected', on);
+      entry.label.classList.toggle('is-selected', on);
+      entry.marker.getElement().style.zIndex = on ? '3' : '';
+    });
+  }, [selectedId, events, mapLoaded]);
+
+  // «AHORA» y la hora cambian solos con el paso del tiempo.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const now = new Date();
+      markersRef.current.forEach((entry) => applyPinLabel(entry, now));
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Marcadores.
   //
@@ -447,10 +588,11 @@ export default function MapHome() {
         // así que no puede llevar animaciones que lo pisen.
         const el = document.createElement('div');
         el.style.cssText = 'width: 36px; height: 36px; cursor: pointer;';
+        el.setAttribute('role', 'button');
+        el.setAttribute('tabindex', '0');
 
-        // El hijo lleva todo lo visual y el latido.
+        // El hijo lleva todo lo visual y el latido (solo si está pasando).
         const inner = document.createElement('div');
-        inner.className = 'animate-flag-pulse';
         inner.style.cssText = `
           width: 100%; height: 100%; border-radius: 50%;
           border: 3px solid white;
@@ -458,6 +600,11 @@ export default function MapHome() {
           display: flex; align-items: center; justify-content: center;
         `;
         el.appendChild(inner);
+
+        const label = document.createElement('div');
+        label.className = 'pin-label';
+        label.setAttribute('aria-hidden', 'true');
+        el.appendChild(label);
 
         let marker: MapboxMarker;
         try {
@@ -474,14 +621,22 @@ export default function MapHome() {
         el.addEventListener('click', (ev) => {
           ev.stopPropagation();
           const at = marker.getLngLat();
+          // Eligiendo el sitio de un evento nuevo, tocar un pin es decir «aquí
+          // mismo» (otro plan en el mismo edificio), no abrir aquel evento.
+          if (pickingRef.current) {
+            placePickRef.current(at.lng, at.lat);
+            return;
+          }
           // Ir a un evento lejano tampoco debe deshacerse con el siguiente GPS.
           followUserRef.current = false;
-          mapRef.current?.flyTo({ center: [at.lng, at.lat], zoom: 17, duration: 600 });
           const fresh = useEventStore.getState().events.find((e) => e.id === id);
-          if (fresh) setSelectedEvent(fresh);
+          if (fresh) {
+            focusOn(at.lng, at.lat);
+            setSelectedEvent(fresh);
+          }
         });
 
-        entry = { marker, inner, category: '', lng, lat, onMap: false };
+        entry = { marker, inner, label, startsAt: '', endsAt: '', category: '', lng, lat, onMap: false };
         markersRef.current.set(id, entry);
       }
 
@@ -497,6 +652,12 @@ export default function MapHome() {
         entry.inner.innerHTML = getCategoryMarkerSVG(event.category);
         entry.category = event.category;
       }
+      if (entry.startsAt !== event.starts_at || entry.endsAt !== event.ends_at) {
+        entry.startsAt = event.starts_at;
+        entry.endsAt = event.ends_at;
+        applyPinLabel(entry, new Date());
+      }
+      entry.marker.getElement().setAttribute('aria-label', `${event.title}, ${entry.label.textContent ?? ''}`);
 
       // Sacarlo del mapa, y no esconderlo con display:none: un marcador
       // escondido le sigue costando a Mapbox recalcular su posición en cada
@@ -610,7 +771,7 @@ export default function MapHome() {
       entry.marker.remove();
       clustersRef.current.delete(key);
     });
-  }, [events, filterCategory, searchQuery, advancedFilters, clock, setSelectedEvent]);
+  }, [events, filterCategory, searchQuery, advancedFilters, clock, setSelectedEvent, focusOn]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -634,29 +795,41 @@ export default function MapHome() {
     markersMapRef.current = null;
   }, []);
 
+  /** Pone (o mueve) el pin del sitio elegido para el evento nuevo. */
+  const placePick = (lng: number, lat: number) => {
+    const map = mapRef.current;
+    if (!map) return;
+    setPickedLocation({ lng, lat });
+    if (pickMarkerRef.current) {
+      pickMarkerRef.current.setLngLat([lng, lat]);
+      return;
+    }
+    const el = document.createElement('div');
+    el.style.cssText = `
+      width: 40px; height: 40px; border-radius: 50%;
+      background: hsl(var(--primary)); border: 3px solid white;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.3);
+      display: flex; align-items: center; justify-content: center;
+    `;
+    el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>`;
+    pickMarkerRef.current = new mapboxgl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
+  };
+  placePickRef.current = placePick;
+
+  /** Desde la búsqueda o «Aquí donde estoy»: pin y cámara al sitio. */
+  const placePickAndFly = (lng: number, lat: number) => {
+    placePick(lng, lat);
+    const map = mapRef.current;
+    map?.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 17), duration: 600, essential: true });
+  };
+
   // Handle map click for location picking
   useEffect(() => {
     if (!mapRef.current || !mapLoaded) return;
 
-    const handleClick = async (e: { lngLat: { lng: number; lat: number } }) => {
-      if (!pickingLocation) return;
-      const { lng, lat } = e.lngLat;
-      setPickedLocation({ lng, lat });
-
-      // Update or create the pick marker
-      if (pickMarkerRef.current) pickMarkerRef.current.remove();
-
-      const el = document.createElement('div');
-      el.style.cssText = `
-        width: 40px; height: 40px; border-radius: 50%;
-        background: hsl(var(--primary)); border: 3px solid white;
-        box-shadow: 0 2px 16px rgba(0,0,0,0.3);
-        display: flex; align-items: center; justify-content: center;
-      `;
-      el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>`;
-      pickMarkerRef.current = new mapboxgl.Marker({ element: el })
-        .setLngLat([lng, lat])
-        .addTo(mapRef.current!);
+    const handleClick = (e: { lngLat: { lng: number; lat: number } }) => {
+      if (!pickingRef.current) return;
+      placePickRef.current(e.lngLat.lng, e.lngLat.lat);
     };
 
     mapRef.current.on('click', handleClick);
@@ -664,6 +837,10 @@ export default function MapHome() {
       mapRef.current?.off('click', handleClick);
     };
   }, [pickingLocation, mapLoaded]);
+
+  // Sin barra de pestañas mientras se elige el sitio: un toque perdido en
+  // ella sacaba del formulario a medias.
+  useHideBottomNav(pickingLocation);
 
   /**
    * El "+" abre el FORMULARIO, no el selector de mapa.
@@ -876,6 +1053,14 @@ export default function MapHome() {
   }, [geoError, t]);
 
   const handleRecenter = useCallback(() => {
+    // Sin permiso todavía: tocar «Ubicarme» es pedirlo, con el diálogo del
+    // sistema, que ahora sí se entiende por qué sale.
+    if (locConsent !== 'on') {
+      followUserRef.current = true;
+      hasAutoCenteredRef.current = false;
+      setLocConsent('on');
+      return;
+    }
     if (!mapRef.current || !userLocation) {
       toast({ title: t('map.waitingGps'), description: t('map.waitingGpsDesc') });
       return;
@@ -887,7 +1072,7 @@ export default function MapHome() {
       duration: 700,
       essential: true,
     });
-  }, [userLocation, t]);
+  }, [userLocation, t, locConsent]);
 
   const filteredCategories: Array<{ key: string | null; label: string; Icon: LucideIcon }> = [
     { key: null, label: t('map.all'), Icon: Layers },
@@ -948,6 +1133,9 @@ export default function MapHome() {
           onConfirm={handleConfirmLocation}
           onCancel={handleCancelPicking}
           hasPin={!!pickedLocation}
+          onPlace={placePickAndFly}
+          userLocation={userLocation ? { lng: userLocation.lng, lat: userLocation.lat } : null}
+          proximity={institutionCenter}
         />
       )}
 
@@ -972,7 +1160,11 @@ export default function MapHome() {
           {/* Search bar */}
           <div className="flex items-center gap-2 mb-2">
             <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+              {/* z-10: el campo lleva backdrop-blur, que le crea su propio contexto de
+                  apilamiento y lo pinta ENCIMA de la lupa aunque la lupa vaya
+                  posicionada. Sin esto la lupa quedaba tapada por el fondo
+                  semitransparente del campo y no se veía. */}
+              <Search aria-hidden="true" className="absolute z-10 left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
               <input
                 type="text"
                 value={searchQuery}
@@ -1054,15 +1246,20 @@ export default function MapHome() {
             events={events}
             filter={{ category: filterCategory, query: searchQuery, ...advancedFilters }}
             now={new Date(clock)}
-            onSelect={(event) => { setSelectedEvent(event); setViewMode('map'); }}
+            onSelect={(event) => {
+              if (event.location) focusOn(event.location.lng, event.location.lat);
+              setSelectedEvent(event);
+              setViewMode('map');
+            }}
             onCreate={handleOpenCreate}
             onClearFilters={() => { resetFilters(); setSearchQuery(''); }}
           />
         </div>
       )}
 
-      {/* Recenter on user - hide during picking */}
-      {!pickingLocation && (
+      {/* Recentrar: solo en el mapa. En la lista no hace nada y flotaba
+          encima de las tarjetas, tapando su aforo. */}
+      {!pickingLocation && viewMode === 'map' && (
         <button
           onClick={handleRecenter}
           aria-label={t('map.recenter')}
@@ -1104,7 +1301,7 @@ export default function MapHome() {
           cuando de verdad no hay NADA: si hay eventos y el filtro no los
           deja pasar, los pines vuelven al quitar el filtro y no hace falta
           tapar el mapa. */}
-      {!pickingLocation && viewMode === 'map' && eventsLoaded && events.length === 0 && !showCreate && (
+      {!pickingLocation && viewMode === 'map' && eventsLoaded && events.length === 0 && !showCreate && locConsent !== 'ask' && (
         <div className="absolute inset-x-0 above-nav mb-24 z-10 px-6 pointer-events-none">
           <div className="pointer-events-auto mx-auto sm:max-w-[430px] bg-card/95 backdrop-blur-md rounded-2xl shadow-lifted border border-border p-5 text-center">
             <p className="text-base font-bold text-foreground">{t('map.emptyTitle')}</p>
@@ -1116,6 +1313,42 @@ export default function MapHome() {
               <Plus aria-hidden="true" className="w-4 h-4" />
               {t('map.emptyCta')}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Ubicación, con permiso preparado (ver `locConsent`). Va donde los
+          demás avisos del mapa, encima del botón de crear. */}
+      {!pickingLocation && viewMode === 'map' && locConsent === 'ask' && !showCreate && !selectedEvent && (
+        <div className="absolute inset-x-0 above-nav mb-24 z-10 px-4 pointer-events-none">
+          <div
+            role="region"
+            aria-labelledby="loc-card-title"
+            className="pointer-events-auto mx-auto sm:max-w-[430px] bg-card/95 backdrop-blur-md rounded-2xl shadow-lifted border border-border p-4"
+          >
+            <div className="flex items-start gap-3">
+              <span className="w-10 h-10 shrink-0 rounded-xl bg-primary/10 text-primary flex items-center justify-center" aria-hidden="true">
+                <Navigation className="w-5 h-5" />
+              </span>
+              <div className="min-w-0">
+                <p id="loc-card-title" className="text-sm font-bold text-foreground">{t('map.locCardTitle')}</p>
+                <p className="text-sm text-muted-foreground mt-0.5">{t('map.locCardBody')}</p>
+              </div>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={snoozeLocationCard}
+                className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-muted-foreground"
+              >
+                {t('map.locCardLater')}
+              </button>
+              <button
+                onClick={() => { followUserRef.current = true; setLocConsent('on'); }}
+                className="flex-1 min-h-[44px] px-4 rounded-xl bg-primary text-primary-foreground text-sm font-bold"
+              >
+                {t('map.locCardEnable')}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1162,6 +1395,7 @@ export default function MapHome() {
         <EventBottomSheet
           event={selectedEvent}
           onClose={() => setSelectedEvent(null)}
+          onTopChange={handleSheetTop}
         />
       )}
 

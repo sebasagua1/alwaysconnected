@@ -6,6 +6,7 @@ import gsap from 'gsap';
 import { useGSAP } from '@gsap/react';
 import { cn } from '@/lib/utils';
 import { useNotificationStore } from '@/stores/notificationStore';
+import { isFullScreenRoute, useUiStore } from '@/stores/uiStore';
 
 gsap.registerPlugin(useGSAP);
 
@@ -24,6 +25,11 @@ export function BottomNav() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { joinRequests, friendRequests, unreadMessages, approvals, groupInvites, eventChatUnread } = useNotificationStore();
+  const navHiders = useUiStore((s) => s.navHiders);
+  // Fuera en las conversaciones y mientras alguien la pida oculta (elegir
+  // ubicación, por ejemplo). Se desmonta en vez de esconderse: así no queda
+  // nada enfocable ni legible por VoiceOver detrás.
+  const hidden = navHiders > 0 || isFullScreenRoute(location.pathname);
 
   // Amigos concentra dos cosas que esperan respuesta: quien te ha agregado y
   // quien te ha escrito.
@@ -55,6 +61,9 @@ export function BottomNav() {
       const marca = marcaRef.current;
       if (!fila || !marca) return;
 
+      // Oculta: al volver se coloca de golpe, sin viajar desde donde estaba
+      // la barra anterior, que ya no existe.
+      if (hidden) { yaColocada.current = false; return; }
       const activa = fila.querySelector<HTMLElement>('[data-activa="true"]');
       // Una ruta que no es ninguna pestaña (un chat, por ejemplo): la barra se
       // esconde en vez de quedarse señalando la pestaña anterior, que sería
@@ -90,8 +99,23 @@ export function BottomNav() {
       });
       return () => mm.revert();
     },
-    { dependencies: [location.pathname], scope: filaRef },
+    { dependencies: [location.pathname, hidden], scope: filaRef },
   );
+
+  // Las pestañas no se apilan en el historial, igual que en iOS: cambiar de
+  // pestaña SUSTITUYE la entrada actual. Así «atrás» (la flecha o el gesto de
+  // deslizar desde el borde) vuelve siempre a la pantalla de la que vino un
+  // detalle, y no va saltando por las pestañas que se tocaron antes.
+  const goTo = (path: string, active: boolean) => {
+    if (active) {
+      // Tocar la pestaña en la que ya estás sube al principio, como en iOS.
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    navigate(path, { replace: true });
+  };
+
+  if (hidden) return null;
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-50 glass border-t border-border safe-bottom">
@@ -110,7 +134,8 @@ export function BottomNav() {
           return (
             <button
               key={path}
-              onClick={() => navigate(path)}
+              onClick={() => goTo(path, active)}
+              aria-current={active ? 'page' : undefined}
               // Ancla para el recorrido de bienvenida, que mide dónde está
               // cada pestaña para colocarle el globo encima. Con data-* y no
               // con un ref porque la barra vive en el AppShell y el recorrido
