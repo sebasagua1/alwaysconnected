@@ -36,3 +36,19 @@ try {
     document.documentElement.setAttribute('data-boot-lang', 'en');
   }
 } catch (e) {}
+
+// La entrada del logo espera a que la página se haya pintado de verdad.
+// Las animaciones CSS empiezan a contar en cuanto se calculan los estilos,
+// y en el webview de iOS la página tarda un poco más en MOSTRARSE: medido en
+// el simulador, el primer fotograma visible ya traía el logo al 80 %, así
+// que la entrada no se veía. Con `boot-wait` quedan en pausa (index.html)
+// hasta el segundo requestAnimationFrame, que llega con el primer fotograma
+// ya presentado. El setTimeout es por si rAF no llega (pestaña oculta): la
+// entrada no puede quedarse en pausa para siempre.
+try {
+  var root = document.documentElement;
+  root.classList.add('boot-wait');
+  var release = function () { root.classList.remove('boot-wait'); };
+  requestAnimationFrame(function () { requestAnimationFrame(release); });
+  setTimeout(release, 400);
+} catch (e) {}

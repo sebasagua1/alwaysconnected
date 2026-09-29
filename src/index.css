@@ -386,10 +386,10 @@
     to   { opacity: 1; transform: translate3d(0, 0, 0); }
   }
   /* El fundido (cuando no hay View Transitions) va al ritmo del fundido
-     cruzado entre pestañas: 420 ms y curva simétrica. Los deslizamientos
+     cruzado entre pestañas: 300 ms y curva simétrica. Los deslizamientos
      usan la curva de las hojas: salida rápida y frenada larga, que es como
      se mueven las cosas en iOS. */
-  .animate-page-fade    { animation: page-fade 420ms cubic-bezier(0.45, 0, 0.55, 1) both; }
+  .animate-page-fade    { animation: page-fade 300ms cubic-bezier(0.45, 0, 0.55, 1) both; }
   .animate-page-forward { animation: page-forward 280ms cubic-bezier(0.32, 0.72, 0, 1) both; }
   .animate-page-back    { animation: page-back 280ms cubic-bezier(0.32, 0.72, 0, 1) both; }
 
@@ -476,10 +476,11 @@
 /* ============================================================
    Fundido cruzado entre pestañas (src/lib/viewTransition.ts).
 
-   420 ms con una curva simétrica: arranca y frena suave. La primera
+   300 ms con una curva simétrica: arranca y frena suave. La primera
    versión (240 ms, salida rápida y frenada larga) hacía casi todo el
    cambio en los primeros ~70 ms: esa curva va bien para algo que se
-   desliza, no para un fundido. (Además no llegaba a verse, por el fallo
+   desliza, no para un fundido. Luego se probó con 420 ms, y en el
+   iPhone se sentía lento. (Además no llegaba a verse, por el fallo
    que se explica en lib/viewTransition.ts.) Con esta curva, si el
    arranque pierde algún fotograma, lo que se pierde es la parte en que
    casi no cambia nada.
@@ -507,10 +508,10 @@
   to   { opacity: 1; transform: translate3d(0, 0, 0); }
 }
 ::view-transition-old(root) {
-  animation: vt-tab-out 420ms cubic-bezier(0.45, 0, 0.55, 1) both;
+  animation: vt-tab-out 300ms cubic-bezier(0.45, 0, 0.55, 1) both;
 }
 ::view-transition-new(root) {
-  animation: vt-tab-in 420ms cubic-bezier(0.45, 0, 0.55, 1) both;
+  animation: vt-tab-in 300ms cubic-bezier(0.45, 0, 0.55, 1) both;
 }
 .vt-bottom-nav {
   view-transition-name: bottom-nav;

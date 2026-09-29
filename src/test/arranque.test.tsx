@@ -82,7 +82,10 @@ describe('arranque', () => {
     getSession.mockResolvedValue({ data: { session: null }, error: null });
     await montarApp();
     expect(await screen.findByText('pantalla de acceso')).toBeInTheDocument();
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    // Antes de fundirse se queda un momento quieta (HOLD_MS, 450 ms).
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(document.getElementById('boot-splash')?.classList.contains('boot-splash--out')).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
     expect(document.getElementById('boot-splash')?.classList.contains('boot-splash--out')).toBe(true);
   });
 

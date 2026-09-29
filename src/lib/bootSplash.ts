@@ -75,10 +75,19 @@ function hideNativeLaunchAppearance(): void {
 
 // --- Salida ---------------------------------------------------------------
 
-/** Tope de espera a que termine la entrada del logo, por si la animación no avisa. */
-const ENTRANCE_CAP_MS = 600;
-/** Tope de espera al fundido de salida (dura 320 ms), por si `transitionend` no llega. */
-const EXIT_CAP_MS = 700;
+/**
+ * Tope de espera a que termine la entrada (logo, nombre y lema: ~1,25 s
+ * desde el primer fotograma), por si la animación no avisa.
+ */
+const ENTRANCE_CAP_MS = 1800;
+/**
+ * Lo que se queda quieta la pantalla, entera, antes de irse. Sin esta pausa
+ * el lema aún estaba terminando de subir cuando empezaba el fundido y la
+ * entrada se sentía atropellada (probado en un iPhone).
+ */
+const HOLD_MS = 450;
+/** Tope de espera al fundido de salida (dura 560 ms), por si `transitionend` no llega. */
+const EXIT_CAP_MS = 900;
 /** Tope de espera a que el hilo principal se libere antes de fundir. */
 const IDLE_CAP_MS = 1500;
 /** Dos fotogramas así de juntos (dos a 60 Hz) = no hubo una tarea larga en medio. */
@@ -112,17 +121,35 @@ function whenRenderingIsSmooth(): Promise<void> {
   });
 }
 
+/**
+ * La pausa con todo quieto, contada desde que terminó la entrada y no desde
+ * ahora: si la app tardó en estar lista, esa espera ya cuenta como pausa.
+ */
+function holdAfterEntrance(entrance: Animation[]): Promise<void> {
+  const ends = entrance.map((a) => {
+    const timing = a.effect?.getComputedTiming();
+    const start = typeof a.startTime === 'number' ? a.startTime : null;
+    return start !== null && typeof timing?.endTime === 'number' ? start + timing.endTime : 0;
+  });
+  const entranceEnd = ends.length ? Math.max(...ends) : 0;
+  const wait = entranceEnd ? Math.max(0, entranceEnd + HOLD_MS - performance.now()) : HOLD_MS;
+  return new Promise((resolve) => setTimeout(resolve, wait));
+}
+
 let hiding = false;
 
 /**
  * Funde la pantalla de entrada y la quita del DOM. Idempotente.
  *
- * Antes de fundir espera dos cosas, y ninguna es un tiempo inventado:
- *   · a que termine la entrada del logo, si aún estaba en marcha (sin sesión
- *     pasa: no hay nada que pedir a la red). Cortarla a la mitad se ve como
- *     un parpadeo. Como mucho, lo que queda de medio segundo;
+ * Antes de fundir espera tres cosas:
+ *   · a que termine la entrada del logo, el nombre y el lema, si aún estaba
+ *     en marcha (sin sesión pasa: no hay nada que pedir a la red). Cortarla
+ *     a la mitad se ve como un parpadeo;
+ *   · HOLD_MS con todo ya quieto, para que se lea;
  *   · a que el hilo principal quede libre (whenRenderingIsSmooth), para que
  *     el fundido se pinte de verdad y no sea un salto.
+ * Si el arranque ya tardó más que todo eso, no se añade nada: la entrada ya
+ * terminó y la pausa ya pasó.
  */
 export function hideBootSplash(): void {
   if (hiding) return;
@@ -135,12 +162,13 @@ export function hideBootSplash(): void {
     return;
   }
 
-  const logo = el.querySelector('.boot-splash__logo');
-  const entrance = logo?.getAnimations?.() ?? [];
+  const parts = el.querySelectorAll('.boot-splash__logo, .boot-splash__name, .boot-splash__tagline');
+  const entrance = Array.from(parts).flatMap((part) => part.getAnimations?.() ?? []);
   const entranceDone = Promise.all(entrance.map((a) => a.finished.catch(() => undefined)));
   const cap = new Promise((resolve) => setTimeout(resolve, ENTRANCE_CAP_MS));
 
   Promise.race([entranceDone, cap])
+    .then(() => holdAfterEntrance(entrance))
     .then(whenRenderingIsSmooth)
     .then(() => {
       useBootSplash.setState({ visible: false });

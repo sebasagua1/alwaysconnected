@@ -39,7 +39,7 @@
         user-select: none;
         -webkit-touch-callout: none;
         -webkit-tap-highlight-color: transparent;
-        transition: opacity 320ms cubic-bezier(0.4, 0, 0.2, 1);
+        transition: opacity 560ms cubic-bezier(0.4, 0, 0.2, 1);
         /* Capa propia desde el principio: el fundido de salida no obliga a
            recomponer la página entera en cada fotograma. */
         will-change: opacity;
@@ -56,7 +56,7 @@
         /* Un poco por encima del centro: centrado exacto, un bloque así
            parece caído. */
         margin-bottom: 7vh;
-        transition: transform 320ms cubic-bezier(0.4, 0, 0.2, 1);
+        transition: transform 560ms cubic-bezier(0.4, 0, 0.2, 1);
         will-change: transform;
       }
       .boot-splash--out .boot-splash__brand {
@@ -74,7 +74,7 @@
         inset: -110px;
         border-radius: 50%;
         background: radial-gradient(closest-side, rgba(38, 99, 214, 0.34), rgba(38, 99, 214, 0));
-        animation: boot-fade 900ms ease-out 60ms both;
+        animation: boot-fade 1400ms ease-out 100ms both;
         pointer-events: none;
       }
       .boot-splash__logo {
@@ -82,7 +82,7 @@
         display: block;
         width: 104px;
         height: 104px;
-        animation: boot-logo-in 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+        animation: boot-logo-in 900ms cubic-bezier(0.33, 1, 0.68, 1) both;
       }
       .boot-splash__name {
         margin: 22px 0 0;
@@ -90,7 +90,7 @@
         line-height: 1.2;
         font-weight: 800;
         letter-spacing: -0.02em;
-        animation: boot-rise 480ms cubic-bezier(0.16, 1, 0.3, 1) 120ms both;
+        animation: boot-rise 800ms cubic-bezier(0.33, 1, 0.68, 1) 300ms both;
       }
       .boot-splash__tagline {
         margin: 6px 0 0;
@@ -98,15 +98,25 @@
         line-height: 1.35;
         font-weight: 500;
         color: rgba(255, 255, 255, 0.64);
-        animation: boot-rise 480ms cubic-bezier(0.16, 1, 0.3, 1) 190ms both;
+        animation: boot-rise 800ms cubic-bezier(0.33, 1, 0.68, 1) 450ms both;
+      }
+      /* La entrada espera al primer fotograma visible: la pone y la quita
+         public/theme-init.js (el porqué, allí). Curva de salida cúbica y
+         no exponencial: la exponencial hacía casi todo el cambio en los
+         primeros ~150 ms y el logo parecía aparecer de golpe. */
+      .boot-wait .boot-splash__glow,
+      .boot-wait .boot-splash__logo,
+      .boot-wait .boot-splash__name,
+      .boot-wait .boot-splash__tagline {
+        animation-play-state: paused;
       }
       /* Idioma del lema: lo elige public/theme-init.js antes de pintar. */
       .boot-en { display: none; }
       [data-boot-lang='en'] .boot-es { display: none; }
       [data-boot-lang='en'] .boot-en { display: inline; }
 
-      /* Barrita de «cargando». Solo aparece si el arranque pasa de 1,4 s:
-         en uno normal no llega a verse. Fuera del flujo para no mover el
+      /* Barrita de «cargando». Solo aparece si el arranque pasa de 2,4 s:
+         en uno normal no llega a verse (la pantalla se va hacia los 1,5 s). Fuera del flujo para no mover el
          logo cuando aparece. */
       .boot-splash__progress {
         position: absolute;
@@ -119,7 +129,7 @@
         border-radius: 3px;
         background: rgba(255, 255, 255, 0.14);
         opacity: 0;
-        animation: boot-fade 400ms ease-out 1400ms forwards;
+        animation: boot-fade 400ms ease-out 2400ms forwards;
       }
       .boot-splash__progress::after {
         content: '';

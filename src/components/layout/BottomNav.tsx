@@ -90,9 +90,9 @@ export function BottomNav() {
           x,
           autoAlpha: 1,
           // Al mismo ritmo que el fundido entre pestañas (index.css):
-          // 420 ms y curva simétrica, para que marca y pantalla lleguen
+          // 300 ms y curva simétrica, para que marca y pantalla lleguen
           // a la vez.
-          duration: 0.42,
+          duration: 0.3,
           ease: 'sine.inOut',
         });
       });
