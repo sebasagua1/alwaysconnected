@@ -7,7 +7,7 @@ import { PasswordInput } from '@/components/ui/password-input';
 import { Label } from '@/components/ui/label';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
 import { useToast } from '@/hooks/use-toast';
-import { MapPin } from 'lucide-react';
+import { BrandMark } from '@/components/BrandMark';
 import { PRIVACY_URL, TERMS_URL, SITE_URL } from '@/lib/legal';
 import {
   isNative,
@@ -155,9 +155,7 @@ export default function Auth() {
       <div className="w-full max-w-[380px] space-y-8 my-auto py-6">
         {/* Logo */}
         <div className="text-center space-y-2">
-          <div className="w-16 h-16 bg-primary rounded-2xl flex items-center justify-center mx-auto shadow-soft">
-            <MapPin className="w-8 h-8 text-primary-foreground" />
-          </div>
+          <BrandMark className="w-16 h-16 mx-auto shadow-soft rounded-[23%]" />
           <h1 className="text-3xl font-extrabold text-foreground tracking-tight">{APP_NAME}</h1>
           <p className="text-muted-foreground text-sm">{t('auth.tagline')}</p>
         </div>
