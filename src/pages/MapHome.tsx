@@ -1205,13 +1205,15 @@ export default function MapHome() {
             <NotificationBell floating />
           </div>
           <div className="flex gap-2 items-center">
-            <div className="flex gap-2 overflow-x-auto no-scrollbar py-1 flex-1">
+            {/* py-1 y px-1 (con -mx-1 para no moverla): holgura para la
+                sombra de los chips, que el scroll recortaría. Ver .shadow-chip. */}
+            <div className="flex gap-2 overflow-x-auto no-scrollbar py-1 px-1 -mx-1 flex-1">
               {filteredCategories.map(cat => (
                 <button
                   key={cat.key ?? 'all'}
                   onClick={() => setFilterCategory(cat.key)}
                   className={cn(
-                    'flex items-center gap-1.5 min-h-[44px] px-4 rounded-full text-xs font-semibold whitespace-nowrap transition-all shadow-soft',
+                    'flex items-center gap-1.5 min-h-[44px] px-4 rounded-full text-xs font-semibold whitespace-nowrap transition-all shadow-chip',
                     filterCategory === cat.key
                       ? 'bg-primary text-primary-foreground'
                       : 'glass text-foreground border border-border'

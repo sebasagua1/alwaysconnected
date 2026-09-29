@@ -245,6 +245,14 @@
   .shadow-lifted {
     box-shadow: 0 8px 32px rgba(0,0,0,0.12);
   }
+  /* Para lo que va dentro de una fila con scroll horizontal. Un contenedor
+     con scroll recorta todo lo que sobresale, y la sombra de 24 px de
+     shadow-soft no cabía en los 4 px de margen de la fila de categorías del
+     mapa: las sombras de los chips se juntaban en una franja gris cortada
+     en seco, como una marca de agua. Esta cabe en 4 px (1 + 3). */
+  .shadow-chip {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  }
   /* Las mismas sombras, más hondas en oscuro.
 
      Un negro al 8% sobre un fondo que ya es casi negro no se ve. Medido
@@ -261,6 +269,9 @@
   }
   .dark .shadow-lifted {
     box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+  }
+  .dark .shadow-chip {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.6);
   }
 }
 
