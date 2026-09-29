@@ -3,17 +3,20 @@
  *   · lazyPage: una pantalla precargada se pinta sin pasar por Suspense, y
  *     una que ya estaba montada no se desmonta cuando termina la precarga;
  *   · crossfadeTo: fundido cruzado del navegador donde existe, y navegación
- *     normal donde no (o con «Reducir movimiento»).
+ *     normal donde no (o con «Reducir movimiento»). La foto de la pantalla
+ *     nueva espera a que React la monte (notifyRouteCommitted), y si tarda
+ *     demasiado se renuncia al fundido.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Suspense, useEffect } from 'react';
 import { render, screen, act, cleanup } from '@testing-library/react';
 import { lazyPage } from '@/lib/lazyPage';
-import { crossfadeTo, isCrossfadeNavigation, clearCrossfadeNavigation } from '@/lib/viewTransition';
+import { crossfadeTo, isCrossfadeNavigation, notifyRouteCommitted } from '@/lib/viewTransition';
 
 afterEach(() => {
   cleanup();
-  clearCrossfadeNavigation();
+  notifyRouteCommitted('');
+  vi.useRealTimers();
   // @ts-expect-error: se quita lo que haya puesto la prueba
   delete document.startViewTransition;
 });
@@ -68,9 +71,25 @@ describe('crossfadeTo', () => {
     expect(isCrossfadeNavigation('/events')).toBe(false);
   });
 
-  it('con View Transitions, navega dentro de la transición y marca la ruta', () => {
-    const start = vi.fn((cb: () => void) => { cb(); });
+  /** Un startViewTransition falso: guarda la promesa del callback para que la prueba la vigile. */
+  function fakeViewTransitions() {
+    const state = { update: null as Promise<void> | null, skipped: false };
+    const start = vi.fn((cb: () => Promise<void> | void) => {
+      const update = Promise.resolve(cb());
+      state.update = update;
+      return {
+        updateCallbackDone: update,
+        ready: update,
+        finished: update,
+        skipTransition: () => { state.skipped = true; },
+      };
+    });
     Object.defineProperty(document, 'startViewTransition', { value: start, configurable: true, writable: true });
+    return { start, state };
+  }
+
+  it('con View Transitions, navega dentro de la transición y marca la ruta', () => {
+    const { start } = fakeViewTransitions();
     const navegar = vi.fn();
     crossfadeTo('/events', navegar);
     expect(start).toHaveBeenCalledTimes(1);
@@ -78,6 +97,32 @@ describe('crossfadeTo', () => {
     // PageTransition lo lee para no poner su fundido encima.
     expect(isCrossfadeNavigation('/events')).toBe(true);
     expect(isCrossfadeNavigation('/friends')).toBe(false);
+  });
+
+  it('la foto nueva espera a que React monte la ruta (no basta con navegar)', async () => {
+    vi.useFakeTimers();
+    const { state } = fakeViewTransitions();
+    const hecho = vi.fn();
+    crossfadeTo('/events', () => {});
+    state.update!.then(hecho);
+    await vi.advanceTimersByTimeAsync(100);
+    // Navegar no basta: con React Router 7 el DOM aún tiene la pantalla vieja.
+    expect(hecho).not.toHaveBeenCalled();
+    notifyRouteCommitted('/events');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hecho).toHaveBeenCalledTimes(1);
+    expect(state.skipped).toBe(false);
+    expect(isCrossfadeNavigation('/events')).toBe(false);
+  });
+
+  it('si React no monta la ruta a tiempo, se renuncia al fundido en vez de congelar la pantalla', async () => {
+    vi.useFakeTimers();
+    const { state } = fakeViewTransitions();
+    crossfadeTo('/events', () => {});
+    await vi.advanceTimersByTimeAsync(600);
+    expect(state.skipped).toBe(true);
+    // Un aviso tardío de otra ruta no rompe nada.
+    notifyRouteCommitted('/events');
   });
 
   it('con «Reducir movimiento» no hay fundido cruzado', () => {

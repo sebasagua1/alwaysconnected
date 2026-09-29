@@ -89,10 +89,11 @@ export function BottomNav() {
         gsap.to(marca, {
           x,
           autoAlpha: 1,
-          duration: 0.34,
-          // La misma curva que ya usan las hojas y las transiciones de
-          // página: sale rápido y frena largo, como se mueve iOS.
-          ease: 'power3.out',
+          // Al mismo ritmo que el fundido entre pestañas (index.css):
+          // 420 ms y curva simétrica, para que marca y pantalla lleguen
+          // a la vez.
+          duration: 0.42,
+          ease: 'sine.inOut',
         });
       });
       mm.add('(prefers-reduced-motion: reduce)', () => {

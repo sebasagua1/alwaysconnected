@@ -374,9 +374,11 @@
     from { opacity: 0; transform: translate3d(-28px, 0, 0); }
     to   { opacity: 1; transform: translate3d(0, 0, 0); }
   }
-  /* La curva es la misma que ya usaban las hojas: salida rápida y frenada
-     larga, que es como se mueven las cosas en iOS. */
-  .animate-page-fade    { animation: page-fade 260ms ease-out both; }
+  /* El fundido (cuando no hay View Transitions) va al ritmo del fundido
+     cruzado entre pestañas: 420 ms y curva simétrica. Los deslizamientos
+     usan la curva de las hojas: salida rápida y frenada larga, que es como
+     se mueven las cosas en iOS. */
+  .animate-page-fade    { animation: page-fade 420ms cubic-bezier(0.45, 0, 0.55, 1) both; }
   .animate-page-forward { animation: page-forward 280ms cubic-bezier(0.32, 0.72, 0, 1) both; }
   .animate-page-back    { animation: page-back 280ms cubic-bezier(0.32, 0.72, 0, 1) both; }
 
@@ -463,18 +465,41 @@
 /* ============================================================
    Fundido cruzado entre pestañas (src/lib/viewTransition.ts).
 
-   El de por defecto dura 250 ms con `ease`; este sale un poco antes
-   y frena largo, como el resto de transiciones de la app.
+   420 ms con una curva simétrica: arranca y frena suave. La primera
+   versión (240 ms, salida rápida y frenada larga) hacía casi todo el
+   cambio en los primeros ~70 ms: esa curva va bien para algo que se
+   desliza, no para un fundido. (Además no llegaba a verse, por el fallo
+   que se explica en lib/viewTransition.ts.) Con esta curva, si el
+   arranque pierde algún fotograma, lo que se pierde es la parte en que
+   casi no cambia nada.
+
+   La vieja y la nueva llevan la MISMA duración y la MISMA curva: el
+   navegador las suma (plus-lighter), y así su opacidad total es 1 en
+   todo momento. Con tiempos distintos habría un instante en que el
+   fondo asoma o la pantalla se oscurece.
+
+   La nueva sube 8 px mientras aparece: con el fundido a secas parecía
+   que las dos pantallas se mezclaban; con ese poco de movimiento se lee
+   como que una entra.
 
    La barra de pestañas va aparte y SIN fundido: es la misma antes y
    después, y su marca ya viaja sola con GSAP. Fundida con el resto,
    se veía la marca vieja apagándose en su sitio mientras la nueva
    llegaba: dos marcas a la vez.
    ============================================================ */
-::view-transition-old(root),
+@keyframes vt-tab-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes vt-tab-in {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+::view-transition-old(root) {
+  animation: vt-tab-out 420ms cubic-bezier(0.45, 0, 0.55, 1) both;
+}
 ::view-transition-new(root) {
-  animation-duration: 240ms;
-  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+  animation: vt-tab-in 420ms cubic-bezier(0.45, 0, 0.55, 1) both;
 }
 .vt-bottom-nav {
   view-transition-name: bottom-nav;

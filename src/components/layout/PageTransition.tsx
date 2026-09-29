@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Outlet, useLocation, useNavigationType, type NavigationType } from 'react-router-dom';
 import { useBootSplash } from '@/lib/bootSplash';
-import { clearCrossfadeNavigation, isCrossfadeNavigation } from '@/lib/viewTransition';
+import { isCrossfadeNavigation, notifyRouteCommitted } from '@/lib/viewTransition';
 
 /**
  * Transición entre pantallas.
@@ -79,8 +79,10 @@ export function PageTransition() {
   useEffect(() => {
     firstRender.current = false;
   }, []);
-  useEffect(() => {
-    clearCrossfadeNavigation();
+  // Layout effect: la ruta nueva ya está en el DOM y aún no se ha pintado,
+  // que es justo cuando el fundido cruzado puede hacerle la foto.
+  useLayoutEffect(() => {
+    notifyRouteCommitted(location.pathname);
   }, [location.pathname]);
 
   return (
