@@ -117,6 +117,12 @@
   * {
     @apply border-border;
   }
+  /* Sin zoom por doble toque: tocar rápido dos veces los +/− del cupo
+     acercaba la página. `manipulation` deja el scroll y el pellizco (en el
+     navegador es como se agranda el texto; en la app lo quita viewport.ts). */
+  html {
+    touch-action: manipulation;
+  }
   body {
     @apply bg-background text-foreground;
     font-family: 'Plus Jakarta Sans', sans-serif;
