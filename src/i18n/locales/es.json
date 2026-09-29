@@ -17,6 +17,19 @@
     "optional": "opcional",
     "and": "y"
   },
+  "boot": {
+    "slowTitle": "Está tardando más de lo normal",
+    "slowBody": "Puede que la conexión vaya lenta. Seguimos intentándolo; si prefieres, vuelve a empezar.",
+    "offlineTitle": "Sin conexión",
+    "offlineBody": "Tu sesión sigue guardada, pero hace falta internet para entrar. Revisa la conexión y vuelve a intentarlo.",
+    "errorTitle": "No pudimos arrancar",
+    "errorBody": "Algo falló al abrir tu sesión. Vuelve a intentarlo en un momento.",
+    "profileTitle": "No pudimos cargar tu perfil",
+    "profileBody": "Puede ser la conexión o un fallo momentáneo del servidor. Vuelve a intentarlo.",
+    "retry": "Reintentar",
+    "retrying": "Reintentando…",
+    "signOut": "Cerrar sesión"
+  },
   "bottomNav": {
     "map": "Mapa",
     "events": "Mis eventos",

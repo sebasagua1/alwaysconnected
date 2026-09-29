@@ -59,6 +59,13 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<!-- Texto blanco en la barra de estado mientras se ve el azul del
+	     arranque (LaunchScreen.storyboard y la pantalla de entrada de la web).
+	     Capacitor lo lee al crear su controlador (setStatusBarDefaults) y lo
+	     mantiene hasta que la web avisa de que su pantalla de entrada se fue:
+	     entonces AppViewController vuelve al del sistema. -->
+	<key>UIStatusBarStyle</key>
+	<string>UIStatusBarStyleLightContent</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>$(APP_BRAND_NAME) usa tu ubicación para mostrarte eventos cercanos en el campus y validar tu asistencia (check-in).</string>
 	<!-- La app NUNCA pide ubicación en segundo plano, y este aviso no llega a

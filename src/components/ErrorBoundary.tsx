@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import i18n from '@/i18n';
+import { hideBootSplash } from '@/lib/bootSplash';
 
 interface Props {
   children: ReactNode;
@@ -24,6 +25,9 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('Unhandled error:', error, info.componentStack);
+    // Si revienta durante el arranque, la pantalla de entrada (que va fuera
+    // de React, en index.html) taparía este aviso y la app parecería colgada.
+    hideBootSplash();
   }
 
   /**

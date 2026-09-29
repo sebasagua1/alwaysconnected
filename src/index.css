@@ -459,3 +459,29 @@
     transition-delay: 0ms !important;
   }
 }
+
+/* ============================================================
+   Fundido cruzado entre pestañas (src/lib/viewTransition.ts).
+
+   El de por defecto dura 250 ms con `ease`; este sale un poco antes
+   y frena largo, como el resto de transiciones de la app.
+
+   La barra de pestañas va aparte y SIN fundido: es la misma antes y
+   después, y su marca ya viaja sola con GSAP. Fundida con el resto,
+   se veía la marca vieja apagándose en su sitio mientras la nueva
+   llegaba: dos marcas a la vez.
+   ============================================================ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+.vt-bottom-nav {
+  view-transition-name: bottom-nav;
+}
+::view-transition-old(bottom-nav) {
+  display: none;
+}
+::view-transition-new(bottom-nav) {
+  animation: none;
+}

@@ -7,6 +7,7 @@ import { useGSAP } from '@gsap/react';
 import { cn } from '@/lib/utils';
 import { useNotificationStore } from '@/stores/notificationStore';
 import { isFullScreenRoute, useUiStore } from '@/stores/uiStore';
+import { crossfadeTo } from '@/lib/viewTransition';
 
 gsap.registerPlugin(useGSAP);
 
@@ -112,13 +113,14 @@ export function BottomNav() {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
-    navigate(path, { replace: true });
+    // Fundido cruzado con la pantalla anterior (ver lib/viewTransition.ts).
+    crossfadeTo(path, () => navigate(path, { replace: true }));
   };
 
   if (hidden) return null;
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 glass border-t border-border safe-bottom">
+    <nav className="vt-bottom-nav fixed bottom-0 left-0 right-0 z-50 glass border-t border-border safe-bottom">
       <div ref={filaRef} className="relative mx-auto sm:max-w-[430px] flex items-center justify-around h-16">
         <span
           ref={marcaRef}

@@ -6,6 +6,7 @@ import { useNotificationSync } from '@/hooks/useNotificationSync';
 import { PendingInvite } from '@/components/friends/PendingInvite';
 import { PushPrimer } from '@/components/notifications/PushPrimer';
 import { useNotificationPrefsSync } from '@/hooks/useNotificationPrefsSync';
+import { BootReady } from '@/components/boot/StartupStatus';
 
 /** Rueda que ocupa solo el hueco del contenido, sin comerse la barra. */
 function ContentSpinner() {
@@ -29,9 +30,12 @@ export function AppShell() {
       {/* Suspense aquí dentro y no solo en App: las pantallas se cargan en
           diferido, y con la única frontera de arriba la primera visita a
           cada pestaña hacía desaparecer la barra inferior entera para poner
-          una rueda a pantalla completa. Así solo parpadea el contenido. */}
+          una rueda a pantalla completa. Así solo parpadea el contenido.
+          BootReady aquí dentro y no fuera: la pantalla de entrada se va
+          cuando la de la ruta (el mapa, casi siempre) ya está montada. */}
       <Suspense fallback={<ContentSpinner />}>
         <PageTransition />
+        <BootReady />
       </Suspense>
       {/* Franja opaca bajo la hora y la batería para las pantallas que hacen
           scroll. En el mapa no: el mapa no se desplaza y debe llegar hasta el
