@@ -11,6 +11,7 @@ import App from "./App.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
 import { watchColorScheme } from "./lib/theme.ts";
 import { watchDynamicType } from "./lib/dynamicType.ts";
+import { lockNativeZoom } from "./lib/viewport.ts";
 import "./index.css";
 import "./i18n";
 
@@ -20,6 +21,9 @@ watchColorScheme();
 
 // El tamaño de letra de Ajustes de iOS, que el webview no aplica solo.
 watchDynamicType();
+
+// Dentro de la app la página no hace zoom (se quedaba acercada al escribir).
+lockNativeZoom();
 
 createRoot(document.getElementById("root")!).render(
   <ErrorBoundary>
