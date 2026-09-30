@@ -245,6 +245,14 @@
   .shadow-lifted {
     box-shadow: 0 8px 32px rgba(0,0,0,0.12);
   }
+  /* Para lo que va dentro de una fila con scroll horizontal. Un contenedor
+     con scroll recorta todo lo que sobresale, y la sombra de 24 px de
+     shadow-soft no cabía en los 4 px de margen de la fila de categorías del
+     mapa: las sombras de los chips se juntaban en una franja gris cortada
+     en seco, como una marca de agua. Esta cabe en 4 px (1 + 3). */
+  .shadow-chip {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  }
   /* Las mismas sombras, más hondas en oscuro.
 
      Un negro al 8% sobre un fondo que ya es casi negro no se ve. Medido
@@ -261,6 +269,9 @@
   }
   .dark .shadow-lifted {
     box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+  }
+  .dark .shadow-chip {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.6);
   }
 }
 
@@ -374,9 +385,11 @@
     from { opacity: 0; transform: translate3d(-28px, 0, 0); }
     to   { opacity: 1; transform: translate3d(0, 0, 0); }
   }
-  /* La curva es la misma que ya usaban las hojas: salida rápida y frenada
-     larga, que es como se mueven las cosas en iOS. */
-  .animate-page-fade    { animation: page-fade 260ms ease-out both; }
+  /* El fundido (cuando no hay View Transitions) va al ritmo del fundido
+     cruzado entre pestañas: 300 ms y curva simétrica. Los deslizamientos
+     usan la curva de las hojas: salida rápida y frenada larga, que es como
+     se mueven las cosas en iOS. */
+  .animate-page-fade    { animation: page-fade 300ms cubic-bezier(0.45, 0, 0.55, 1) both; }
   .animate-page-forward { animation: page-forward 280ms cubic-bezier(0.32, 0.72, 0, 1) both; }
   .animate-page-back    { animation: page-back 280ms cubic-bezier(0.32, 0.72, 0, 1) both; }
 
@@ -458,4 +471,54 @@
     transition-duration: 1ms !important;
     transition-delay: 0ms !important;
   }
+}
+
+/* ============================================================
+   Fundido cruzado entre pestañas (src/lib/viewTransition.ts).
+
+   300 ms con una curva simétrica: arranca y frena suave. La primera
+   versión (240 ms, salida rápida y frenada larga) hacía casi todo el
+   cambio en los primeros ~70 ms: esa curva va bien para algo que se
+   desliza, no para un fundido. Luego se probó con 420 ms, y en el
+   iPhone se sentía lento. (Además no llegaba a verse, por el fallo
+   que se explica en lib/viewTransition.ts.) Con esta curva, si el
+   arranque pierde algún fotograma, lo que se pierde es la parte en que
+   casi no cambia nada.
+
+   La vieja y la nueva llevan la MISMA duración y la MISMA curva: el
+   navegador las suma (plus-lighter), y así su opacidad total es 1 en
+   todo momento. Con tiempos distintos habría un instante en que el
+   fondo asoma o la pantalla se oscurece.
+
+   La nueva sube 8 px mientras aparece: con el fundido a secas parecía
+   que las dos pantallas se mezclaban; con ese poco de movimiento se lee
+   como que una entra.
+
+   La barra de pestañas va aparte y SIN fundido: es la misma antes y
+   después, y su marca ya viaja sola con GSAP. Fundida con el resto,
+   se veía la marca vieja apagándose en su sitio mientras la nueva
+   llegaba: dos marcas a la vez.
+   ============================================================ */
+@keyframes vt-tab-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes vt-tab-in {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+::view-transition-old(root) {
+  animation: vt-tab-out 300ms cubic-bezier(0.45, 0, 0.55, 1) both;
+}
+::view-transition-new(root) {
+  animation: vt-tab-in 300ms cubic-bezier(0.45, 0, 0.55, 1) both;
+}
+.vt-bottom-nav {
+  view-transition-name: bottom-nav;
+}
+::view-transition-old(bottom-nav) {
+  display: none;
+}
+::view-transition-new(bottom-nav) {
+  animation: none;
 }

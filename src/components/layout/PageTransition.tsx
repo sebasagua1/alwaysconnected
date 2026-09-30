@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Outlet, useLocation, useNavigationType, type NavigationType } from 'react-router-dom';
+import { useBootSplash } from '@/lib/bootSplash';
+import { isCrossfadeNavigation, notifyRouteCommitted } from '@/lib/viewTransition';
 
 /**
  * Transición entre pantallas.
@@ -58,8 +60,13 @@ function pickVariant(
 ): Variant {
   // Al abrir la app el tipo de navegación ya es 'POP'. Sin esta salida, lo
   // primero que se ve es un deslizamiento hacia atrás desde una pantalla
-  // que no existió nunca.
-  if (isFirstRender) return 'fade';
+  // que no existió nunca. Y si la pantalla de entrada sigue puesta, ningún
+  // movimiento: el fundido ya lo hace ella al irse, y dos a la vez dejan ver
+  // el fondo a mitad de camino.
+  if (isFirstRender) return useBootSplash.getState().visible ? 'none' : 'fade';
+  // El fundido cruzado de la barra de pestañas ya lo hace el navegador (ver
+  // lib/viewTransition.ts); otro encima dejaría ver el fondo a mitad.
+  if (isCrossfadeNavigation(pathname)) return 'none';
   if (navigationType === 'POP') return Date.now() - lastEdgeTouch < 1500 ? 'none' : 'back';
   return TAB_PATHS.has(pathname) ? 'fade' : 'forward';
 }
@@ -72,6 +79,11 @@ export function PageTransition() {
   useEffect(() => {
     firstRender.current = false;
   }, []);
+  // Layout effect: la ruta nueva ya está en el DOM y aún no se ha pintado,
+  // que es justo cuando el fundido cruzado puede hacerle la foto.
+  useLayoutEffect(() => {
+    notifyRouteCommitted(location.pathname);
+  }, [location.pathname]);
 
   return (
     // key: cada ruta monta su propio contenedor, así que la animación

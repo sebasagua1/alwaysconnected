@@ -17,6 +17,19 @@
     "optional": "optional",
     "and": "and"
   },
+  "boot": {
+    "slowTitle": "This is taking longer than usual",
+    "slowBody": "Your connection may be slow. We're still trying; you can start over if you prefer.",
+    "offlineTitle": "No connection",
+    "offlineBody": "You're still signed in, but you need internet to get in. Check your connection and try again.",
+    "errorTitle": "We couldn't start",
+    "errorBody": "Something went wrong opening your session. Try again in a moment.",
+    "profileTitle": "We couldn't load your profile",
+    "profileBody": "It may be your connection or a temporary server issue. Try again.",
+    "retry": "Try again",
+    "retrying": "Trying again…",
+    "signOut": "Sign out"
+  },
   "bottomNav": {
     "map": "Map",
     "events": "My Events",
