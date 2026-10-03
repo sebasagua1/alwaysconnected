@@ -1098,7 +1098,7 @@ export type Database = {
         Returns: { shared: number; accepted: number }[]
       }
       my_notifications: {
-        Args: { _before?: string; _limit?: number }
+        Args: { _before?: string; _limit?: number; _before_id?: string }
         Returns: {
           id: string
           type: string
@@ -1126,6 +1126,14 @@ export type Database = {
       mark_notification_opened: {
         Args: { _id: string }
         Returns: undefined
+      }
+      archive_notifications: {
+        Args: { _ids: string[] }
+        Returns: number
+      }
+      unarchive_notifications: {
+        Args: { _ids: string[] }
+        Returns: number
       }
       muted_event_chats: {
         Args: Record<PropertyKey, never>
