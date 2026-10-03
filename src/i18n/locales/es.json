@@ -112,21 +112,13 @@
     "attended": "Asistidos",
     "created": "Creados",
     "points": "Puntos",
-    "reputation": "Reputación",
-    "rank": {
-      "newcomer": "Nuevo",
-      "regular": "Regular",
-      "active": "Activo",
-      "legend": "Leyenda"
-    },
-    "ptsToNext": "pts para el siguiente nivel",
     "badges": "Insignias",
     "edit": "Editar perfil",
     "save": "Guardar cambios",
     "saved": "Perfil actualizado",
     "changePhoto": "Cambiar foto",
     "institutionVerified": "Institución verificada",
-    "metaDesc": "Tu perfil de {{app}}: reputación, puntos, insignias y estadísticas.",
+    "metaDesc": "Tu perfil de {{app}}: puntos, insignias y estadísticas.",
     "adjustPhoto": "Ajusta tu foto",
     "adjustPhotoHint": "Arrastra para mover y pellizca o usa la barra para acercar",
     "preparingPhoto": "Preparando la foto…",
@@ -473,7 +465,18 @@
       "streak_7": "Únete a eventos en {{count}} días distintos"
     },
     "earned": "¡Conseguida!",
-    "progress": "{{current}} de {{target}}"
+    "progress": "{{current}} de {{target}}",
+    "about": {
+      "organizer": "Reconoce a quien organiza eventos para los demás.",
+      "explorer": "Reconoce a quien se anima a eventos de todo tipo.",
+      "study_buddy": "Reconoce a quien de verdad llega a las sesiones de estudio.",
+      "team_player": "Reconoce a quien se suma a los eventos de deportes.",
+      "streak_7": "Reconoce la constancia: unirte a eventos en días distintos. No hace falta que sean seguidos."
+    },
+    "howTitle": "Cómo se consigue",
+    "progressTitle": "Tu avance",
+    "locked": "Aún no la tienes",
+    "earnedOn": "Conseguida el {{date}}"
   },
   "map": {
     "title": "Mapa de eventos del campus",

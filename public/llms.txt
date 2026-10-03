@@ -9,4 +9,4 @@ Always Connected shows students what is happening on campus right now. The app i
 - [Map](/): Live campus event map with real-time pins, geolocation, and event creation.
 - [My Events](/events): Events the user has created or joined, split into upcoming and past.
 - [Friends](/friends): Search students, send friend requests, and manage friendships.
-- [Profile](/profile): User profile with reputation, points, badges, and stats.
+- [Profile](/profile): User profile with points, badges, and stats.

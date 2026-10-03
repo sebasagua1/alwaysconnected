@@ -2,7 +2,7 @@
 
 App web mobile-first (PWA) para comunidades universitarias: descubre, crea
 y únete a actividades reales del campus en un mapa en tiempo real, con chats de grupo,
-amigos, perfiles y reputación.
+amigos, perfiles, puntos e insignias.
 
 ## Stack
 
