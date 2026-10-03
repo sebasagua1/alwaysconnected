@@ -15,6 +15,8 @@ import { OriginPicker } from '@/components/ui/origin-picker';
 import { AvatarCropper } from '@/components/profile/AvatarCropper';
 import { WheelColumn, WHEEL_ITEM_HEIGHT } from '@/components/ui/wheel-column';
 import type { Database } from '@/integrations/supabase/types';
+import { useKeyboardFrame } from '@/hooks/useKeyboardFrame';
+import { cn } from '@/lib/utils';
 
 type Profile = Database['public']['Tables']['profiles']['Row'];
 
@@ -42,6 +44,8 @@ export function EditProfileSheet({ profile, onClose }: Props) {
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [saving, setSaving] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const { keyboardOpen, keyboardPad, frameStyle } = useKeyboardFrame(scrollRef);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingPhoto, setPendingPhoto] = useState<File | null>(null);
 
@@ -159,7 +163,11 @@ export function EditProfileSheet({ profile, onClose }: Props) {
   return (
     // z-[60] como los demás sheets: en z-50 empataba con BottomNav, que se
     // pinta después y se comía la mitad inferior de Cancelar y Guardar.
-    <div className="fixed inset-0 z-[60] flex flex-col bg-background animate-slide-up">
+    // Con el teclado abierto, sobre lo que se ve (ver useKeyboardFrame).
+    <div
+      className="fixed inset-0 z-[60] flex flex-col bg-background animate-slide-up"
+      style={frameStyle && { ...frameStyle, paddingBottom: keyboardPad }}
+    >
       {/* Header */}
       <div className="flex items-center justify-between px-5 pb-3 border-b border-border pt-[calc(1.25rem+env(safe-area-inset-top,0px))]">
         <h2 className="text-lg font-extrabold text-foreground">{t('profile.edit')}</h2>
@@ -169,7 +177,7 @@ export function EditProfileSheet({ profile, onClose }: Props) {
       </div>
 
       {/* Scrollable body */}
-      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-6">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-5 py-5 space-y-6">
         {/* Avatar */}
         <div className="flex flex-col items-center gap-3">
           {/* La cámara siempre visible: antes solo salía con hover, que en un
@@ -294,7 +302,7 @@ export function EditProfileSheet({ profile, onClose }: Props) {
       </div>
 
       {/* Footer */}
-      <div className="px-5 pb-8 pt-3 border-t border-border flex gap-3">
+      <div className={cn('px-5 pt-3 border-t border-border flex gap-3', keyboardOpen ? 'pb-3' : 'pb-8')}>
         <Button variant="outline" onClick={onClose} className="h-12 rounded-xl px-6">
           {t('common.cancel')}
         </Button>

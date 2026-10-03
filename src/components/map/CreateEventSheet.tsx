@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { useFormatWhen } from '@/hooks/useFormatWhen';
 import { useSheetDrag } from '@/hooks/useSheetDrag';
+import { useKeyboardFrame } from '@/hooks/useKeyboardFrame';
 import { haptic } from '@/lib/haptics';
 import { askForPush } from '@/stores/pushPrimerStore';
 import { Button } from '@/components/ui/button';
@@ -157,6 +158,7 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
       return false;
     },
   });
+  const { keyboardOpen, frameStyle, sheetStyle } = useKeyboardFrame(scrollRef);
 
   const DURATION_OPTIONS = [
     { mins: 30, label: t('create.duration30') },
@@ -256,6 +258,8 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
         // debajo para poner el pin.
         hidden && 'invisible pointer-events-none',
       )}
+      // Con el teclado abierto, sobre lo que se ve (ver useKeyboardFrame).
+      style={frameStyle}
       onClick={requestClose}
       aria-hidden={hidden}
     >
@@ -265,6 +269,9 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
         aria-modal="true"
         aria-labelledby="create-event-title"
         className="absolute bottom-0 left-0 right-0 bg-card rounded-t-3xl shadow-lifted animate-slide-up max-h-[88dvh] flex flex-col mx-auto sm:max-w-[430px]"
+        // El 88dvh mide la pantalla entera: con el teclado abierto la hoja
+        // ocupa justo lo que se ve (ver useKeyboardFrame).
+        style={sheetStyle}
         onClick={e => e.stopPropagation()}
       >
         {/* Cabecera fija: la X ya no se va con el scroll, y desde aquí se
@@ -279,7 +286,14 @@ export function CreateEventSheet({ onClose, onPickLocation, pickedLocation, hidd
           </div>
         </div>
 
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))]">
+        <div
+          ref={scrollRef}
+          className={cn(
+            'flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 pt-4',
+            // Con el teclado, el hueco del indicador de inicio ya lo tapa él.
+            keyboardOpen ? 'pb-6' : 'pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))]',
+          )}
+        >
           <div className="space-y-5">
             {initial && (
               <p className="flex items-start gap-2 rounded-xl bg-primary/10 text-primary text-sm font-medium p-3">

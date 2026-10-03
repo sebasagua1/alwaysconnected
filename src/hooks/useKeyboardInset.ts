@@ -31,7 +31,16 @@ export function useKeyboardInset(): VisibleArea {
     const measure = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-        const hidden = Math.max(0, window.innerHeight - vv.height);
+        // El alto de la pantalla entera sale del documento, no de
+        // `innerHeight`: en el WKWebView de iOS 26 `innerHeight` se encoge
+        // con el teclado igual que el visualViewport (los dos pasan de 874
+        // a 471 en un iPhone 17 Pro), la resta daba 0 y el teclado no se
+        // detectaba nunca. `clientHeight` del documento sí se queda en 874.
+        // Se multiplica por la escala para que un zoom con los dedos, que
+        // también encoge el visualViewport, no pase por teclado.
+        const full = Math.max(window.innerHeight, document.documentElement.clientHeight);
+        const shown = vv.height * vv.scale;
+        const hidden = Math.max(0, full - shown);
         setArea({
           keyboard: hidden >= 120 ? Math.round(hidden) : 0,
           height: Math.round(vv.height),
