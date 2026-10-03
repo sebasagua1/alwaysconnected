@@ -148,7 +148,7 @@ export function UserProfileSheet({ userId, footer, onClose }: Props) {
 
             {profile.interests && profile.interests.length > 0 && (
               <div>
-                <h3 className="text-[13px] font-bold text-muted-foreground mb-2">
+                <h3 className="text-[0.8125rem] font-bold text-muted-foreground mb-2">
                   {t('profile.interests')}
                 </h3>
                 <div className="flex flex-wrap gap-1.5">
@@ -166,7 +166,7 @@ export function UserProfileSheet({ userId, footer, onClose }: Props) {
 
             {profile.languages && profile.languages.length > 0 && (
               <div>
-                <h3 className="text-[13px] font-bold text-muted-foreground mb-2">
+                <h3 className="text-[0.8125rem] font-bold text-muted-foreground mb-2">
                   {t('profile.languages')}
                 </h3>
                 <div className="flex flex-wrap gap-1.5">

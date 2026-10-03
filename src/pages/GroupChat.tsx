@@ -561,7 +561,7 @@ export default function GroupChat() {
               {/* Invite friends */}
               {friends.length > 0 && (
                 <div className="space-y-2">
-                  <p className="text-[13px] font-semibold text-muted-foreground">
+                  <p className="text-[0.8125rem] font-semibold text-muted-foreground">
                     {t('groups.inviteFriends')}
                   </p>
                   {friends.map((f) => (

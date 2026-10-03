@@ -114,7 +114,7 @@ export function FindPeople({ children, onFriendsChanged, onMessage }: Props) {
     // quedaba en tres letras en un iPhone. En la ficha hay sitio para todo.
     const row = variant === 'row';
     const base = row
-      ? 'h-11 shrink-0 rounded-full px-3.5 text-[13px] font-semibold'
+      ? 'h-11 shrink-0 rounded-full px-3.5 text-[0.8125rem] font-semibold'
       : 'w-full rounded-xl';
     const icon = (Icon: typeof Check) => (row ? null : <Icon className="w-4 h-4" />);
     switch (p.relation) {

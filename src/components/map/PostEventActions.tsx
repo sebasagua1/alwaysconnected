@@ -115,20 +115,20 @@ export function PostEventActions({ event, attendees, myId, onClose }: Props) {
               return (
                 <li key={a.user_id} className="shrink-0 w-[72px] flex flex-col items-center gap-1 text-center">
                   <UserAvatar url={a.avatar_url} name={a.name} className="w-11 h-11 bg-muted" textClassName="text-sm font-bold text-muted-foreground" />
-                  <span className="w-full text-[11px] font-medium text-foreground truncate">{first}</span>
+                  <span className="w-full text-[0.6875rem] font-medium text-foreground truncate">{first}</span>
                   {rel === 'none' ? (
                     <button
                       type="button"
                       onClick={() => addFriend(a.user_id)}
                       disabled={adding === a.user_id}
                       aria-label={t('afterEvent.addAria', { name: a.name ?? first })}
-                      className="inline-flex items-center justify-center gap-1 min-h-[32px] px-2.5 rounded-full bg-primary text-primary-foreground text-[11px] font-bold disabled:opacity-60"
+                      className="inline-flex items-center justify-center gap-1 min-h-[32px] px-2.5 rounded-full bg-primary text-primary-foreground text-[0.6875rem] font-bold disabled:opacity-60"
                     >
                       {adding === a.user_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <UserPlus className="w-3 h-3" aria-hidden="true" />}
                       {t('afterEvent.add')}
                     </button>
                   ) : (
-                    <span className="inline-flex items-center gap-1 min-h-[32px] px-2 text-[11px] font-semibold text-muted-foreground">
+                    <span className="inline-flex items-center gap-1 min-h-[32px] px-2 text-[0.6875rem] font-semibold text-muted-foreground">
                       <Check className="w-3 h-3" aria-hidden="true" />
                       {t('afterEvent.sent')}
                     </span>

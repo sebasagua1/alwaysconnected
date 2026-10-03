@@ -577,15 +577,18 @@ export function EventBottomSheet({ event, onClose, onTopChange }: Props) {
         {/* Solicitudes pendientes — solo el organizador */}
         {!checking && isCreator && (loadingRequests || requests.length > 0) && (
           <div className="mb-4 border border-primary/30 bg-primary/5 rounded-xl p-3 space-y-2">
-            <p className="text-[13px] font-semibold text-primary">
+            <p className="text-[0.8125rem] font-semibold text-primary">
               {t('event.requests', { count: requests.length })}
             </p>
             {loadingRequests ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
             ) : (
               requests.map(r => (
-                <div key={r.id} className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-medium text-foreground truncate">
+                // flex-wrap: con la letra grande los dos botones se comían
+                // el nombre entero, y no se sabía a quién se aprobaba. Si no
+                // caben al lado, bajan a su propia línea.
+                <div key={r.id} className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0 text-xs font-medium text-foreground truncate">
                     {r.name ?? t('profile.student')}
                   </span>
                   <div className="flex gap-2 shrink-0">
@@ -615,7 +618,7 @@ export function EventBottomSheet({ event, onClose, onTopChange }: Props) {
         {/* Quién va — para cualquiera que vea el evento */}
         <div className="mb-4 border border-border rounded-xl p-3 space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-[13px] font-semibold text-foreground">
+            <p className="text-[0.8125rem] font-semibold text-foreground">
               {isCreator ? t('event.organizedByYou') : t('event.whoIsGoing')}
               {/* Sin contar a quien organiza: si no, esta cifra contradice al
                   aforo ("1/6"), que cuenta solo a quien se unió. */}
@@ -737,7 +740,7 @@ export function EventBottomSheet({ event, onClose, onTopChange }: Props) {
           <PostEventActions event={event} attendees={attendees} myId={user.id} onClose={onClose} />
         )}
 
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3">
           {checking ? (
             <Button disabled className="flex-1 h-12 rounded-xl font-bold">
               <Loader2 className="w-4 h-4 animate-spin" />

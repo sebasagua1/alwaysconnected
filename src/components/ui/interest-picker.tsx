@@ -18,7 +18,7 @@ export function InterestPicker({ selected, onToggle }: Props) {
     <div className="space-y-5">
       {INTEREST_GROUPS.map((group) => (
         <div key={group.key}>
-          <h3 className="text-[13px] font-bold text-muted-foreground mb-2">
+          <h3 className="text-[0.8125rem] font-bold text-muted-foreground mb-2">
             {t('interestGroups.' + group.key)}
           </h3>
           <div className="flex flex-wrap gap-2">
