@@ -65,13 +65,13 @@ export function BadgeGrid({ earned, progress }: Props) {
               <span className="text-xs font-bold text-foreground leading-tight">{t('badges.' + badge.type)}</span>
               {/* Bloqueada no basta: sin decir cómo se gana, la insignia
                   gris no invita a nada. */}
-              <span className="text-[11px] text-muted-foreground leading-snug">{status}</span>
+              <span className="text-[0.6875rem] text-muted-foreground leading-snug">{status}</span>
               {!isEarned && progress && (
                 <span className="block w-full mt-auto pt-1">
                   <span className="block h-1.5 rounded-full bg-muted overflow-hidden">
                     <span className="block h-full bg-primary rounded-full" style={{ width: `${(current / target) * 100}%` }} />
                   </span>
-                  <span className="block mt-1 text-[11px] font-semibold text-muted-foreground">
+                  <span className="block mt-1 text-[0.6875rem] font-semibold text-muted-foreground">
                     {current}/{target}
                   </span>
                 </span>
@@ -160,7 +160,7 @@ function BadgeDetail({ type, earnedAt, isEarned, progress, onClose, onCloseAutoF
         <SheetDescription className="text-sm text-foreground">{t(`badges.about.${type}`)}</SheetDescription>
 
         <div>
-          <h3 className="text-[13px] font-bold text-muted-foreground mb-1">{t('badges.howTitle')}</h3>
+          <h3 className="text-[0.8125rem] font-bold text-muted-foreground mb-1">{t('badges.howTitle')}</h3>
           <p className="text-sm text-foreground">{t(`badges.how.${type}`, { count: target })}</p>
         </div>
 
@@ -168,7 +168,7 @@ function BadgeDetail({ type, earnedAt, isEarned, progress, onClose, onCloseAutoF
             la consulta fallara, no que no lleves nada. */}
         {current !== null && (
           <div>
-            <h3 className="text-[13px] font-bold text-muted-foreground mb-2">{t('badges.progressTitle')}</h3>
+            <h3 className="text-[0.8125rem] font-bold text-muted-foreground mb-2">{t('badges.progressTitle')}</h3>
             <div
               role="progressbar"
               aria-valuemin={0}
