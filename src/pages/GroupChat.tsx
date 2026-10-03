@@ -33,6 +33,7 @@ import { MessageActionsMenu } from '@/components/chat/MessageActionsMenu';
 import { applyMessageChange, canSaveEdit, type MessageChange } from '@/lib/chat';
 import { cn } from '@/lib/utils';
 import { useKeyboardInset } from '@/hooks/useKeyboardInset';
+import { useBottomAnchor } from '@/hooks/useBottomAnchor';
 import { formatTime } from '@/lib/datetime';
 
 /** Mensajes por tanda. Suficiente para llenar la pantalla y poco que pintar. */
@@ -79,6 +80,9 @@ export default function GroupChat() {
   // página entera para enseñar el campo y la cabecera se salía por arriba.
   const visible = useKeyboardInset();
   const keyboard = visible.keyboard;
+  // Al abrir o cerrar el teclado la lista cambia de alto: lo último que se
+  // leía sigue encima de la caja de escribir.
+  useBottomAnchor(listRef);
   // Se mueve la lista, no la página: scrollIntoView arrastraba también el
   // documento y, con el teclado abierto, se llevaba la cabecera.
   const scrollToBottom = (smooth: boolean) => {
@@ -248,11 +252,6 @@ export default function GroupChat() {
 
     scrollToBottom(!esLaPrimera);
   }, [messages, user?.id]);
-
-  // Con el teclado abierto, que lo último siga a la vista.
-  useEffect(() => {
-    if (keyboard > 0 && atBottomRef.current) requestAnimationFrame(() => scrollToBottom(false));
-  }, [keyboard]);
 
   // Estar en el chat cuenta como haberlo leído, también si llega algo mientras
   // lo tienes abierto. Marcar leído es un UPDATE sobre group_members, que no

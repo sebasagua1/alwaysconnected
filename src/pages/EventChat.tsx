@@ -20,6 +20,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useNotificationStore } from '@/stores/notificationStore';
 import { useToast } from '@/hooks/use-toast';
 import { useKeyboardInset } from '@/hooks/useKeyboardInset';
+import { useBottomAnchor } from '@/hooks/useBottomAnchor';
 import { rpcMessage } from '@/lib/rpcErrors';
 import { canSaveEdit } from '@/lib/chat';
 import {
@@ -103,6 +104,8 @@ export default function EventChat() {
   const atBottomRef = useRef(true);
   const lastIdRef = useRef<string | null>(null);
   const firstPaintRef = useRef(true);
+  // La lista no existe hasta que el chat carga: se engancha al estar lista.
+  useBottomAnchor(listRef, phase === 'ready');
   /** Nombres de quien ya no está en el chat pero dejó mensajes. */
   const extraNamesRef = useRef<Map<string, { name: string | null; avatar_url: string | null }>>(new Map());
   const [namesVersion, setNamesVersion] = useState(0);
