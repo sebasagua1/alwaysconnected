@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 import { useNotificationStore } from '@/stores/notificationStore';
 import { isFullScreenRoute, useUiStore } from '@/stores/uiStore';
 import { crossfadeTo } from '@/lib/viewTransition';
+import { scrollActiveTabToTop } from '@/lib/tabScroll';
 
 gsap.registerPlugin(useGSAP);
 
@@ -110,8 +111,7 @@ export function BottomNav() {
   // detalle, y no va saltando por las pestañas que se tocaron antes.
   const goTo = (path: string, active: boolean) => {
     if (active) {
-      // Tocar la pestaña en la que ya estás sube al principio, como en iOS.
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      scrollActiveTabToTop();
       return;
     }
     // Fundido cruzado con la pantalla anterior (ver lib/viewTransition.ts).

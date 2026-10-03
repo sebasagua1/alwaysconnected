@@ -31,6 +31,7 @@ import { GroupInvites } from '@/components/chat/GroupInvites';
 import { NotificationBell } from '@/components/notifications/NotificationBell';
 import { haptic } from '@/lib/haptics';
 import { askForPush } from '@/stores/pushPrimerStore';
+import { fetchFirstRows } from '@/lib/friendsPaging';
 
 type FriendData = Pick<
   Database['public']['Views']['public_profiles']['Row'],
@@ -118,7 +119,13 @@ export default function Friends() {
   const [leaderHasMore, setLeaderHasMore] = useState(true);
 
   // Friends pagination
-  const [friendsPage, setFriendsPage] = useState(0);
+  /**
+   * Cuántas filas de friends_page se han pedido ya: el offset de la página
+   * siguiente. Antes se guardaba un número de página y el offset se deducía
+   * multiplicando por 15, que deja de cuadrar en cuanto una recarga trae un
+   * número de filas que no es múltiplo de 15 (ver lib/friendsPaging.ts).
+   */
+  const friendsOffsetRef = useRef(0);
   const [friendsHasMore, setFriendsHasMore] = useState(false);
   /** Cuántos amigos hay, no cuántos se han cargado: lo devuelve la RPC. */
   const [friendsTotal, setFriendsTotal] = useState(0);
@@ -126,9 +133,10 @@ export default function Friends() {
   const FRIENDS_PAGE_SIZE = 15;
   const LEADER_PAGE_SIZE = 20;
 
-  const loadFriends = useCallback(async (page: number) => {
+  const loadFriends = useCallback(async (offset: number) => {
     if (!user) return;
-    if (page === 0) setLoading(true); else setLoadingMoreFriends(true);
+    const first = offset === 0;
+    if (first) setLoading(true); else setLoadingMoreFriends(true);
     try {
       // Una sola consulta, paginada en el servidor.
       //
@@ -141,7 +149,7 @@ export default function Friends() {
       // saltarse filas entre páginas, y devuelve el total de verdad.
       const { data, error } = await supabase.rpc('friends_page', {
         _limit: FRIENDS_PAGE_SIZE,
-        _offset: page * FRIENDS_PAGE_SIZE,
+        _offset: offset,
       });
       // Antes esto fallaba en silencio: una caída de red se veía igual que
       // "no tienes amigos todavía".
@@ -155,21 +163,22 @@ export default function Friends() {
       const perfiles = rows.map(({ id, name, avatar_url, major, last_message_at, last_content, last_sender_id }) => ({
         id, name, avatar_url, major, last_message_at, last_content, last_sender_id,
       }));
-      if (page === 0) setFriends(perfiles);
+      if (first) setFriends(perfiles);
       // Se descartan los repetidos por id: si entre una página y la siguiente
       // llegó un mensaje, el orden se movió y alguien puede venir dos veces.
       else setFriends((prev) => {
         const vistos = new Set(prev.map((f) => f.id));
         return [...prev, ...perfiles.filter((f) => !vistos.has(f.id))];
       });
+      friendsOffsetRef.current = offset + rows.length;
       setFriendsHasMore(rows.length === FRIENDS_PAGE_SIZE);
       // El total viaja en cada fila. Una página vacía más allá del final no
       // dice nada del total, así que solo se pisa si hay filas o si es la
       // primera página (donde vacío sí significa que no hay ninguno).
       if (rows.length > 0) setFriendsTotal(Number(rows[0].total));
-      else if (page === 0) setFriendsTotal(0);
+      else if (first) setFriendsTotal(0);
 
-      if (page === 0) {
+      if (first) {
         const { data: pending, error: pendingError } = await supabase.rpc('friend_requests_incoming');
         // Se asigna también cuando viene vacío: si no, rechazar la última
         // solicitud dejaba la anterior pintada hasta recargar la pantalla.
@@ -183,13 +192,12 @@ export default function Friends() {
         }
       }
     } finally {
-      if (page === 0) setLoading(false); else setLoadingMoreFriends(false);
+      if (first) setLoading(false); else setLoadingMoreFriends(false);
     }
   }, [user, toast]);
 
   useEffect(() => {
     loadFriends(0);
-    setFriendsPage(0);
   }, [loadFriends]);
 
   const fetchGroups = useCallback(async () => {
@@ -337,22 +345,28 @@ export default function Friends() {
    *
    * Vuelve a pedir, desde el principio, tantos amigos como hay en pantalla:
    * así la conversación que acaba de moverse sube a su sitio aunque viniera
-   * de una página posterior, y no se repite nadie.
+   * de una página posterior, y no se repite nadie. Con más de 100 cargados
+   * van varias llamadas: el servidor no da más de 100 por vez, y quedarse en
+   * los 100 primeros encogía la lista y descuadraba la página siguiente.
    */
-  const friendsCountRef = useRef(0);
-  friendsCountRef.current = friends.length;
   const refreshFriendsOrder = useCallback(async () => {
     if (!user) return;
-    const limit = Math.min(Math.max(friendsCountRef.current, FRIENDS_PAGE_SIZE), 100);
-    const { data, error } = await supabase.rpc('friends_page', { _limit: limit, _offset: 0 });
+    const result = await fetchFirstRows(
+      async (limit, offset) => {
+        const { data, error } = await supabase.rpc('friends_page', { _limit: limit, _offset: offset });
+        return error ? null : data ?? [];
+      },
+      Math.max(friendsOffsetRef.current, FRIENDS_PAGE_SIZE),
+    );
     // Sin toast: la lista de antes sigue siendo válida, solo peor ordenada.
-    if (error || !data) return;
-    setFriends(data.map(({ id, name, avatar_url, major, last_message_at, last_content, last_sender_id }) => ({
+    if (!result) return;
+    const { rows, consumed } = result;
+    setFriends(rows.map(({ id, name, avatar_url, major, last_message_at, last_content, last_sender_id }) => ({
       id, name, avatar_url, major, last_message_at, last_content, last_sender_id,
     })));
-    setFriendsPage(Math.max(Math.ceil(data.length / FRIENDS_PAGE_SIZE) - 1, 0));
-    setFriendsHasMore(data.length > 0 && Number(data[0].total) > data.length);
-    if (data.length > 0) setFriendsTotal(Number(data[0].total));
+    friendsOffsetRef.current = consumed;
+    setFriendsHasMore(rows.length > 0 && Number(rows[0].total) > consumed);
+    if (rows.length > 0) setFriendsTotal(Number(rows[0].total));
   }, [user]);
 
   // Un mensaje nuevo, editado o borrado en cualquiera de mis chats. La RLS de
@@ -566,7 +580,7 @@ export default function Friends() {
       {/* Friends tab */}
       {activeTab === 'friends' && (
         <FindPeople
-          onFriendsChanged={() => { setFriendsPage(0); loadFriends(0); }}
+          onFriendsChanged={() => { loadFriends(0); }}
           onMessage={handleMessageFriend}
         >
         <div className="space-y-4">
@@ -691,7 +705,7 @@ export default function Friends() {
               ))}
             {!loading && friendsHasMore && (
               <button
-                onClick={() => { const next = friendsPage + 1; setFriendsPage(next); loadFriends(next); }}
+                onClick={() => loadFriends(friendsOffsetRef.current)}
                 disabled={loadingMoreFriends}
                 className="w-full min-h-[44px] text-sm font-semibold text-primary disabled:opacity-50"
               >
