@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useTranslation } from 'react-i18next';
-import { LogOut, Award, TrendingUp, Calendar, Star, Pencil, Zap, Ban, Trash2, FileText, Shield, Loader2, ChevronRight, Bell, Contact, Languages } from 'lucide-react';
+import { LogOut, TrendingUp, Calendar, Star, Pencil, Zap, Ban, Trash2, FileText, Shield, Loader2, ChevronRight, Bell, Contact, Languages } from 'lucide-react';
 import { NotificationBell } from '@/components/notifications/NotificationBell';
 import { useNavigate } from 'react-router-dom';
 import { regionalLocale } from '@/lib/datetime';
-import { BADGE_ICONS } from '@/lib/categoryIcons';
 import { EditProfileSheet } from '@/components/profile/EditProfileSheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
@@ -22,19 +21,18 @@ import {
 } from '@/components/ui/alert-dialog';
 import { useAuthStore } from '@/stores/authStore';
 import { supabase } from '@/integrations/supabase/client';
-import { BADGE_DEFINITIONS } from '@/lib/constants';
 import { PRIVACY_URL, TERMS_URL, SUPPORT_EMAIL } from '@/lib/legal';
 import { BlockedUsersSheet } from '@/components/moderation/BlockedUsersSheet';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
-import { cn } from '@/lib/utils';
 import { UserAvatar } from '@/components/ui/user-avatar';
 import { formatOrigin } from '@/lib/origin';
 import { pageTitle } from '@/lib/brand';
 import { VerificationCard } from '@/components/profile/VerificationCard';
 import { VerifyInstitutionSheet } from '@/components/profile/VerifyInstitutionSheet';
 import { formatAffiliation, type VerificationState } from '@/lib/institutions';
-import { BADGE_TARGETS, badgeProgress, type MyParticipation } from '@/lib/badges';
+import { badgeProgress, type MyParticipation } from '@/lib/badges';
+import { BadgeGrid } from '@/components/profile/BadgeGrid';
 import type { BadgeType } from '@/lib/categoryIcons';
 
 export default function Profile() {
@@ -42,7 +40,8 @@ export default function Profile() {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const [stats, setStats] = useState({ attended: 0, created: 0 });
-  const [badges, setBadges] = useState<string[]>([]);
+  /** Insignias conseguidas: tipo → cuándo. */
+  const [badges, setBadges] = useState<Record<string, string>>({});
   const [progress, setProgress] = useState<Record<BadgeType, number> | null>(null);
   const [pointsHistory, setPointsHistory] = useState<{ id: string; points: number; reason: string; created_at: string }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,10 +101,10 @@ export default function Profile() {
 
         const { data: badgeData } = await supabase
           .from('badges')
-          .select('badge_type')
+          .select('badge_type, earned_at')
           .eq('user_id', profile.id);
         if (cancelada) return;
-        if (badgeData) setBadges(badgeData.map((b) => b.badge_type));
+        if (badgeData) setBadges(Object.fromEntries(badgeData.map((b) => [b.badge_type, b.earned_at])));
 
         // Para decir cuánto falta en cada insignia bloqueada. Solo las filas
         // propias, que la RLS ya deja leer.
@@ -170,12 +169,6 @@ export default function Profile() {
       </div>
     );
   }
-
-  const reputationPercent = Math.min((profile.reputation / 1000) * 100, 100);
-  const rankKey =
-    profile.reputation < 250 ? 'newcomer' :
-    profile.reputation < 500 ? 'regular' :
-    profile.reputation < 750 ? 'active' : 'legend';
 
   return (
     <div className="min-h-screen pb-nav px-4 pt-safe">
@@ -299,86 +292,16 @@ export default function Profile() {
         ))}
       </div>
 
-      {/* Reputation ring */}
-      <div className="bg-card rounded-2xl p-5 shadow-soft mb-5">
-        <h3 className="text-sm font-bold text-foreground mb-3 flex items-center gap-2">
-          <Award className="w-4 h-4 text-primary" />
-          {t('profile.reputation')}
-        </h3>
-        <div className="flex items-center gap-4">
-          <div className="relative w-20 h-20">
-            <svg className="w-20 h-20 -rotate-90" viewBox="0 0 36 36">
-              <path
-                d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831a 15.9155 15.9155 0 0 1 0 -31.831"
-                fill="none"
-                stroke="hsl(var(--muted))"
-                strokeWidth="3"
-              />
-              <path
-                d="M18 2.0845a 15.9155 15.9155 0 0 1 0 31.831a 15.9155 15.9155 0 0 1 0 -31.831"
-                fill="none"
-                stroke="hsl(var(--primary))"
-                strokeWidth="3"
-                strokeDasharray={`${reputationPercent}, 100`}
-                strokeLinecap="round"
-              />
-            </svg>
-            <span className="absolute inset-0 flex items-center justify-center text-sm font-extrabold text-foreground">
-              {Math.round(profile.reputation)}
-            </span>
-          </div>
-          <div>
-            <p className="text-sm text-muted-foreground">{t(`profile.rank.${rankKey}`)}</p>
-            <p className="text-xs text-muted-foreground">{Math.round(1000 - profile.reputation)} {t('profile.ptsToNext')}</p>
-          </div>
-        </div>
-      </div>
+      {/* Aquí iba un anillo de «Reputación» con niveles. Era una segunda
+          cifra al lado de los puntos, que casi nunca se movía (solo sube si
+          alguien se une a TU evento o haces check-in), y competía con la que
+          sí se ve subir y por la que ordena el Top. En la interfaz queda una
+          sola moneda: los puntos. La columna sigue en la base. */}
 
       {/* Badges */}
       <div className="bg-card rounded-2xl p-5 shadow-soft">
         <h3 className="text-sm font-bold text-foreground mb-3">{t('profile.badges')}</h3>
-        <div className="grid grid-cols-2 gap-3">
-          {BADGE_DEFINITIONS.map(badge => {
-            const earned = badges.includes(badge.type);
-            const target = BADGE_TARGETS[badge.type];
-            const current = earned ? target : progress?.[badge.type] ?? 0;
-            const Icon = BADGE_ICONS[badge.type];
-            return (
-              <div
-                key={badge.type}
-                className={cn(
-                  'flex flex-col gap-1.5 p-3 rounded-xl text-left',
-                  earned ? 'bg-primary/10' : 'bg-muted/50',
-                )}
-              >
-                <Icon aria-hidden="true" className={cn('w-6 h-6', earned ? 'text-primary' : 'text-muted-foreground/60')} />
-                <span className="text-xs font-bold text-foreground leading-tight">{t('badges.' + badge.type)}</span>
-                {/* Bloqueada no basta: sin decir cómo se gana, la insignia
-                    gris no invita a nada. */}
-                <span className="text-[11px] text-muted-foreground leading-snug">
-                  {earned ? t('badges.earned') : t(`badges.how.${badge.type}`, { count: target })}
-                </span>
-                {!earned && progress && (
-                  <div className="mt-auto pt-1">
-                    <div
-                      role="progressbar"
-                      aria-valuemin={0}
-                      aria-valuemax={target}
-                      aria-valuenow={current}
-                      aria-label={t('badges.progress', { current, target })}
-                      className="h-1.5 rounded-full bg-muted overflow-hidden"
-                    >
-                      <div className="h-full bg-primary rounded-full" style={{ width: `${(current / target) * 100}%` }} />
-                    </div>
-                    <span className="block mt-1 text-[11px] font-semibold text-muted-foreground">
-                      {current}/{target}
-                    </span>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+        <BadgeGrid earned={badges} progress={progress} />
       </div>
 
       {/* Points history */}

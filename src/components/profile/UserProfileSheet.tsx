@@ -15,7 +15,7 @@ import { formatAffiliation, institutionTypeLabel } from '@/lib/institutions';
  *
  * Lee de `public_profiles`, la vista que deja fuera el email. No hace
  * falta ningún permiso nuevo: ya expone foto, carrera, semestre,
- * intereses, idiomas y reputación.
+ * intereses, idiomas y puntos.
  */
 
 type PublicProfile = {
@@ -28,7 +28,6 @@ type PublicProfile = {
   interests: string[] | null;
   languages: string[] | null;
   points: number | null;
-  reputation: number | null;
   origin: string | null;
   institution_verified: boolean | null;
   university_name: string | null;
@@ -55,7 +54,7 @@ export function UserProfileSheet({ userId, footer, onClose }: Props) {
     (async () => {
       const { data, error } = await supabase
         .from('public_profiles')
-        .select('id, name, avatar_url, major, semester, residence_type, interests, languages, points, reputation, origin, institution_verified, university_name, campus_name, institution_type')
+        .select('id, name, avatar_url, major, semester, residence_type, interests, languages, points, origin, institution_verified, university_name, campus_name, institution_type')
         .eq('id', userId)
         .maybeSingle();
 
@@ -135,15 +134,12 @@ export function UserProfileSheet({ userId, footer, onClose }: Props) {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-card rounded-2xl p-4 shadow-soft text-center">
-                <p className="text-xl font-extrabold text-foreground">{profile.points ?? 0}</p>
-                <p className="text-xs text-muted-foreground font-semibold">{t('profile.points')}</p>
-              </div>
-              <div className="bg-card rounded-2xl p-4 shadow-soft text-center">
-                <p className="text-xl font-extrabold text-foreground">{profile.reputation ?? 0}</p>
-                <p className="text-xs text-muted-foreground font-semibold">{t('profile.reputation')}</p>
-              </div>
+            {/* Solo los puntos, que es por lo que ordena el Top. La
+                «reputación» que iba al lado era una segunda cifra que nadie
+                sabía leer. */}
+            <div className="bg-card rounded-2xl p-4 shadow-soft text-center">
+              <p className="text-xl font-extrabold text-foreground">{profile.points ?? 0}</p>
+              <p className="text-xs text-muted-foreground font-semibold">{t('profile.points')}</p>
             </div>
 
             {profile.interests && profile.interests.length > 0 && (
