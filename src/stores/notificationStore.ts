@@ -25,6 +25,13 @@ interface NotificationState extends NotificationCounts {
    */
   refresh: () => void | Promise<void>;
   setRefresh: (fn: () => void | Promise<void>) => void;
+  /**
+   * Adelanta el contador de la campana sin esperar al servidor. Leer o
+   * archivar un aviso son dos viajes (la RPC y luego el recuento), y
+   * mientras tanto la campana seguía enseñando el número de antes. Lo
+   * definitivo sigue viniendo de `refresh`.
+   */
+  bumpNotificationsUnread: (delta: number) => void;
 }
 
 const EMPTY: NotificationCounts = { joinRequests: 0, friendRequests: 0, unreadMessages: 0, approvals: 0, groupInvites: 0, eventChatUnread: 0, notificationsUnread: 0 };
@@ -35,4 +42,6 @@ export const useNotificationStore = create<NotificationState>((set) => ({
   reset: () => set(EMPTY),
   refresh: () => {},
   setRefresh: (refresh) => set({ refresh }),
+  bumpNotificationsUnread: (delta) =>
+    set((s) => ({ notificationsUnread: Math.max(0, s.notificationsUnread + delta) })),
 }));

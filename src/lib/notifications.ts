@@ -96,12 +96,36 @@ export function inboxSection(iso: string, now: Date = new Date()): 'today' | 'ye
   return 'older';
 }
 
+/** El orden de la bandeja: última actividad primero y, a igual fecha, id mayor primero. */
+function inboxOrder(a: InboxItem, b: InboxItem): number {
+  return a.updated_at === b.updated_at ? (a.id < b.id ? 1 : -1) : a.updated_at < b.updated_at ? 1 : -1;
+}
+
 /** Mete o reemplaza por id y ordena por la última actividad (los agrupados suben). */
 export function upsertInbox(list: InboxItem[], incoming: InboxItem[]): InboxItem[] {
   if (incoming.length === 0) return list;
   const byId = new Map(list.map((n) => [n.id, n]));
   for (const n of incoming) byId.set(n.id, { ...byId.get(n.id), ...n });
-  return [...byId.values()].sort((a, b) =>
-    a.updated_at === b.updated_at ? (a.id < b.id ? 1 : -1) : a.updated_at < b.updated_at ? 1 : -1,
-  );
+  return [...byId.values()].sort(inboxOrder);
+}
+
+/**
+ * Pone la lista de acuerdo con una primera página recién pedida.
+ *
+ * `upsertInbox` solo sabe añadir: un aviso que el servidor ya no tiene
+ * —archivado en otro teléfono, purgado, de alguien a quien acabas de
+ * bloquear— se quedaba pintado hasta salir de la pantalla. La primera
+ * página es la verdad de su tramo: lo que caiga dentro y no venga en ella,
+ * ya no existe. Lo de más abajo (páginas que se cargaron después) se
+ * conserva, porque de eso la primera página no dice nada.
+ *
+ * Una página incompleta es la bandeja entera: no hay "más abajo".
+ */
+export function reconcileInbox(list: InboxItem[], firstPage: InboxItem[], pageSize: number): InboxItem[] {
+  const page = [...firstPage].sort(inboxOrder);
+  if (page.length < pageSize) return page;
+  const last = page[page.length - 1];
+  const fresh = new Set(page.map((n) => n.id));
+  const older = list.filter((n) => !fresh.has(n.id) && inboxOrder(last, n) < 0);
+  return [...page, ...older.sort(inboxOrder)];
 }
