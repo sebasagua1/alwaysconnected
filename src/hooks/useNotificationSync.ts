@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuthStore } from '@/stores/authStore';
 import { useNotificationStore } from '@/stores/notificationStore';
@@ -14,12 +14,20 @@ export function useNotificationSync() {
   const reset = useNotificationStore((s) => s.reset);
   const setRefresh = useNotificationStore((s) => s.setRefresh);
 
+  // Número de la última petición lanzada. Se piden recuentos desde varios
+  // sitios a la vez (tiempo real, volver a la app, salir de un chat) y las
+  // respuestas no llegan en orden: sin esto, una vieja podía pisar a la
+  // nueva y devolver al badge un aviso que ya estaba leído.
+  const seqRef = useRef(0);
+
   const refresh = useCallback(async () => {
     if (!user) return;
+    const seq = ++seqRef.current;
     // La RPC devuelve una sola fila con los tres números; contarlos desde el
     // cliente exigiría leer filas que la RLS no deja ver (las solicitudes de
     // mis eventos incluyen a gente cuyo perfil no puedo listar).
     const { data, error } = await supabase.rpc('notification_counts');
+    if (seq !== seqRef.current) return;
     if (error) return;
     const row = Array.isArray(data) ? data[0] : data;
     if (!row) return;
@@ -40,6 +48,8 @@ export function useNotificationSync() {
 
   useEffect(() => {
     if (!user) {
+      // Lo que quedara en vuelo de la sesión anterior ya no cuenta.
+      seqRef.current++;
       reset();
       return;
     }

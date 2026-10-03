@@ -116,6 +116,14 @@ export default function Friends() {
   const [myRank, setMyRank] = useState<number | null>(null);
   const [leaderOffset, setLeaderOffset] = useState(0);
   const [leaderHasMore, setLeaderHasMore] = useState(true);
+  // La página siguiente se carga aparte de la primera: si «Cargar más»
+  // encendía leaderLoading, las filas ya pintadas se cambiaban por cinco
+  // esqueletos, la página se acortaba y el scroll se iba arriba del todo.
+  const [leaderLoadingMore, setLeaderLoadingMore] = useState(false);
+  // Qué petición del Top es la vigente. Al cambiar de Campus a Amigos con la
+  // red lenta, la respuesta vieja llegaba después y pisaba (o se anexaba a)
+  // la lista del ámbito nuevo.
+  const leaderGenRef = useRef(0);
 
   // Friends pagination
   const [friendsPage, setFriendsPage] = useState(0);
@@ -249,7 +257,13 @@ export default function Friends() {
   );
 
   const fetchLeaderboard = useCallback(async (offset = 0) => {
-    setLeaderLoading(true);
+    const more = offset > 0;
+    // Una carga desde cero abre generación nueva y deja atrás lo que hubiera
+    // en vuelo; la página siguiente pertenece a la generación en curso.
+    const gen = more ? leaderGenRef.current : ++leaderGenRef.current;
+    const stale = () => gen !== leaderGenRef.current;
+    if (more) setLeaderLoadingMore(true);
+    else { setLeaderLoading(true); setLeaderLoadingMore(false); }
     try {
       if (leaderScope === 'friends') {
         // Entre amigos: la lista es corta y cabe de una vez. Tope de 150
@@ -261,6 +275,7 @@ export default function Friends() {
           .eq('status', 'accepted')
           .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`)
           .limit(150);
+        if (stale()) return;
         if (fErr) {
           toast({ title: i18n.t('errors.leaderboardLoad'), variant: 'destructive' });
           return;
@@ -272,6 +287,7 @@ export default function Friends() {
           .in('id', ids)
           .order('points', { ascending: false })
           .order('id', { ascending: true });
+        if (stale()) return;
         if (error) {
           toast({ title: i18n.t('errors.leaderboardLoad'), variant: 'destructive' });
           return;
@@ -290,6 +306,7 @@ export default function Friends() {
           .from('public_profiles')
           .select('id', { count: 'exact', head: true })
           .gt('points', profile.points ?? 0);
+        if (stale()) return;
         setMyRank(typeof count === 'number' ? count + 1 : null);
       }
 
@@ -307,18 +324,30 @@ export default function Friends() {
         // intercambiarse entre páginas y salir dos veces, o ninguna.
         .order('id', { ascending: true })
         .range(offset, offset + LEADER_PAGE_SIZE - 1);
+      if (stale()) return;
       if (error) {
         toast({ title: i18n.t('errors.leaderboardLoad'), variant: 'destructive' });
         return;
       }
       if (data) {
-        if (offset === 0) setLeaderboard(data as LeaderEntry[]);
-        else setLeaderboard((prev) => [...prev, ...(data as LeaderEntry[])]);
+        if (!more) setLeaderboard(data as LeaderEntry[]);
+        else {
+          // Si alguien cambió de puesto entre dos páginas puede volver a
+          // salir: se descarta para no repetir fila (ni clave de React).
+          setLeaderboard((prev) => {
+            const seen = new Set(prev.map((e) => e.id));
+            return [...prev, ...(data as LeaderEntry[]).filter((e) => !seen.has(e.id))];
+          });
+        }
         setLeaderHasMore(data.length === LEADER_PAGE_SIZE);
         setLeaderOffset(offset + data.length);
       }
     } finally {
-      setLeaderLoading(false);
+      // Una petición superada no toca los indicadores: son de la nueva.
+      if (!stale()) {
+        if (more) setLeaderLoadingMore(false);
+        else setLeaderLoading(false);
+      }
     }
   }, [toast, leaderScope, user, profile]);
 
@@ -869,11 +898,15 @@ export default function Friends() {
             ))
           )}
           {!leaderLoading && leaderHasMore && (
+            // El botón no se desmonta mientras carga: conserva el foco y las
+            // filas nuevas entran justo encima de él, sin mover lo ya leído.
             <button
               onClick={() => fetchLeaderboard(leaderOffset)}
-              className="w-full min-h-[44px] text-sm font-semibold text-primary"
+              disabled={leaderLoadingMore}
+              aria-busy={leaderLoadingMore}
+              className="w-full min-h-[44px] text-sm font-semibold text-primary disabled:opacity-60"
             >
-              {t('common.loadMore')}
+              {leaderLoadingMore ? t('common.loading') : t('common.loadMore')}
             </button>
           )}
         </div>

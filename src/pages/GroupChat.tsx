@@ -32,6 +32,7 @@ import { ModerationMenu } from '@/components/moderation/ModerationMenu';
 import { MessageActionsMenu } from '@/components/chat/MessageActionsMenu';
 import { applyMessageChange, canSaveEdit, type MessageChange } from '@/lib/chat';
 import { cn } from '@/lib/utils';
+import { useKeyboardInset } from '@/hooks/useKeyboardInset';
 import { formatTime } from '@/lib/datetime';
 
 /** Mensajes por tanda. Suficiente para llenar la pantalla y poco que pintar. */
@@ -72,7 +73,20 @@ export default function GroupChat() {
   /** Lo escrito antes de empezar a editar, para devolverlo al cancelar. */
   const draftBeforeEditRef = useRef('');
   const inputRef = useRef<HTMLInputElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  // Lo que de verdad se ve con el teclado abierto (ver useKeyboardInset): en
+  // el WKWebView el teclado no encoge 100dvh, así que iOS desplazaba la
+  // página entera para enseñar el campo y la cabecera se salía por arriba.
+  const visible = useKeyboardInset();
+  const keyboard = visible.keyboard;
+  // Se mueve la lista, no la página: scrollIntoView arrastraba también el
+  // documento y, con el teclado abierto, se llevaba la cabecera.
+  const scrollToBottom = (smooth: boolean) => {
+    const el = listRef.current;
+    if (!el) return;
+    if (smooth && typeof el.scrollTo === 'function') el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    else el.scrollTop = el.scrollHeight;
+  };
   // Si la vista está pegada al final. Empieza en true porque el chat abre
   // abajo. Se actualiza al hacer scroll y lo consulta el efecto que decide si
   // bajar cuando entra un mensaje nuevo. Es un ref y no un estado a propósito:
@@ -232,8 +246,13 @@ export default function GroupChat() {
     const esMio = ultimo?.sender_id === user?.id;
     if (!esLaPrimera && !esMio && !atBottomRef.current) return;
 
-    bottomRef.current?.scrollIntoView({ behavior: esLaPrimera ? 'auto' : 'smooth' });
+    scrollToBottom(!esLaPrimera);
   }, [messages, user?.id]);
+
+  // Con el teclado abierto, que lo último siga a la vista.
+  useEffect(() => {
+    if (keyboard > 0 && atBottomRef.current) requestAnimationFrame(() => scrollToBottom(false));
+  }, [keyboard]);
 
   // Estar en el chat cuenta como haberlo leído, también si llega algo mientras
   // lo tienes abierto. Marcar leído es un UPDATE sobre group_members, que no
@@ -247,7 +266,13 @@ export default function GroupChat() {
     if (!groupId || !newestId) return;
     let cancelled = false;
     (async () => {
-      await supabase.rpc('mark_group_read', { _group_id: groupId });
+      const { error } = await supabase.rpc('mark_group_read', { _group_id: groupId });
+      // Si no se pudo marcar, pedir el recuento solo devolvería el número de
+      // antes: se deja como está y se reintenta con el siguiente mensaje.
+      if (error) {
+        console.error('[GroupChat] mark_group_read', error.message);
+        return;
+      }
       if (!cancelled) useNotificationStore.getState().refresh();
     })();
     return () => { cancelled = true; };
@@ -503,11 +528,19 @@ export default function GroupChat() {
     setSending(false);
   };
 
+  // Con el teclado abierto el chat se pega a lo que se ve (fijo, del alto del
+  // visualViewport), igual que EventChat; cerrado, ocupa la pantalla entera.
+  const keyboardOpen = keyboard > 0 && visible.height > 0;
+  const shellClass = keyboardOpen
+    ? 'fixed inset-x-0 mx-auto sm:max-w-[430px] z-[55] flex flex-col overflow-hidden bg-background'
+    : 'flex flex-col h-screen-full overflow-hidden bg-background';
+  const shellStyle = keyboardOpen ? { top: visible.top, height: visible.height } : undefined;
+
   return (
     // Sin barra de pestañas en las conversaciones (ver BottomNav): el chat
     // ocupa la pantalla entera y el campo de escribir respeta el indicador de
     // inicio.
-    <div className="flex flex-col h-screen-full overflow-hidden bg-background">
+    <div className={shellClass} style={shellStyle}>
       {/* Header */}
       <div className="flex items-center gap-3 px-4 pb-3 bg-card border-b border-border shrink-0 pt-[calc(1rem+env(safe-area-inset-top,0px))]">
         <button
@@ -625,6 +658,7 @@ export default function GroupChat() {
         aria-live="polite"
         aria-relevant="additions"
         aria-label={t('groups.messages')}
+        ref={listRef}
         onScroll={(e) => {
           const el = e.currentTarget;
           // 64px de margen: pegado al final del todo es raro que se dé al
@@ -724,12 +758,11 @@ export default function GroupChat() {
             </div>
           );
         })}
-        <div ref={bottomRef} />
       </div>
 
       {/* Input. Al editar se reutiliza el mismo campo, con una franja encima
           que dice qué se está editando y cómo salir. */}
-      <div className="bg-background border-t border-border shrink-0 safe-bottom">
+      <div className={cn('bg-background border-t border-border shrink-0', !keyboardOpen && 'safe-bottom')}>
         {editing && (
           <div className="flex items-center gap-2 pl-4 pr-2 pt-2 text-xs font-semibold text-primary">
             <Pencil className="w-3.5 h-3.5 shrink-0" />

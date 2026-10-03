@@ -21,6 +21,31 @@ const tabs = [
   { path: '/profile', icon: UserCircle, key: 'profile' as const },
 ];
 
+/**
+ * El globo rojo de una pestaña. Solo vuelve a animarse cuando la cuenta SUBE
+ * (llega algo nuevo): antes se remontaba con cualquier cambio de número, y
+ * leer un chat —de 3 a 2— hacía saltar el badge como si hubiera entrado un
+ * aviso.
+ */
+function NavBadge({ count, label }: { count: number; label: string }) {
+  const prevRef = useRef(count);
+  const bumpRef = useRef(0);
+  if (count > prevRef.current) bumpRef.current += 1;
+  prevRef.current = count;
+  if (count <= 0) return null;
+  return (
+    <span
+      aria-label={label}
+      // La key cambia solo al subir: React monta un span nuevo y la
+      // animación de entrada se repite.
+      key={bumpRef.current}
+      className="absolute -top-1.5 -right-2 min-w-[20px] h-5 px-1 rounded-full bg-destructive text-destructive-foreground text-xs font-bold flex items-center justify-center animate-scale-in"
+    >
+      {count > 9 ? '9+' : count}
+    </span>
+  );
+}
+
 export function BottomNav() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -159,18 +184,7 @@ export function BottomNav() {
                   )}
                   strokeWidth={active ? 2.5 : 1.8}
                 />
-                {count > 0 && (
-                  <span
-                    aria-label={t('notifications.pending', { count })}
-                    // key con la cuenta: al cambiar el número React monta un
-                    // span nuevo y la animación se repite. Sin esto solo
-                    // entraría la primera vez y pasar de 1 a 2 sería mudo.
-                    key={count}
-                    className="absolute -top-1.5 -right-2 min-w-[20px] h-5 px-1 rounded-full bg-destructive text-destructive-foreground text-xs font-bold flex items-center justify-center animate-scale-in"
-                  >
-                    {count > 9 ? '9+' : count}
-                  </span>
-                )}
+                <NavBadge count={count} label={t('notifications.pending', { count })} />
               </span>
               <span className="text-xs font-semibold">{t(`bottomNav.${key}`)}</span>
             </button>
