@@ -376,7 +376,10 @@ export default function Notifications() {
         </button>
       </div>
 
-      <div className="flex items-center gap-2 mb-4">
+      {/* flex-wrap: con la letra del sistema grande las dos pestañas y
+          «Marcar todo leído» no caben en una fila, y el botón se salía de la
+          pantalla. Ahora baja a la línea siguiente. */}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
         {(['unread', 'history'] as const).map((f) => (
           <button
             key={f}
