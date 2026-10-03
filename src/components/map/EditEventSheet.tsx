@@ -13,7 +13,9 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useSheetDrag } from '@/hooks/useSheetDrag';
+import { useKeyboardFrame } from '@/hooks/useKeyboardFrame';
 import { haptic } from '@/lib/haptics';
+import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -71,6 +73,7 @@ export function EditEventSheet({ event, onClose, onSaved }: Props) {
       return false;
     },
   });
+  const { keyboardOpen, frameStyle, sheetStyle } = useKeyboardFrame(scrollRef);
 
   const buildDatetime = (date: Date, time: string): Date => {
     const [h, m] = time.split(':').map(Number);
@@ -124,13 +127,17 @@ export function EditEventSheet({ event, onClose, onSaved }: Props) {
     // z por encima de BottomNav (z-50): el pie de este sheet es sticky y se
     // queda justo en la franja de la barra, que al pintarse después ganaba el
     // empate de z-index y tapaba el botón de guardar.
-    <div className="fixed inset-0 z-[60] bg-scrim animate-fade-in" onClick={requestClose}>
+    // Con el teclado abierto, sobre lo que se ve (ver useKeyboardFrame).
+    <div className="fixed inset-0 z-[60] bg-scrim animate-fade-in" style={frameStyle} onClick={requestClose}>
       <div
         ref={sheetRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="edit-event-title"
         className="absolute bottom-0 left-0 right-0 bg-card rounded-t-3xl shadow-lifted animate-slide-up max-h-[88dvh] flex flex-col mx-auto sm:max-w-[430px]"
+        // El 88dvh mide la pantalla entera: con el teclado abierto la hoja
+        // ocupa justo lo que se ve (ver useKeyboardFrame).
+        style={sheetStyle}
         onClick={e => e.stopPropagation()}
       >
         <div {...handleProps} className="shrink-0 px-5 pt-1 pb-3 border-b border-border/60">
@@ -237,7 +244,13 @@ export function EditEventSheet({ event, onClose, onSaved }: Props) {
         </div>
 
         {/* Pie fijo, fuera del scroll */}
-        <div className="shrink-0 bg-card border-t border-border px-5 pt-4 flex gap-3 pb-[calc(1rem+env(safe-area-inset-bottom,0px))]">
+        <div
+          className={cn(
+            'shrink-0 bg-card border-t border-border px-5 pt-4 flex gap-3',
+            // Con el teclado, el hueco del indicador de inicio ya lo tapa él.
+            keyboardOpen ? 'pb-4' : 'pb-[calc(1rem+env(safe-area-inset-bottom,0px))]',
+          )}
+        >
           <Button variant="outline" onClick={requestClose} className="h-12 rounded-xl px-6">
             {t('common.cancel')}
           </Button>
