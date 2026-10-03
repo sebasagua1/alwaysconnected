@@ -252,7 +252,7 @@ export default function FindFriends() {
 
   const relationButton = (r: Row) => {
     const p = actions.withOverride({ id: r.id, relation: r.relation === 'blocked' ? 'none' : r.relation, friendship_id: r.friendship_id });
-    const base = 'h-11 shrink-0 rounded-full px-3.5 text-[13px] font-semibold';
+    const base = 'h-11 shrink-0 rounded-full px-3.5 text-[0.8125rem] font-semibold';
     if (r.relation === 'blocked') {
       return <span className="text-xs font-semibold text-muted-foreground px-2">{t('findFriends.blocked')}</span>;
     }

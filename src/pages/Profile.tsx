@@ -291,7 +291,10 @@ export default function Profile() {
           { key: 'created', value: stats.created, icon: Star },
           { key: 'points', value: profile.points, icon: TrendingUp },
         ].map(stat => (
-          <div key={stat.key} className="bg-card rounded-2xl p-4 shadow-soft text-center">
+          // px-2 y no p-4: con la letra grande «Asistidos» no cabía en un
+          // tercio de pantalla y se salía de su tarjeta. Va centrado, así
+          // que a tamaño normal se ve igual.
+          <div key={stat.key} className="bg-card rounded-2xl px-2 py-4 shadow-soft text-center">
             <stat.icon className="w-5 h-5 text-primary mx-auto mb-1" />
             <p className="text-xl font-extrabold text-foreground">{stat.value}</p>
             <p className="text-xs text-muted-foreground font-semibold">{t(`profile.${stat.key}`)}</p>

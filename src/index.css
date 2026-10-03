@@ -513,6 +513,15 @@
 ::view-transition-new(root) {
   animation: vt-tab-in 300ms cubic-bezier(0.45, 0, 0.55, 1) both;
 }
+/* Lo que no puede crecer con el refuerzo de texto de Dynamic Type (ver
+   lib/dynamicType.ts): se queda en la escala de la interfaz. La barra de
+   pestañas son cuatro etiquetas en un ancho fijo; con la letra un 25 % más
+   grande «Mis eventos» se monta sobre sus vecinas. */
+.dt-fixed,
+.vt-bottom-nav {
+  -webkit-text-size-adjust: 100%;
+}
+
 .vt-bottom-nav {
   view-transition-name: bottom-nav;
 }

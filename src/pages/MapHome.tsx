@@ -1197,7 +1197,7 @@ export default function MapHome() {
             >
               <SlidersHorizontal className="w-4 h-4" />
               {activeFilterCount > 0 && (
-                <span aria-hidden="true" className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full bg-background text-primary text-[11px] font-bold flex items-center justify-center border border-primary">
+                <span aria-hidden="true" className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full bg-background text-primary text-[0.6875rem] font-bold flex items-center justify-center border border-primary">
                   {activeFilterCount}
                 </span>
               )}
@@ -1340,13 +1340,13 @@ export default function MapHome() {
             <div className="mt-3 flex gap-2">
               <button
                 onClick={snoozeLocationCard}
-                className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-muted-foreground"
+                className="min-h-[44px] px-4 py-1.5 rounded-xl text-sm font-semibold text-muted-foreground"
               >
                 {t('map.locCardLater')}
               </button>
               <button
                 onClick={() => { followUserRef.current = true; setLocConsent('on'); }}
-                className="flex-1 min-h-[44px] px-4 rounded-xl bg-primary text-primary-foreground text-sm font-bold"
+                className="flex-1 min-h-[44px] px-4 py-1.5 rounded-xl bg-primary text-primary-foreground text-sm font-bold"
               >
                 {t('map.locCardEnable')}
               </button>

@@ -775,7 +775,7 @@ export default function EventChat() {
                 <li key={msg.id} className="list-none">
                   {showDay && (
                     <div className="flex justify-center my-3" role="separator">
-                      <span className="px-3 py-1 rounded-full bg-muted text-[11px] font-semibold text-muted-foreground">
+                      <span className="px-3 py-1 rounded-full bg-muted text-[0.6875rem] font-semibold text-muted-foreground">
                         {formatDay(msg.created_at)}
                       </span>
                     </div>
@@ -783,7 +783,7 @@ export default function EventChat() {
                   {i === unreadIndex && (
                     <div id="event-chat-unread" className="flex items-center gap-2 my-3" role="separator">
                       <span className="flex-1 h-px bg-primary/40" />
-                      <span className="text-[11px] font-bold text-primary uppercase tracking-wide">{t('eventChat.newMessages')}</span>
+                      <span className="text-[0.6875rem] font-bold text-primary uppercase tracking-wide">{t('eventChat.newMessages')}</span>
                       <span className="flex-1 h-px bg-primary/40" />
                     </div>
                   )}
@@ -835,7 +835,7 @@ export default function EventChat() {
                               )}
                             >
                               {msg.is_announcement && (
-                                <span className="flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-warning mb-0.5">
+                                <span className="flex items-center gap-1 text-[0.6875rem] font-bold uppercase tracking-wide text-warning mb-0.5">
                                   <Megaphone className="w-3 h-3" aria-hidden="true" />
                                   {t('eventChat.announcement')}
                                 </span>
@@ -883,7 +883,7 @@ export default function EventChat() {
                       </div>
 
                       {showMeta && (
-                      <span className="flex items-center gap-1 text-[11px] text-muted-foreground px-1 mt-0.5">
+                      <span className="flex items-center gap-1 text-[0.6875rem] text-muted-foreground px-1 mt-0.5">
                         {formatTime(msg.created_at)}
                         {msg.edited_at && !isDeleted && ` · ${t('chat.edited')}`}
                         {isMe && msg.state === 'sending' && (
@@ -1028,7 +1028,7 @@ export default function EventChat() {
           </Button>
         </div>
         {text.length > MESSAGE_MAX_LENGTH - 200 && (
-          <p className="px-4 -mt-2 pb-2 text-right text-[11px] text-muted-foreground" aria-live="polite">
+          <p className="px-4 -mt-2 pb-2 text-right text-[0.6875rem] text-muted-foreground" aria-live="polite">
             {text.length}/{MESSAGE_MAX_LENGTH}
           </p>
         )}

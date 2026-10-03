@@ -372,7 +372,7 @@ export default function Notifications() {
                   {unread && <span className="mt-1.5 w-2.5 h-2.5 rounded-full bg-primary shrink-0" aria-hidden="true" />}
                 </button>
                 {canActInline(n) && (
-                  <div className="flex gap-2 pl-[3.75rem] pr-3 pb-3 -mt-1">
+                  <div className="flex flex-wrap gap-2 pl-[3.75rem] pr-3 pb-3 -mt-1">
                     <Button
                       size="sm"
                       disabled={acting === n.id}

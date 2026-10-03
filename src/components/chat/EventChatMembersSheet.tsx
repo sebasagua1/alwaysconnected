@@ -136,7 +136,7 @@ export function EventChatMembersSheet({ open, onOpenChange, eventId, members, my
 
           {isOrganizer && removed.length > 0 && (
             <div className="mt-6">
-              <p className="text-[13px] font-semibold text-muted-foreground mb-2">{t('eventChat.removedPeople')}</p>
+              <p className="text-[0.8125rem] font-semibold text-muted-foreground mb-2">{t('eventChat.removedPeople')}</p>
               <ul className="space-y-1">
                 {removed.map((r) => (
                   <li key={r.user_id} className="flex items-center gap-3 min-h-[48px]">

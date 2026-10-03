@@ -539,8 +539,9 @@ export default function Friends() {
         </span>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-2 mb-5">
+      {/* Tabs. Con la letra grande las tres no caben en una fila: la última
+          baja en vez de salirse de la pantalla. */}
+      <div className="flex flex-wrap gap-2 mb-5">
         {(['friends', 'groups', 'leaderboard'] as const).map((tab) => (
           <button
             key={tab}
@@ -657,7 +658,7 @@ export default function Friends() {
                       <div className="flex items-baseline gap-2">
                         <p className="font-semibold text-sm text-foreground truncate flex-1">{f.name}</p>
                         {f.last_message_at && (
-                          <span className="text-[11px] text-muted-foreground shrink-0">{timeOf(f.last_message_at)}</span>
+                          <span className="text-[0.6875rem] text-muted-foreground shrink-0">{timeOf(f.last_message_at)}</span>
                         )}
                       </div>
                       {/* Con conversación, lo último que se dijo; sin ella, la
@@ -755,7 +756,7 @@ export default function Friends() {
                     <div className="flex items-baseline gap-2">
                       <span className="font-semibold text-sm text-foreground truncate flex-1">{g.name}</span>
                       {g.last_message_at && (
-                        <span className="text-[11px] text-muted-foreground shrink-0">{timeOf(g.last_message_at)}</span>
+                        <span className="text-[0.6875rem] text-muted-foreground shrink-0">{timeOf(g.last_message_at)}</span>
                       )}
                     </div>
                     <p className="text-xs text-muted-foreground truncate">
