@@ -1239,6 +1239,9 @@ export default function MapHome() {
       {/* List view overlay */}
       {!pickingLocation && viewMode === 'list' && (
         <div
+          // La lista no desplaza la ventana: se marca para que tocar «Mapa»
+          // estando ya aquí la suba (ver lib/tabScroll.ts).
+          data-tab-scroller
           className="absolute inset-0 z-10 bg-background overflow-y-auto px-4 pb-nav pt-[calc(8.5rem+env(safe-area-inset-top,0px))]"
           // El valor de la clase es solo el respaldo para el primer pintado,
           // antes de que la barra se haya medido.

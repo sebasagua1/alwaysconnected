@@ -37,15 +37,24 @@ export default function MyEvents() {
   const [events, setEvents] = useState<EventWithParticipation[]>([]);
   const [loading, setLoading] = useState(true);
   const [visibleCount, setVisibleCount] = useState(10);
+  /**
+   * Desde qué tarjeta se anima la entrada. 0 al cargar o cambiar de pestaña
+   * (entran todas); con «Cargar más», la primera de las nuevas: las que ya
+   * estaban a la vista no vuelven a aparecer.
+   */
+  const [revealFrom, setRevealFrom] = useState(0);
   const [selected, setSelected] = useState<EventWithParticipation | null>(null);
   const [pendingByEvent, setPendingByEvent] = useState<Record<string, number>>({});
   const [chatUnreadByEvent, setChatUnreadByEvent] = useState<Record<string, number>>({});
   const PAGE_SIZE = 10;
 
-  const fetchMyEvents = useCallback(async () => {
+  // `quiet`: releer sin cambiar las tarjetas por esqueletos. Al cerrar una
+  // ficha la lista ya está pintada; sustituirla por tres esqueletos acortaba
+  // la página y el navegador se llevaba el scroll arriba.
+  const fetchMyEvents = useCallback(async (quiet = false) => {
     if (!user) return;
     {
-      setLoading(true);
+      if (!quiet) setLoading(true);
       try {
         // Events I created — los cancelados (is_active = false) no se listan:
         // el organizador ya los dio por muertos y no deben salir en "Próximos".
@@ -135,7 +144,7 @@ export default function MyEvents() {
           useNotificationStore.getState().refresh();
         }
       } finally {
-        setLoading(false);
+        if (!quiet) setLoading(false);
       }
     }
   }, [user, t, toast]);
@@ -146,7 +155,7 @@ export default function MyEvents() {
   // solicitudes o darse de baja, y la lista se quedaría desfasada.
   const handleCloseSheet = useCallback(() => {
     setSelected(null);
-    fetchMyEvents();
+    fetchMyEvents(true);
   }, [fetchMyEvents]);
 
   const allFiltered = events.filter(e =>
@@ -163,6 +172,8 @@ export default function MyEvents() {
   // Entrada en cascada de las tarjetas. Se rehace al cambiar de pestaña y
   // cuando termina la carga; `visibleCount` entra en la lista para que las
   // tarjetas que trae "ver más" también se revelen en vez de aparecer secas.
+  // Solo se mueve lo marcado con data-reveal, y con "ver más" solo se marcan
+  // las nuevas (ver `revealFrom`).
   const listScope = useStaggerReveal<HTMLDivElement>([activeTab, loading, visibleCount]);
 
   return (
@@ -186,7 +197,7 @@ export default function MyEvents() {
           <button
             key={tab}
             aria-pressed={activeTab === tab}
-            onClick={() => { setActiveTab(tab); setVisibleCount(PAGE_SIZE); }}
+            onClick={() => { setActiveTab(tab); setVisibleCount(PAGE_SIZE); setRevealFrom(0); }}
             className={cn(
               'inline-flex items-center justify-center min-h-[44px] px-5 rounded-full text-sm font-semibold transition-all',
               activeTab === tab ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
@@ -198,7 +209,7 @@ export default function MyEvents() {
       </div>
 
       {/* Event cards */}
-      <div ref={listScope} className="space-y-3">
+      <div ref={listScope} className="space-y-3" aria-busy={loading}>
         {loading ? (
           [1, 2, 3].map(i => (
             <div key={i} className="bg-card rounded-2xl p-4 shadow-soft space-y-2">
@@ -216,7 +227,7 @@ export default function MyEvents() {
         {!loading && activeTab === 'upcoming' && justEnded.map(event => (
           <button
             key={`ended-${event.id}`}
-            data-reveal
+            data-reveal={revealFrom === 0 ? '' : undefined}
             onClick={() => setSelected(event)}
             className="w-full flex items-center gap-3 text-left rounded-2xl p-4 bg-primary/10 border border-primary/30 active:scale-[0.98] transition-transform"
           >
@@ -230,12 +241,12 @@ export default function MyEvents() {
             </span>
           </button>
         ))}
-        {!loading && filtered.map(event => {
+        {!loading && filtered.map((event, i) => {
           const cat = EVENT_CATEGORIES.find(c => c.key === event.category);
           return (
             <button
               key={event.id}
-              data-reveal
+              data-reveal={i >= revealFrom ? '' : undefined}
               onClick={() => setSelected(event)}
               className="w-full text-left bg-card rounded-2xl p-4 shadow-soft active:scale-[0.98] transition-transform"
             >
@@ -307,7 +318,7 @@ export default function MyEvents() {
         })}
         {!loading && visibleCount < allFiltered.length && (
           <button
-            onClick={() => setVisibleCount(c => c + PAGE_SIZE)}
+            onClick={() => { setRevealFrom(visibleCount); setVisibleCount(c => c + PAGE_SIZE); }}
             className="w-full min-h-[44px] text-sm font-semibold text-primary"
           >
             {t('common.loadMore')}
