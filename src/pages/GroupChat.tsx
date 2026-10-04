@@ -3,7 +3,6 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useNotificationStore } from '@/stores/notificationStore';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeft, Send, Users, UserPlus, LogOut, Check, X, Pencil } from 'lucide-react';
-import { Input } from '@/components/ui/input';
 import { UserAvatar } from '@/components/ui/user-avatar';
 import { Button } from '@/components/ui/button';
 import {
@@ -32,6 +31,10 @@ import { ModerationMenu } from '@/components/moderation/ModerationMenu';
 import { MessageActionsMenu } from '@/components/chat/MessageActionsMenu';
 import { applyMessageChange, canSaveEdit, type MessageChange } from '@/lib/chat';
 import { cn } from '@/lib/utils';
+import { useKeyboardInset } from '@/hooks/useKeyboardInset';
+import { useBottomAnchor } from '@/hooks/useBottomAnchor';
+import { useAutoGrowTextarea } from '@/hooks/useAutoGrowTextarea';
+import { MESSAGE_MAX_LENGTH } from '@/lib/eventChat';
 import { formatTime } from '@/lib/datetime';
 
 /** Mensajes por tanda. Suficiente para llenar la pantalla y poco que pintar. */
@@ -71,8 +74,27 @@ export default function GroupChat() {
   const [activeMsgId, setActiveMsgId] = useState<string | null>(null);
   /** Lo escrito antes de empezar a editar, para devolverlo al cancelar. */
   const draftBeforeEditRef = useRef('');
-  const inputRef = useRef<HTMLInputElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  // El campo crece con lo que se escribe (y al cargar un mensaje para
+  // editarlo), hasta unas pocas líneas, sin que la lista pierda su sitio.
+  useAutoGrowTextarea(inputRef, text, listRef);
+  // Lo que de verdad se ve con el teclado abierto (ver useKeyboardInset): en
+  // el WKWebView el teclado no encoge 100dvh, así que iOS desplazaba la
+  // página entera para enseñar el campo y la cabecera se salía por arriba.
+  const visible = useKeyboardInset();
+  const keyboard = visible.keyboard;
+  // Al abrir o cerrar el teclado la lista cambia de alto: lo último que se
+  // leía sigue encima de la caja de escribir.
+  useBottomAnchor(listRef);
+  // Se mueve la lista, no la página: scrollIntoView arrastraba también el
+  // documento y, con el teclado abierto, se llevaba la cabecera.
+  const scrollToBottom = (smooth: boolean) => {
+    const el = listRef.current;
+    if (!el) return;
+    if (smooth && typeof el.scrollTo === 'function') el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    else el.scrollTop = el.scrollHeight;
+  };
   // Si la vista está pegada al final. Empieza en true porque el chat abre
   // abajo. Se actualiza al hacer scroll y lo consulta el efecto que decide si
   // bajar cuando entra un mensaje nuevo. Es un ref y no un estado a propósito:
@@ -232,7 +254,7 @@ export default function GroupChat() {
     const esMio = ultimo?.sender_id === user?.id;
     if (!esLaPrimera && !esMio && !atBottomRef.current) return;
 
-    bottomRef.current?.scrollIntoView({ behavior: esLaPrimera ? 'auto' : 'smooth' });
+    scrollToBottom(!esLaPrimera);
   }, [messages, user?.id]);
 
   // Estar en el chat cuenta como haberlo leído, también si llega algo mientras
@@ -247,7 +269,13 @@ export default function GroupChat() {
     if (!groupId || !newestId) return;
     let cancelled = false;
     (async () => {
-      await supabase.rpc('mark_group_read', { _group_id: groupId });
+      const { error } = await supabase.rpc('mark_group_read', { _group_id: groupId });
+      // Si no se pudo marcar, pedir el recuento solo devolvería el número de
+      // antes: se deja como está y se reintenta con el siguiente mensaje.
+      if (error) {
+        console.error('[GroupChat] mark_group_read', error.message);
+        return;
+      }
       if (!cancelled) useNotificationStore.getState().refresh();
     })();
     return () => { cancelled = true; };
@@ -503,11 +531,19 @@ export default function GroupChat() {
     setSending(false);
   };
 
+  // Con el teclado abierto el chat se pega a lo que se ve (fijo, del alto del
+  // visualViewport), igual que EventChat; cerrado, ocupa la pantalla entera.
+  const keyboardOpen = keyboard > 0 && visible.height > 0;
+  const shellClass = keyboardOpen
+    ? 'fixed inset-x-0 mx-auto sm:max-w-[430px] z-[55] flex flex-col overflow-hidden bg-background'
+    : 'flex flex-col h-screen-full overflow-hidden bg-background';
+  const shellStyle = keyboardOpen ? { top: visible.top, height: visible.height } : undefined;
+
   return (
     // Sin barra de pestañas en las conversaciones (ver BottomNav): el chat
     // ocupa la pantalla entera y el campo de escribir respeta el indicador de
     // inicio.
-    <div className="flex flex-col h-screen-full overflow-hidden bg-background">
+    <div className={shellClass} style={shellStyle}>
       {/* Header */}
       <div className="flex items-center gap-3 px-4 pb-3 bg-card border-b border-border shrink-0 pt-[calc(1rem+env(safe-area-inset-top,0px))]">
         <button
@@ -625,6 +661,7 @@ export default function GroupChat() {
         aria-live="polite"
         aria-relevant="additions"
         aria-label={t('groups.messages')}
+        ref={listRef}
         onScroll={(e) => {
           const el = e.currentTarget;
           // 64px de margen: pegado al final del todo es raro que se dé al
@@ -724,12 +761,11 @@ export default function GroupChat() {
             </div>
           );
         })}
-        <div ref={bottomRef} />
       </div>
 
       {/* Input. Al editar se reutiliza el mismo campo, con una franja encima
           que dice qué se está editando y cómo salir. */}
-      <div className="bg-background border-t border-border shrink-0 safe-bottom">
+      <div className={cn('bg-background border-t border-border shrink-0', !keyboardOpen && 'safe-bottom')}>
         {editing && (
           <div className="flex items-center gap-2 pl-4 pr-2 pt-2 text-xs font-semibold text-primary">
             <Pencil className="w-3.5 h-3.5 shrink-0" />
@@ -743,22 +779,41 @@ export default function GroupChat() {
             </button>
           </div>
         )}
-        <div className="flex gap-2 px-4 py-3">
-          <Input
+        {/* items-end: cuando el campo crece, el botón se queda abajo, junto
+            a la última línea. */}
+        <div className="flex items-end gap-2 px-4 py-3">
+          {/* Un <textarea> y no un <input>: con una sola línea, un mensaje
+              largo se desplazaba de lado y dejaba de verse cómo empezaba.
+              Ahora parte en líneas y el campo crece hasta unas cinco; es el
+              mismo que usa el chat de las actividades. */}
+          <textarea
             ref={inputRef}
             value={text}
+            rows={1}
+            // El mismo tope que la base (messages_content_len): pasarse
+            // acababa en un envío rechazado.
+            maxLength={MESSAGE_MAX_LENGTH}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+              // isComposing: con un teclado de composición (japonés, por
+              // ejemplo) Intro confirma la palabra, no envía.
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendMessage(); }
               if (e.key === 'Escape' && editing) { e.preventDefault(); cancelEditing(); }
             }}
             placeholder={t('groups.messagePh')}
+            aria-label={t('groups.messagePh')}
             // En iOS la tecla de retorno decía "intro"; con esto dice
             // "enviar", que es lo que hace realmente al pulsarla.
             enterKeyHint="send"
-            className="h-11 rounded-xl"
+            // Nunca por debajo de 16 px, o iOS hace zoom al enfocar; por
+            // encima sigue al tamaño de letra del sistema, como hacía el
+            // campo de antes.
+            className="flex-1 min-w-0 min-h-[44px] max-h-[132px] resize-none rounded-xl border border-input bg-background px-3 py-2.5 text-[length:max(16px,1rem)] leading-snug ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <Button
+            // Sin esto, tocar el botón le quita el foco al campo y iOS
+            // cierra el teclado después de cada mensaje.
+            onMouseDown={(e) => e.preventDefault()}
             onClick={sendMessage}
             disabled={sending || (editing ? !canSaveEdit(editing.original, text) : !text.trim())}
             size="icon"
