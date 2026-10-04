@@ -24,6 +24,15 @@ export function useBottomAnchor(listRef: RefObject<HTMLElement>, ready = true) {
     let height = el.clientHeight;
     let gap = 0;
     const readGap = () => {
+      // Con un cambio de alto todavía sin atender, no se apunta nada. Los
+      // eventos de scroll se reparten ANTES que los del ResizeObserver, y lo
+      // que se mide en ese hueco ya está contaminado: al enviar un mensaje
+      // largo, el campo de escribir se encoge (la lista cambia de alto) a la
+      // vez que entra el mensaje, y la distancia que se leía era la del
+      // mensaje nuevo, aún sin enseñar. El observer la «conservaba», cortaba
+      // el desplazamiento suave hacia abajo y el mensaje recién enviado se
+      // quedaba fuera de la vista. Vale la distancia de antes del cambio.
+      if (el.clientHeight !== height) return;
       // Nunca negativa: el rebote de iOS al llegar al final pasa de largo.
       gap = Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight);
     };
