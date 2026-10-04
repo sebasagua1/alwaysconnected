@@ -21,6 +21,7 @@ import { useNotificationStore } from '@/stores/notificationStore';
 import { useToast } from '@/hooks/use-toast';
 import { useKeyboardInset } from '@/hooks/useKeyboardInset';
 import { useBottomAnchor } from '@/hooks/useBottomAnchor';
+import { useAutoGrowTextarea } from '@/hooks/useAutoGrowTextarea';
 import { rpcMessage } from '@/lib/rpcErrors';
 import { canSaveEdit } from '@/lib/chat';
 import {
@@ -416,13 +417,7 @@ export default function EventChat() {
 
   // ------------------------------------------------------------ escribir
 
-  const autoGrow = () => {
-    const el = inputRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 132)}px`;
-  };
-  useLayoutEffect(autoGrow, [text]);
+  useAutoGrowTextarea(inputRef, text, listRef);
 
   const onTextChange = (value: string, caret: number) => {
     setText(value.slice(0, MESSAGE_MAX_LENGTH));
@@ -1021,6 +1016,9 @@ export default function EventChat() {
             className="flex-1 min-h-[44px] max-h-[132px] resize-none rounded-xl border border-input bg-background px-3 py-2.5 text-[16px] leading-snug ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <Button
+            // Sin esto, tocar el botón le quita el foco al campo y iOS
+            // cierra el teclado después de cada mensaje.
+            onMouseDown={(e) => e.preventDefault()}
             onClick={send}
             disabled={!editable}
             size="icon"

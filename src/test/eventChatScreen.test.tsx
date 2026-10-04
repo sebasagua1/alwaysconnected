@@ -119,6 +119,15 @@ const escribirYEnviar = (texto: string) => {
 };
 
 describe('EventChat', () => {
+  it('tocar enviar no le quita el foco al campo: el teclado se queda abierto', async () => {
+    montar();
+    await screen.findByText('texto m1');
+    fireEvent.change(screen.getByLabelText('Mensaje para el grupo'), { target: { value: 'hola' } });
+    // fireEvent devuelve false cuando el manejador llamó a preventDefault,
+    // que es lo que evita que el foco salte al botón.
+    expect(fireEvent.mouseDown(screen.getByRole('button', { name: 'Enviar' }))).toBe(false);
+  });
+
   it('carga el chat con nombre del remitente y la raya de nuevos', async () => {
     montar();
     expect(await screen.findByText('texto m1')).toBeInTheDocument();

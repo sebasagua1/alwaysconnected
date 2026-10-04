@@ -3,7 +3,6 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useNotificationStore } from '@/stores/notificationStore';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeft, Send, Users, UserPlus, LogOut, Check, X, Pencil } from 'lucide-react';
-import { Input } from '@/components/ui/input';
 import { UserAvatar } from '@/components/ui/user-avatar';
 import { Button } from '@/components/ui/button';
 import {
@@ -34,6 +33,8 @@ import { applyMessageChange, canSaveEdit, type MessageChange } from '@/lib/chat'
 import { cn } from '@/lib/utils';
 import { useKeyboardInset } from '@/hooks/useKeyboardInset';
 import { useBottomAnchor } from '@/hooks/useBottomAnchor';
+import { useAutoGrowTextarea } from '@/hooks/useAutoGrowTextarea';
+import { MESSAGE_MAX_LENGTH } from '@/lib/eventChat';
 import { formatTime } from '@/lib/datetime';
 
 /** Mensajes por tanda. Suficiente para llenar la pantalla y poco que pintar. */
@@ -73,8 +74,11 @@ export default function GroupChat() {
   const [activeMsgId, setActiveMsgId] = useState<string | null>(null);
   /** Lo escrito antes de empezar a editar, para devolverlo al cancelar. */
   const draftBeforeEditRef = useRef('');
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  // El campo crece con lo que se escribe (y al cargar un mensaje para
+  // editarlo), hasta unas pocas líneas, sin que la lista pierda su sitio.
+  useAutoGrowTextarea(inputRef, text, listRef);
   // Lo que de verdad se ve con el teclado abierto (ver useKeyboardInset): en
   // el WKWebView el teclado no encoge 100dvh, así que iOS desplazaba la
   // página entera para enseñar el campo y la cabecera se salía por arriba.
@@ -775,22 +779,41 @@ export default function GroupChat() {
             </button>
           </div>
         )}
-        <div className="flex gap-2 px-4 py-3">
-          <Input
+        {/* items-end: cuando el campo crece, el botón se queda abajo, junto
+            a la última línea. */}
+        <div className="flex items-end gap-2 px-4 py-3">
+          {/* Un <textarea> y no un <input>: con una sola línea, un mensaje
+              largo se desplazaba de lado y dejaba de verse cómo empezaba.
+              Ahora parte en líneas y el campo crece hasta unas cinco; es el
+              mismo que usa el chat de las actividades. */}
+          <textarea
             ref={inputRef}
             value={text}
+            rows={1}
+            // El mismo tope que la base (messages_content_len): pasarse
+            // acababa en un envío rechazado.
+            maxLength={MESSAGE_MAX_LENGTH}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+              // isComposing: con un teclado de composición (japonés, por
+              // ejemplo) Intro confirma la palabra, no envía.
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendMessage(); }
               if (e.key === 'Escape' && editing) { e.preventDefault(); cancelEditing(); }
             }}
             placeholder={t('groups.messagePh')}
+            aria-label={t('groups.messagePh')}
             // En iOS la tecla de retorno decía "intro"; con esto dice
             // "enviar", que es lo que hace realmente al pulsarla.
             enterKeyHint="send"
-            className="h-11 rounded-xl"
+            // Nunca por debajo de 16 px, o iOS hace zoom al enfocar; por
+            // encima sigue al tamaño de letra del sistema, como hacía el
+            // campo de antes.
+            className="flex-1 min-w-0 min-h-[44px] max-h-[132px] resize-none rounded-xl border border-input bg-background px-3 py-2.5 text-[length:max(16px,1rem)] leading-snug ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <Button
+            // Sin esto, tocar el botón le quita el foco al campo y iOS
+            // cierra el teclado después de cada mensaje.
+            onMouseDown={(e) => e.preventDefault()}
             onClick={sendMessage}
             disabled={sending || (editing ? !canSaveEdit(editing.original, text) : !text.trim())}
             size="icon"
